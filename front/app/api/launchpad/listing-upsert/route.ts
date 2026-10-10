@@ -17,7 +17,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
-import { requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
+import { requireArea, requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
 import {
   BASE58_RE,
   UUID_RE,
@@ -93,6 +93,8 @@ export async function POST(request: Request) {
     if(!sale) throw new SiwsError(404,"A verified on-chain sale is required");
     const issuer = sale.authority;
     if(!admin && issuer !== wallet) throw new SiwsError(403,"Only the platform admin or sale issuer may edit this listing");
+    // KYC-only mode (lib/features.ts): an issuer publishing or editing a listing is a primary-sales entry; taking it down stays open.
+    if (!admin && cleaned.is_published !== false) requireArea("primarySales");
     // Startup raises off on this network (lib/features.ts): a Startup sale's
     // listing may still be taken DOWN (is_published=false — winding down a
     // sale opened while the flag was on), but not published or edited live.

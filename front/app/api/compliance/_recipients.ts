@@ -5,6 +5,7 @@
 import { isAddress, type Address } from "@solana/kit";
 import { SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireArea } from "@/lib/server/feature-gate";
 import { shareClassChain } from "@/app/api/sale-approvals/_lib";
 
 /** Most recipients one request may carry (the client wrappers chunk). */
@@ -32,8 +33,17 @@ export function runIdParam(raw: unknown, required: boolean): string | null {
   return raw;
 }
 
-/** Who may ask: the class's issuer authority (the treasury that sends) or an Admin (403 otherwise). */
+/**
+ * Who may ask: the class's issuer authority (the treasury that sends) or an
+ * Admin (403 otherwise). KYC-only mode (lib/features.ts): an issuer's "Send
+ * to wallets" is an issuance entry, refused for every issuer key (an Admin's
+ * included: this is the one server choke point for those Token-2022 sends).
+ */
 export async function requireClassSender(shareClass: Address, wallet: string): Promise<void> {
   const chain = await shareClassChain(shareClass);
-  if (chain.authority !== wallet) await requireAdmin(wallet);
+  if (chain.authority !== wallet) {
+    await requireAdmin(wallet);
+    return;
+  }
+  requireArea("issuance");
 }

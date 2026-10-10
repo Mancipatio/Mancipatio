@@ -8,6 +8,7 @@ import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireProfileOwner } from "@/lib/server/profile-read";
+import { requireArea } from "@/lib/server/feature-gate";
 import { documentDestination,DOCUMENT_MAX_BYTES,DOCUMENT_STAGING_BUCKET } from "@/lib/document-integrity";
 import { bucketForPrefix } from "../_lib";
 
@@ -22,6 +23,8 @@ async function requireUploader(wallet:string,path:string) {
   try {await requireAdmin(wallet);return;} catch(error) {
     if(!(error instanceof SiwsError) || error.status !== 403) throw error;
   }
+  // KYC-only mode (lib/features.ts): an issuer's whitepaper upload is an issuance entry (KYC documents use /api/clients/upload).
+  requireArea("issuance");
   await requireProfileOwner(wallet,parts[1],"asset");
 }
 export async function POST(request:Request) {

@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { requireArea } from "@/lib/server/feature-gate";
 import { detectNetwork } from "@/lib/network";
 import {
   insertApplicationEvent,
@@ -23,6 +24,8 @@ const UUID_RE =
 
 export async function POST(request: Request) {
   try {
+    // KYC-only mode (lib/features.ts): resubmitting a raise application is a issuance entry.
+    requireArea("issuance");
     const { wallet, params } = await verifySigned(request, "applications.resubmit");
 
     const id = typeof params.id === "string" ? params.id : "";

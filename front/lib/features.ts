@@ -161,6 +161,10 @@ export const PILOT_MODULE_ENV: Record<PilotModule, string> = {
   custodyDelivery: "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
 };
 
+/**
+ * The switches as set. What is in force is moduleEnabled() (KYC-only mode
+ * overrides); every gate reads that.
+ */
 export function pilotModules(network: Network = detectNetwork()): PilotModules {
   // Literal process.env.NEXT_PUBLIC_* reads so Next inlines them client-side.
   const raw: Record<PilotModule, string | undefined> = {
@@ -177,12 +181,76 @@ export function pilotModules(network: Network = detectNetwork()): PilotModules {
 }
 
 export function moduleEnabled(name: PilotModule, network: Network = detectNetwork()): boolean {
-  return pilotModules(network)[name];
+  // KYC-only mode (below) turns every module off, whatever its own switch says.
+  return !kycOnly(network) && pilotModules(network)[name];
 }
 
 /** User-facing sentence for a module that is switched off. */
 export function moduleDisabledMessage(name: PilotModule, network: Network = detectNetwork()): string {
+  if (kycOnly(network)) return KYC_ONLY_MESSAGE;
   return network === "mainnet"
     ? `${PILOT_MODULE_LABELS[name]}: not available on Solana mainnet.`
     : `${PILOT_MODULE_LABELS[name]}: switched off on Solana ${network}.`;
+}
+
+// ── KYC-only mode: the one switch over everything but sign-up and KYC ─────
+//
+// Owner decision 2026-10-10: while it is on, the public can sign in (wallet,
+// email, Google), manage the account, accept the Terms and submit a
+// verification (KYC) request; everything else is paused. On mainnet it is ON
+// unless NEXT_PUBLIC_FEATURE_KYC_ONLY reads as off (fail closed: an unset
+// value keeps the platform locked, and a production build refuses a
+// misspelling: next.config.ts FEATURE_FLAG_NAMES); on devnet, testnet and
+// localnet it is OFF unless the variable reads as on (a rehearsal).
+//
+// While on:
+//   - every pilot module is off (moduleEnabled), whatever its own switch
+//     says; pilotModules() still reports the switches themselves (the build
+//     guards read those, never the runtime scope);
+//   - the two core areas without a switch of their own, primary sales and
+//     issuance, are off (scopeEnabled): their pages carry the notice or are
+//     replaced by it (lib/pilot-scope.ts KYC_ONLY_ROUTES), their entry routes
+//     answer 403 (lib/server/feature-gate.ts requireArea), and their on-chain
+//     entries are refused before the wallet opens (lib/pause-gate.ts
+//     KYC_ONLY_FLOWS);
+//   - the verification request is KYC (a person) only: a KYB request (a
+//     company that wants to raise or issue) is an issuance entry, refused by
+//     /api/verification/submit and not offered on /verify;
+//   - exits of existing positions, the verification request, the portfolio
+//     overview and the admin console keep working.
+// The one sentence below names what is paused (primary sales and issuance,
+// which the Terms offer) apart from what the Terms do not offer yet (every
+// other service: "not available"), so it holds under the Terms in force.
+// Off, nothing here changes anything. The program's pause flags stay the
+// on-chain authority; this is the platform's scope.
+
+export const KYC_ONLY_ENV = "NEXT_PUBLIC_FEATURE_KYC_ONLY";
+
+export const KYC_ONLY_MESSAGE =
+  "Manci is open for sign-up and identity verification only. Primary sales and issuance are paused for now; other services are not available at the moment.";
+
+export function kycOnly(network: Network = detectNetwork()): boolean {
+  // Literal process.env.NEXT_PUBLIC_* read so Next inlines it client-side.
+  const value = parseFeatureFlag(process.env.NEXT_PUBLIC_FEATURE_KYC_ONLY);
+  return network === "mainnet" ? value !== false : value === true;
+}
+
+/** Core areas without a module switch of their own: only KYC-only mode turns them off. */
+export type ScopeArea = "primarySales" | "issuance";
+export const SCOPE_AREAS: readonly ScopeArea[] = ["primarySales", "issuance"];
+export type ScopeName = PilotModule | ScopeArea;
+export const SCOPE_LABELS: Record<ScopeName, string> = {
+  ...PILOT_MODULE_LABELS,
+  primarySales: "Primary sales",
+  issuance: "Issuance (issuer onboarding, assets, share classes and sale requests)",
+};
+function isScopeArea(name: ScopeName): name is ScopeArea {
+  return (SCOPE_AREAS as readonly string[]).includes(name);
+}
+/** A module (its switch, under KYC-only mode) or a core area (KYC-only mode alone). */
+export function scopeEnabled(name: ScopeName, network: Network = detectNetwork()): boolean {
+  return isScopeArea(name) ? !kycOnly(network) : moduleEnabled(name, network);
+}
+export function scopeDisabledMessage(name: ScopeName, network: Network = detectNetwork()): string {
+  return isScopeArea(name) ? KYC_ONLY_MESSAGE : moduleDisabledMessage(name, network);
 }

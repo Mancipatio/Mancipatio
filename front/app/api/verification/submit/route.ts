@@ -12,6 +12,8 @@
 // a wallet the account adds later files a passport request only for an
 // investor (api/account/wallets/attach).
 // Verification itself stays a compliance decision in the admin console.
+// KYC-only mode (lib/features.ts kycOnly) refuses a KYB intake (403); the
+// admin console keeps processing the KYB dossiers that exist.
 
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -19,6 +21,7 @@ import { readActor } from "@/lib/server/account-auth";
 import { boundedRequest } from "@/lib/server/bounded-request";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { requireSanctionsClear } from "@/lib/server/sanctions";
+import { requireArea } from "@/lib/server/feature-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, ipRateLimitKey, rateLimited } from "../../clients/_helpers";
@@ -82,6 +85,9 @@ export async function POST(request: Request) {
     }
     const kind = params.kind;
     if (kind !== "kyc" && kind !== "kyb") throw new SiwsError(400, "kind must be kyc or kyb");
+    // KYC-only mode (lib/features.ts): a company's verification (KYB) is for
+    // raising and issuing, an issuance entry; a person's KYC stays open.
+    if (kind === "kyb") requireArea("issuance");
     // Why the individual verifies (sim gap G5). A founder's KYC (/apply) is
     // for raising and needs no investor passport; everything else (convert,
     // delivery, KYC-gated classes) does. Kept as the dossier's role (header):

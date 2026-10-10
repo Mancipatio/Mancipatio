@@ -2,7 +2,7 @@ import { isSolanaError } from "@solana/kit";
 import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
-import { ModuleDisabledFlowError, PausedFlowError } from "@/lib/pause-gate";
+import { KycOnlyFlowError, ModuleDisabledFlowError, PausedFlowError } from "@/lib/pause-gate";
 import { LIGHTHOUSE_PROGRAM_ADDRESS, takeWalletChange } from "@/lib/wallet-changes";
 import {
   REGISTRY_ERROR_HINTS,
@@ -158,8 +158,8 @@ export function explainSendError(err: unknown): string {
   // Maintenance refusals are already worded for users; SDK hooks may wrap them.
   for (let cursor: unknown = err, depth = 0; cursor instanceof Error && depth < 6; cursor = cursor.cause, depth++) {
     if (cursor instanceof MaintenanceModeError) return cursor.message;
-    // The emergency pause and the pilot scope, read before the wallet opened (lib/pause-gate.ts).
-    if (cursor instanceof PausedFlowError || cursor instanceof ModuleDisabledFlowError) return cursor.message;
+    // The emergency pause, the pilot scope and KYC-only mode, read before the wallet opened (lib/pause-gate.ts).
+    if (cursor instanceof PausedFlowError || cursor instanceof ModuleDisabledFlowError || cursor instanceof KycOnlyFlowError) return cursor.message;
     // A set freeze / blocklist gate account, read before the wallet opened
     // (lib/proceeds-gate.ts; matched by name: that module imports this one).
     if (cursor.name === "GateAccountSetError") return cursor.message;

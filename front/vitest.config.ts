@@ -14,5 +14,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // KYC-only mode is ON on mainnet unless this reads as off. The suite pins
+    // today's behaviour with the mode off; the tests of the mode stub it
+    // ("" = unset, "on"). See tests/kyc-only*.test.ts.
+    env: { NEXT_PUBLIC_FEATURE_KYC_ONLY: "off" },
   },
 });
