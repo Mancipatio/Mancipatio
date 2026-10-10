@@ -22,8 +22,8 @@ export function Fact({
  *   <Eyebrow>The facts</Eyebrow>
  *   <H2 className="mb-7">The legal anchors behind every token</H2>
  *   <Facts items={[
- *     "Serbian SPV for company ownership, debt and revenue share",
- *     "EUR 3,000,000 maximum issuance per SPV per year",
+ *     "Property ownership is structured case by case with the legal team",
+ *     "Legal recourse against the issuer on every instrument that pays or converts",
  *   ]} />
  * </Section>
  * ```

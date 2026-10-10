@@ -9,7 +9,7 @@ import { assetTypeBySlug, CATEGORY_SLUGS } from "@/lib/asset-types";
 import { safeHttpUrl } from "@/lib/format";
 import { assetHref as marketplaceAssetHref } from "@/lib/asset-links";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
 
 type PublishedProfile = Pick<
   AssetProfile,
@@ -24,10 +24,13 @@ type PublishedProfile = Pick<
   | "whitepaper_sha256"
   | "whitepaper_version_id"
   | "ssc_decision_ref"
+  // sscApprovalRef needs it on mainnet: without it every approval would read
+  // as not approved.
+  | "ssc_decision_version_id"
   | "updated_at"
 >;
 
-type Item = {
+export type Item = {
   profile: PublishedProfile;
   linkId: string | null;
   whitepaper: boolean;
@@ -133,14 +136,18 @@ function displayDate(raw: string | null): string | null {
   });
 }
 
-function DocumentRow({ item }: { item: Item }) {
+/** One document on the board. Exported for tests/login-guard-surfaces.test.ts,
+ *  which renders its approval label on mainnet. */
+export function DocumentRow({ item }: { item: Item }) {
   const { profile, linkId, whitepaper, documentUrl } = item;
   // The asset PDA is the public identity (e2e §6); a bare asset_id can be
   // shared by two issuers and would land on the chooser. The indexer join is
   // still consulted so a profile whose asset is not indexed yet gets no link.
   const assetHref = linkId ? marketplaceAssetHref(profile.asset_pda) : null;
   const date = displayDate(whitepaper ? profile.whitepaper_published_at : profile.updated_at);
-  const decisionRef = whitepaper ? sscDecisionRef(profile) : null;
+  // As on the launchpad and the sale page: on mainnet only an approval backed
+  // by the verified decision document reads as approved.
+  const decisionRef = whitepaper ? sscApprovalRef(profile, detectNetwork()) : null;
   const fingerprint = whitepaper ? profile.whitepaper_sha256?.trim() : null;
 
   return (

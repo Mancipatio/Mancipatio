@@ -77,8 +77,9 @@ export const CATEGORY_SLUGS = [
 export type CategorySlug = (typeof CATEGORY_SLUGS)[number];
 
 /** Shared "How issuance works" steps. Every category starts the same way;
- *  the SPV step is inserted where Serbian law requires one, and each
- *  category appends its own ending (payouts, delivery, conversion…). */
+ *  the SPV step is listed for the categories whose issuances can use one,
+ *  and each category appends its own ending (payouts, delivery, conversion…).
+ *  Whether a given issuance uses an SPV depends on that issuance. */
 // Issuer-side: /apply requires an approved KYB (company) or live KYC
 // (individual founder). Buyers need no KYC to buy or trade (policy
 // 2026-09-23) — only to convert into equity or take delivery.
@@ -94,7 +95,7 @@ const FLOW_FORM_CONTACT =
 const FLOW_REVIEW =
   "Compliance review — we approve, request changes, or decline. You can revise and resubmit until it is approved.";
 const FLOW_SPV =
-  "A Serbian SPV is incorporated for you if you don't already have one.";
+  "Where the issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer.";
 const FLOW_MINT =
   "Tokens are minted to the issuer's treasury and distributed from there (to you, or sold via the launchpad).";
 // The flow steps below hold on every network: trading through Manci,
@@ -114,9 +115,9 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
     slug: "equity",
     code: "EQUITY",
     title: "Company ownership",
-    oneLine: "Shares of an incorporated entity with rights and preferences.",
+    oneLine: "Tokens that can carry the right to become a shareholder in the issuing company.",
     encoded: ["Vote", "Dividend", "Liquidation preference", "Hard supply cap"],
-    fact: "Convertible into real company shares · max EUR 3M per SPV/year",
+    fact: "Can carry conversion into company shares · at most EUR 3M per issuer over twelve months",
     example: "Acme Industries pre-IPO Series A",
     icon: <IconBuilding />,
     factSheet: {
@@ -142,10 +143,10 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Structure & protections",
           points: [
-            "Issued through a Serbian SPV — incorporated for you if you don't have one",
-            "Maximum issuance of EUR 3 million per year per SPV",
+            "Where an issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer",
+            "At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used",
             "A share pledge can be registered for the benefit of token holders",
-            "Freely transferable and tradeable",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "Can carry dividend or revenue payments, structured per issuance",
             "Startup raises settle through an escrowed payout vault: revenue routed through the vault is split 1/3 founder · 1/3 investor pool · 1/3 platform; proceeds unlock monthly against posted progress updates, and investors can freeze and vote after 3 missed updates",
           ],
@@ -168,7 +169,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
     code: "DEBT",
     title: "Debt instruments",
     oneLine:
-      "On-chain notes — principal + coupon + maturity, terms enforced by the program.",
+      "On-chain notes — principal, coupon and maturity, repaid by the issuer.",
     encoded: ["Principal", "Coupon rate", "Maturity", "Default trigger"],
     fact: "Principal repaid with interest — legal recourse on default",
     example: "$5M senior note, 8% coupon, 36 months",
@@ -196,9 +197,9 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Protections",
           points: [
-            "Issued through a Serbian SPV — incorporated for you if you don't have one",
-            "Maximum issuance of EUR 3 million per year per SPV",
-            "Freely transferable and tradeable",
+            "Where an issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer",
+            "At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "If a bond is not paid, holders have legal recourse",
           ],
         },
@@ -220,7 +221,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
     code: "REAL ESTATE",
     title: "Real estate",
     oneLine:
-      "Fractional ownership of property, custodied through a special-purpose vehicle.",
+      "Rental income from property, or the right to acquire the property itself.",
     encoded: [
       "SPV reference",
       "Square meters",
@@ -239,7 +240,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
             "Rental income is a major driver of real-estate investing — but managing property is much harder work than people think",
             "Buying a whole property is capital-intensive; buying a portion of one is far more achievable",
             "Manci tokenises rental income streams — a portion of the income is sent to holder wallets monthly or quarterly",
-            "Freely transferable and tradeable",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "If the issuer avoids paying holders their share of the income, there is legal recourse",
           ],
         },
@@ -250,7 +251,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
             "A token alone cannot make you the registered owner — but it can carry the right to have the property transferred to you at a time of your choosing",
             "Acquiring actual ownership still goes through the regular transfer process",
             "The rental income can sit with the token holder or with the legal owner — this varies per project",
-            "Freely transferable and tradeable",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "If the legal owner fails to facilitate the transfer of ownership, there is legal recourse",
             "Ownership structures are prepared and deployed case-by-case",
           ],
@@ -293,7 +294,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           heading: "How holders are paid",
           points: [
             "A portion of the income lands automatically in holder wallets",
-            "Freely transferable and tradeable",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "If the issuer avoids paying holders their share of the income, there is legal recourse",
           ],
         },
@@ -342,11 +343,11 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Protections",
           points: [
-            "Issued through a Serbian SPV — incorporated for you if you don't have one",
-            "Maximum issuance of EUR 3 million per year per SPV",
+            "Where an issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer",
+            "At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used",
             "A share pledge can be registered for the benefit of token holders",
             "Holders automatically receive their portion of revenue in their wallets",
-            "Freely transferable and tradeable",
+            "Transferable from wallet to wallet; trading through Manci where it is available",
             "If the issuer avoids paying holders their share of the revenue, there is legal recourse",
           ],
         },
@@ -388,7 +389,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           heading: "What can be tokenized",
           points: [
             "Most asset types can be tokenized — from wheat to concert tickets",
-            "Tokenized assets are freely transferable and tradeable",
+            "Tokenized assets are transferable from wallet to wallet, with trading through Manci where it is available",
           ],
         },
         {
@@ -436,7 +437,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           heading: "What can be tokenized",
           points: [
             "Most asset types can be tokenized — from art pieces to used cars",
-            "Tokenized assets are freely transferable and tradeable",
+            "Tokenized assets are transferable from wallet to wallet, with trading through Manci where it is available",
           ],
         },
         {

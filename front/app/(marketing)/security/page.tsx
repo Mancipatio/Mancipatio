@@ -85,7 +85,7 @@ export default function SecurityPage() {
       <PageHeader
         eyebrow="Security & compliance"
         title="Compliance enforced by the chain."
-        lede="Understand the controls used by the app and confirm the selected network and release before testing privileged actions."
+        lede="Understand the controls the app and the on-chain programs apply, when identity verification is required, and how to report a vulnerability."
       />
 
       <Section>
@@ -158,15 +158,15 @@ export default function SecurityPage() {
       </Section>
 
       <Section>
-        <H2 className="mb-6">Testing and release status</H2>
+        <H2 className="mb-6">Pending and interrupted transactions</H2>
         <Card
           className="max-w-[760px]"
-          title="Verify the release being tested"
-          body="Local code review and passing tests do not prove that the same program version is deployed. A pilot requires matching program, app and database versions, configured authorities and a verified network. Use test assets until that release has been checked."
+          title="Check the chain before you retry"
+          body="A submitted transaction can confirm while the app or its RPC provider is unavailable, so a pending status is not proof of failure. Check the result on-chain and use the saved record's retry action; never repeat a payment or a deposit to update the app's record."
         />
         <p className="mt-4">
-          <a className="mx-link" href="/docs/pilot">
-            Pilot operator guide →
+          <a className="mx-link" href="/docs/recovery">
+            Transaction recovery guide →
           </a>
         </p>
       </Section>

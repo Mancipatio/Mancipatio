@@ -14,7 +14,7 @@ export const MX_ROUTES = {
   home: "/",
   /** Owns the six-step issuance flow — nothing else may restate it. */
   howItWorks: "/how-it-works",
-  /** The SPV / rights / pledge / recourse page. */
+  /** The rights / structure / recourse page. */
   legalStructure: "/legal-structure",
   /** Practical first-purchase guide; live offerings remain in the app. */
   invest: "/investors",

@@ -37,7 +37,7 @@ import {
   getAssetProfile,
   type PublicAssetProfile,
 } from "@/lib/asset-profiles";
-import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
 import { visibleClassCount, visibleClasses } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useArchivedSet } from "@/lib/archive-client";
@@ -267,7 +267,7 @@ function whitepaperFileUrl(path: string | null): string | null {
 
 /** Token information (Flows doc section 10): the token's whitepaper when one
  *  is published — or the note that this page IS the token's official basic
- *  information — plus the Serbian SPV the issuance runs through. */
+ *  information — plus the SPV the issuance runs through, where it has one. */
 function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null }) {
   if (!profile) return null;
 
@@ -278,7 +278,9 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
     whitepaperFileUrl(profile.whitepaper_path) ??
     safeHttpUrl(profile.whitepaper_url);
   const hasWhitepaper = isLive && Boolean(href);
-  const decisionRef = sscDecisionRef(profile);
+  // As on the launchpad and the sale page: on mainnet only an approval backed
+  // by the verified decision document reads as approved.
+  const decisionRef = sscApprovalRef(profile, detectNetwork());
   const publishedAt = profile.whitepaper_published_at
     ? new Date(profile.whitepaper_published_at).toLocaleDateString("en-US", {
         year: "numeric",

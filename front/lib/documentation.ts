@@ -135,7 +135,7 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         href: "/legal-structure",
         title: "Legal structure",
         description: "How the documented rights relate to a specific issuance.",
-        keywords: "spv pledge conversion recourse",
+        keywords: "structure pledge conversion recourse",
       },
       {
         href: "/security",
@@ -169,11 +169,11 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
     description: "Costs, background and support.",
     topics: [
       {
-        href: "/docs/pilot",
-        title: "Pilot operator guide",
+        href: "/docs/recovery",
+        title: "Transaction recovery guide",
         description:
-          "Check a test release, approved funding and recovery of pending records.",
-        keywords: "operator test devnet recovery retry receipt deployment",
+          "Pending or interrupted transactions, saved records and checking the result without paying twice.",
+        keywords: "pending interrupted recovery retry receipt operator",
       },
       {
         href: "/pricing",

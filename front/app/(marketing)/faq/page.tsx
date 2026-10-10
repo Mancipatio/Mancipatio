@@ -6,11 +6,12 @@ import {
   Section,
   TextLink,
 } from "@/components/mx";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Quick answers — Manci",
   description:
-    "Find the right guide for buying, verification, token documents, vesting and issuing on Manci.",
+    "Find the right guide for buying, verification, token documents and issuing on Manci.",
 };
 
 const QUESTIONS = [
@@ -31,14 +32,14 @@ const QUESTIONS = [
   {
     question: "Do I need to verify my identity to buy tokens?",
     answer:
-      "No. Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class requires an approved investor passport for the receiving wallet.",
+      "No. Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good, where these are available. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class requires an approved investor passport for the receiving wallet.",
     href: MX_ROUTES.security,
     link: "Verification and transfer rules",
   },
   {
     question: "Where can I sell tokens I already hold?",
     answer:
-      "The OTC guide explains creating, funding and filling an offer, with a direct link to the trading screen.",
+      "Where trading through Manci is available, you can create an OTC offer or post on the resell board; where it is not, those pages say so. The OTC guide explains creating, funding and filling an offer.",
     href: "/solutions/otc",
     link: "OTC trading guide",
   },
@@ -54,8 +55,8 @@ const QUESTIONS = [
       "My wallet submitted a transaction but the app still shows pending. What now?",
     answer:
       "Keep the receipt and use the available retry-record action. First verify the existing purchase, deposit or sale address; do not send the same funds again just to update the app record.",
-    href: "/docs/pilot",
-    link: "Recovery and testing guide",
+    href: "/docs/recovery",
+    link: "Transaction recovery guide",
   },
   {
     question: "Where are the risks and legal terms explained?",
@@ -90,7 +91,9 @@ export default function FaqPage() {
       />
       <Section>
         <Grid cols={2}>
-          {QUESTIONS.map((item) => (
+          {/* A question about a switched-off module (vesting) is left out,
+              like its menu entry (lib/pilot-scope.ts navHrefVisible). */}
+          {QUESTIONS.filter((item) => navHrefVisible(item.href)).map((item) => (
             <Card key={item.question} title={item.question} body={item.answer}>
               <p className="mt-4">
                 <TextLink href={item.href}>{item.link} →</TextLink>

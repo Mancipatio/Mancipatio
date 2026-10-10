@@ -38,7 +38,7 @@ export type SectionProps = {
  * <Section variant="dark">
  *   <Eyebrow>The facts</Eyebrow>
  *   <H2>The legal anchors behind every token</H2>
- *   <Facts items={["Serbian SPV for company ownership…"]} />
+ *   <Facts items={["Legal recourse against the issuer…"]} />
  * </Section>
  * ```
  */
