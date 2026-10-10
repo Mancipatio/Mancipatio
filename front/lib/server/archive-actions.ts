@@ -7,7 +7,9 @@ import "server-only";
 //   asset  — the SUPER admin (any asset; blockers need `confirm`), or the
 //            asset's own issuer authority while it is a Draft / never minted
 //            with nothing in the way (issuerArchiveRefusal). An issuer may
-//            unarchive only what it archived itself.
+//            unarchive only what it archived itself, and in KYC-only mode
+//            (lib/features.ts) not when that would put a published profile
+//            back on the public lists (unarchiveRepublishes: a publish).
 //   issuer — the SUPER admin only; refused while one of its assets that is
 //            not archived still has tokens in circulation.
 // Other admins may look (check) but not act.
@@ -15,6 +17,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SiwsError } from "@/lib/server/siws";
 import { detectNetwork } from "@/lib/network";
+import { scopeDisabledMessage, scopeEnabled } from "@/lib/features";
 import { isProfileAdmin, requireProfileOwner } from "@/lib/server/profile-read";
 import {
   isMissingArchiveColumn,
@@ -29,6 +32,7 @@ import {
   issuerArchiveRefusal,
   lockableAtZero,
   readArchiveRecord,
+  unarchiveRepublishes,
   type ArchiveBlocker,
   type ArchiveKind,
   type ArchiveRecord,
@@ -107,6 +111,11 @@ export async function assetArchiveState(sb: SupabaseClient, wallet: string, pda:
   let unarchiveRefusal: string | null = null;
   if (archived && actor === "issuer" && record?.archived_by !== wallet) {
     unarchiveRefusal = "The platform archived this asset: only the super admin can unarchive it.";
+  }
+  // KYC-only mode: issuance is paused, so an issuer's unarchive may not
+  // re-publish (the dialog says why before asking for a signature).
+  if (archived && actor === "issuer" && unarchiveRefusal === null && unarchiveRepublishes(record) && !scopeEnabled("issuance")) {
+    unarchiveRefusal = scopeDisabledMessage("issuance");
   }
   if (actor === "admin") unarchiveRefusal = archived ? "Only the super admin can unarchive it." : null;
   return {

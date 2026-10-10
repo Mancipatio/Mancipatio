@@ -61,6 +61,8 @@ import { SiteFooter } from "@/components/mx/site-footer";
 import { DocumentationIndex } from "@/components/documentation-index";
 import { DocumentationFrame } from "@/components/documentation-frame";
 import { Button, TextLink } from "@/components/mx/button";
+import { PilotModuleNotice } from "@/components/pilot-module-notice";
+import { KYC_ONLY_ROUTES, MODULE_ROUTES, moduleRouteState } from "@/lib/pilot-scope";
 import { AccountVerificationCard, kybShown } from "@/components/account-verification";
 import { VerificationForm } from "@/components/verification-form";
 import type { AccountVerification } from "@/lib/account";
@@ -143,10 +145,27 @@ describe("AppShell with the mode on (mainnet default)", () => {
     }
   });
 
-  it("a module page keeps its own label, with the same sentence", () => {
-    const page = shell("portfolio", "/portfolio/conversion");
-    expect(page).toContain("Not available.");
-    expect(page).toContain(KYC_ONLY_MESSAGE);
+  it("a module page says \"Paused.\" too, with the same sentence (whatever the Terms offer)", () => {
+    network("mainnet", "", { custodyConversion: "true", secondaryTrading: "true" });
+    for (const [section, path] of [["portfolio", "/portfolio/conversion"], ["portfolio", "/portfolio/offers"], ["marketplace", "/marketplace/otc"], ["issuer", "/issuer/vesting-series"]] as const) {
+      const page = shell(section, path);
+      expect(page, path).toContain("Paused.");
+      expect(page, path).not.toContain("Not available.");
+      expect(page, path).toContain(KYC_ONLY_MESSAGE);
+    }
+  });
+
+  it("every notice of the mode is labelled \"Paused.\", and only while it is on", () => {
+    network("mainnet", "", { custodyConversion: "true", secondaryTrading: "true" });
+    for (const route of [...MODULE_ROUTES, ...KYC_ONLY_ROUTES]) {
+      const notice = html(createElement(PilotModuleNotice, { state: moduleRouteState(route.prefix)! }));
+      expect(notice, route.prefix).toContain("<strong class=\"font-semibold\">Paused.</strong>");
+    }
+    network("mainnet", "off");
+    expect(html(createElement(PilotModuleNotice, { state: moduleRouteState("/portfolio/conversion")! }))).toContain("Not available.");
+    network("devnet", "");
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "off");
+    expect(html(createElement(PilotModuleNotice, { state: moduleRouteState("/portfolio/conversion")! }))).toContain("Switched off.");
   });
 
   it("operator tools, the verification request and the portfolio carry no notice", () => {
@@ -277,7 +296,7 @@ describe("the verification request", () => {
   it("mode on: the copy promises nothing about when other services open", () => {
     nav.path = "/verify";
     const text = html(createElement(VerificationForm)) + html(createElement(AccountVerificationCard, { verification }));
-    expect(text).toContain("Identity verification (KYC) is open. The services that require it are not available at the moment.");
+    expect(text).toContain("Identity verification (KYC) is open. The services that require it are paused for now.");
     expect(text).toContain("Identity verification is open.");
     expect(text).not.toMatch(/open later|Open now/);
   });
@@ -303,7 +322,7 @@ describe("the About page (its honest line and its way in)", () => {
 
   it("mode on: issuer applications are named as paused, never as open; the way in is verification", async () => {
     const page = await about();
-    expect(page).toContain("Sign-up and identity verification open; launchpad and issuer applications paused for now");
+    expect(page).toContain("Sign-up and identity verification open; launchpad, issuer applications, OTC settlement, governance and vesting paused for now");
     expect(page).not.toContain("Issuer applications are open");
     expect(page).not.toContain("Issuers apply");
     expect(page).toContain(KYC_ONLY_MESSAGE);

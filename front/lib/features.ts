@@ -220,9 +220,11 @@ export function moduleDisabledMessage(name: PilotModule, network: Network = dete
 //     (components/account-verification.tsx kybShown);
 //   - exits of existing positions, the verification request, the portfolio
 //     overview and the admin console keep working.
-// The one sentence below names what is paused (primary sales and issuance,
-// which the Terms offer) apart from what the Terms do not offer yet (every
-// other service: "not available"), so it holds under the Terms in force.
+// Every notice of the mode, a module page's included, is labelled "Paused."
+// (components/pilot-module-notice.tsx), and every notice, 403 and wallet
+// refusal says the one sentence below. Neither says which services the
+// Terms offer, so both hold under whichever Terms are in force: a version
+// that offers more (trading, conversion) makes nothing here false.
 // Off, nothing here changes anything. The program's pause flags stay the
 // on-chain authority (the lockdown needs 0x7F: issuer onboarding 0x01 is
 // stopped on-chain only by its bit; ops/env-vars.md); this is the
@@ -231,7 +233,7 @@ export function moduleDisabledMessage(name: PilotModule, network: Network = dete
 export const KYC_ONLY_ENV = "NEXT_PUBLIC_FEATURE_KYC_ONLY";
 
 export const KYC_ONLY_MESSAGE =
-  "Manci is open for sign-up and identity verification only. Primary sales and issuance are paused for now; other services are not available at the moment.";
+  "Manci is open for sign-up and identity verification only. Sales, trading, issuance and the other services are paused for now.";
 
 export function kycOnly(network: Network = detectNetwork()): boolean {
   // Literal process.env.NEXT_PUBLIC_* read so Next inlines it client-side.

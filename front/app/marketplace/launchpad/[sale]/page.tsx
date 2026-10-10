@@ -833,11 +833,13 @@ export default function DealPage({
             </div>
           )}
 
+          {/* KYC-only mode: the raise list is the mode's gate, so a recovered
+              purchase goes back to the marketplace instead. */}
           <Link
-            href="/marketplace/launchpad"
+            href={salesPaused ? "/marketplace" : "/marketplace/launchpad"}
             className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-4 py-2 text-sm text-mx-ink-soft transition-colors hover:border-mx-rule-strong hover:text-mx-ink"
           >
-            ← Browse more raises
+            {salesPaused ? "← Marketplace" : "← Browse more raises"}
           </Link>
         </div>
       </section>

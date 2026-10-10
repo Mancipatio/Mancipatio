@@ -130,7 +130,7 @@ export function VerificationForm() {
     <header className="account-heading">
       <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{kybOpen
         ? "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."
-        : "Identity verification (KYC) is open. The services that require it are not available at the moment. It takes a few minutes."}</p></div>
+        : "Identity verification (KYC) is open. The services that require it are paused for now. It takes a few minutes."}</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>

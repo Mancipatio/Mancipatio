@@ -224,7 +224,7 @@ build guards read), and the two core areas without a switch of their own:
 | Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
 |---|---|---|---|
 | Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
-| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `verification/submit` (a new `kind=kyb`) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open), `verification/submit` (a new `kind=kyb`) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
 
 Also refused before the wallet: `deposit_to_custody_vault` and the vesting
 series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
@@ -232,12 +232,15 @@ series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
 applies to **every wallet, admin included** (the operator's `open_sale`,
 `mint_to_treasury`, "Add issuer", asset and share-class set-up too); the
 admin console is otherwise unaffected, and `/admin/custody` stays reachable
-by URL for recording an existing conversion. Pages of the paused areas say
-"Paused." with one sentence (`KYC_ONLY_MESSAGE`); module pages keep "Not
-available." with the same sentence. Their links leave every menu, card and
-CTA (`navHrefVisible`, and the mx `Button` / `TextLink` through
-`kycOnlyHides`), and the guides of the paused areas leave the menus
-(`KYC_ONLY_NAV_PREFIXES`).
+by URL for recording an existing conversion. Every page the mode pauses, a
+module's included, says "Paused." with one sentence (`KYC_ONLY_MESSAGE`:
+sales, trading, issuance and the other services are paused for now). The
+wording claims nothing about which services the Terms offer, so it holds
+under any Terms version (one that offers trading or conversion included);
+re-check it only if the emergency-pause clause changes. Links to those
+pages leave every menu, card and CTA (`navHrefVisible`, and the mx
+`Button` / `TextLink` through `kycOnlyHides`), and the guides of the paused
+areas leave the menus (`KYC_ONLY_NAV_PREFIXES`).
 
 On-chain, the program's pause flags remain the authority, and this switch
 does not change them. **The lockdown needs 0x7F on-chain** (every pause

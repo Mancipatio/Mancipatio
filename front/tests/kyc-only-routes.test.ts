@@ -7,8 +7,10 @@
 // exit stay open. With the mode off, none of them answers that 403. SIWS,
 // the admin gate, profile ownership, the share-class chain and the database
 // are mocked; the routes and the gate run for real. Last, every API route is
-// classified: gated (admin, area or module) or open for a recorded reason, so
-// a new entry route cannot stay open in the mode unnoticed.
+// classified: gated (admin, area or module), open for a recorded reason, or
+// MIXED (an admin and anyone else take different branches) with what its
+// non-admin branch is, so a new entry route, or a new non-admin branch of an
+// admin route, cannot stay open in the mode unnoticed.
 import { getAddressDecoder } from "@solana/kit";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -314,6 +316,8 @@ describe("source matrix", () => {
       ["verification/submit", 'if (kind === "kyb") requireArea("issuance")'],
       ["vesting/update-status", 'requireArea("issuance")'],
       ["vesting/publish-milestone", 'requireArea("issuance")'],
+      // An issuer's unarchive that would re-publish (tests/archive-routes.test.ts).
+      ["archive/set", 'if (state.actor === "issuer" && unarchiveRepublishes(state.record)) requireArea("issuance")'],
     ] as const) {
       expect(source(route), route).toContain(gate);
     }
@@ -326,7 +330,7 @@ describe("source matrix", () => {
       "clients/me", "clients/upload", "clients/link-wallet", "clients/accept-tos", "clients/onboarding-view", "clients/onboarding-requirements",
       "tos/accept", "tos/status", "auth/session", "auth/email/start", "auth/email/verify", "account/update", "account/wallets/attach",
       "inquiries/create", "launchpad/record-purchase", "conversion/cancel", "conversion/reclaim", "conversion/deposited",
-      "delivery/cancel", "delivery/reclaim", "resell/update", "sale-requests/decide", "archive/set",
+      "delivery/cancel", "delivery/reclaim", "resell/update", "sale-requests/decide",
       "distribution-plans/proof", "payout-snapshots/proof",
     ]) {
       const text = source(route);
@@ -337,14 +341,23 @@ describe("source matrix", () => {
 });
 
 describe("every API route is classified", () => {
-  // A route is gated when its source calls an admin gate, a KYC-only area
-  // (requireArea), a module switch (requireModule) or the Send to wallets
-  // sender check (requireClassSender, which calls requireArea). A route whose
-  // admin gate is only one of its branches gates its other branch with
-  // requireArea or requireModule; the tests above pin those. Every other route
-  // is open, and must be listed here with the reason it stays open in
-  // KYC-only mode: a new non-admin entry route without a gate fails here.
-  const GATED = /\b(requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider|requireArea|requireModule|requireClassSender)\(/;
+  // A route is GATED when every branch ends in a gate: an admin gate right
+  // after the signature (topLevelAdminGate), a KYC-only area (requireArea), a
+  // module switch (requireModule) or the Send to wallets sender check
+  // (requireClassSender, which calls requireArea). A route is MIXED when an
+  // admin and anyone else take different branches: it probes for an admin
+  // (isAdminWallet, isSuperAdminWallet, isProfileAdmin, an archive actor), or
+  // its admin gate is on one branch only. A MIXED route names what its
+  // non-admin branch is: "gated" (requireArea/requireModule, pinned by the
+  // tests above), "admin" (every branch is an admin's after all), or the
+  // reason it stays open in KYC-only mode. Every other route is OPEN and is
+  // listed with its reason. A new ungated route, or a new non-admin branch
+  // of an admin route, fails here.
+  const GATE = /\b(requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider|requireArea|requireModule|requireClassSender)\(/;
+  const ADMIN_GATE = /\b(requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider)\(/;
+  const ADMIN_STATEMENT = /^\s*(?:const [^=]+=\s*)?await (?:requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider)\(/;
+  const ADMIN_PROBE = /\b(isAdminWallet|isSuperAdminWallet|isProfileAdmin)\(|\bstate\.actor\b/;
+  const AREA_GATE = /\b(requireArea|requireModule|requireClassSender)\(/;
   type OpenReason =
     | "sign-in" // wallet, email or Google session
     | "account" // the signed-in account and its wallets
@@ -375,10 +388,10 @@ describe("every API route is classified", () => {
     "internal/alarms": "platform", "internal/fx": "platform", "internal/retry": "platform", "internal/sanctions": "platform",
     "distribution-plans/proof": "read", "payout-snapshots/proof": "read",
     "inquiries/create": "support",
-    "issuer-profiles/read": "read", "profiles/public": "read", "profiles/read": "read",
+    "profiles/public": "read",
     "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
     // Purchase recovery: a buy that already landed on-chain ("Retry recording").
-    "launchpad/commitment-status": "recording", "launchpad/record-purchase": "recording",
+    "launchpad/record-purchase": "recording",
     "passport/status": "verification", "passport/submit": "verification",
     // Withdraw a listing or mark it matched.
     "resell/update": "exit",
@@ -394,26 +407,78 @@ describe("every API route is classified", () => {
     "vesting-series/mark-created": "recording", "vesting-series/record-step": "recording",
     "vesting/beneficiaries": "read",
   };
+  const MIXED: Record<string, "gated" | "admin" | OpenReason> = {
+    // Read: the issuer's own rows (an admin reads all).
+    "issuer-profiles/read": "read", "profiles/read": "read", "otc/list": "read", "sale-requests/list": "read", "spvs/capacity": "read",
+    // Purchase recovery: the sale's issuer records a buy that already landed.
+    "launchpad/commitment-status": "recording",
+    // The issuer withdraws its request, or records a sale its key opened (open_sale is refused before the wallet).
+    "sale-requests/decide": "exit",
+    // Every branch is an admin's: a read (admin) or a write (super admin).
+    "admin-config/fx-rates": "admin",
+    // A super admin for a cap override or a backdated issuance, an admin otherwise.
+    "spvs/record-issuance": "admin",
+    // The non-admin branch calls requireArea (the tests above pin each).
+    "archive/set": "gated", "issuer-profiles/upsert": "gated", "profiles/upsert": "gated", "launchpad/listing-upsert": "gated",
+    "storage/upload": "gated", "vesting/update-status": "gated", "vesting/publish-milestone": "gated",
+  };
+
+  /** Code without its comments (a gate named in a comment gates nothing). */
+  const code = (route: string) =>
+    readFileSync(join(process.cwd(), "app/api", route, "route.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+  /** Every handler's signature is followed, at its own indentation, by an unconditional admin gate. */
+  function topLevelAdminGate(src: string): boolean {
+    const lines = src.split("\n");
+    const signatures = lines.flatMap((line, i) => (/verifySigned\(/.test(line) && !/^\s*import\b/.test(line) ? [i] : []));
+    const indent = (line: string) => /^\s*/.exec(line)![0].length;
+    return signatures.length > 0 && signatures.every((i) => {
+      if (/;\s*(?:const [^=]+=\s*)?await (?:requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider)\(/.test(lines[i])) return true;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (!lines[j].trim()) continue;
+        if (indent(lines[j]) < indent(lines[i])) return false;
+        if (indent(lines[j]) === indent(lines[i]) && ADMIN_STATEMENT.test(lines[j])) return true;
+      }
+      return false;
+    });
+  }
+  /** "gated", "mixed" or "open", from the code alone. */
+  function kind(route: string): "gated" | "mixed" | "open" {
+    const src = code(route);
+    if (ADMIN_PROBE.test(src) || (ADMIN_GATE.test(src) && !topLevelAdminGate(src))) return "mixed";
+    return GATE.test(src) ? "gated" : "open";
+  }
 
   function routes(dir = join(process.cwd(), "app/api"), prefix = ""): string[] {
     return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      if (entry.isDirectory()) return routes(join(dir, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name);
+      // A "_" folder is private: Next.js does not route it (app/api/_exemplar).
+      if (entry.isDirectory()) return entry.name.startsWith("_") ? [] : routes(join(dir, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name);
       return entry.name === "route.ts" && prefix ? [prefix] : [];
     });
   }
 
-  it("each route is gated or listed as open, never both", () => {
+  it("each route is gated, mixed (with its non-admin branch named) or listed as open, never two of them", () => {
     const all = routes();
     expect(all.length).toBeGreaterThan(150);
-    const unclassified: string[] = [];
-    const listedButGated: string[] = [];
+    const wrong: string[] = [];
     for (const route of all) {
-      const gated = GATED.test(readFileSync(join(process.cwd(), "app/api", route, "route.ts"), "utf8"));
-      if (!gated && !(route in OPEN)) unclassified.push(route);
-      if (gated && route in OPEN) listedButGated.push(route);
+      const found = kind(route);
+      const listed = route in MIXED ? "mixed" : route in OPEN ? "open" : "gated";
+      if (route in MIXED && route in OPEN) wrong.push(`${route}: listed twice`);
+      else if (found !== listed) wrong.push(`${route}: ${found}, listed as ${listed}`);
+      else if (MIXED[route] === "gated" && !AREA_GATE.test(code(route))) wrong.push(`${route}: "gated" without requireArea/requireModule`);
     }
-    expect(unclassified, "new route: gate it (requireArea/requireModule/admin) or list it as open with its reason").toEqual([]);
-    expect(listedButGated, "a gated route leaves the open list").toEqual([]);
-    for (const route of Object.keys(OPEN)) expect(all, route).toContain(route);
+    expect(wrong, "gate a new route (requireArea/requireModule/admin) or list it (OPEN, or MIXED with its non-admin branch)").toEqual([]);
+    for (const route of [...Object.keys(OPEN), ...Object.keys(MIXED)]) expect(all, route).toContain(route);
+  });
+
+  it("the classifier: an admin gate right after the signature gates; one on a branch, or an admin probe, is mixed", () => {
+    const top = "  try {\n    const { wallet } = await verifySigned(request, \"x\");\n    await requireAdmin(wallet);\n  } catch {}";
+    const branch = "  try {\n    const { wallet, params } = await verifySigned(request, \"x\");\n    if (params.all) {\n      await requireAdmin(wallet);\n    }\n  } catch {}";
+    expect(topLevelAdminGate(top)).toBe(true);
+    expect(topLevelAdminGate(branch)).toBe(false);
+    expect(topLevelAdminGate("    const { wallet } = await verifySigned(r, \"x\"); await requireAdmin(wallet);")).toBe(true);
+    expect(ADMIN_PROBE.test("if (!(await isAdminWallet(wallet))) requireArea(\"issuance\");")).toBe(true);
   });
 });

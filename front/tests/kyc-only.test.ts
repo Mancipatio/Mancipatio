@@ -10,8 +10,8 @@
 // runs with the mode off (vitest.config.ts, project "default") and is the
 // proof; the KYC-path and exit suites run again with it on (project
 // "kyc-only-on"); this file stubs it ("" = unset). Last, the mode's own
-// wording is held to the mainnet Terms, as tests/legal-slots.test.ts holds
-// today's.
+// wording must hold under any version of the Terms: everything is "paused",
+// and nothing it says claims which services the Terms offer.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,7 +56,9 @@ import {
   PILOT_MODULE_ENV,
   PILOT_MODULES,
   pilotModules,
+  scopeDisabledMessage,
   scopeEnabled,
+  SCOPE_AREAS,
 } from "@/lib/features";
 import {
   KYC_ONLY_NAV_PREFIXES,
@@ -180,10 +182,10 @@ describe("modules and core areas under the mode", () => {
     }
   });
 
-  it("the About page names the launchpad as paused and the other modules as not available", () => {
+  it("the About page names everything but sign-up and verification as paused", () => {
     mode("");
     expect(modulesFact("mainnet")).toBe(
-      "Sign-up and identity verification open; launchpad and issuer applications paused for now; OTC settlement, governance and vesting built, not available on Solana mainnet",
+      "Sign-up and identity verification open; launchpad, issuer applications, OTC settlement, governance and vesting paused for now",
     );
   });
 });
@@ -210,7 +212,8 @@ describe("pages while the mode is on (mainnet default)", () => {
     ];
     for (const [path, kind] of expected) {
       const state = moduleRouteState(path, "mainnet");
-      expect(state, path).toMatchObject({ disabled: true, kyc: true, route: { mode: kind } });
+      expect(state, path).toMatchObject({ disabled: true, route: { mode: kind } });
+      expect(kycOnlyRoute(path), path).toBe(state!.route);
       expect(moduleNoticeText(state!, "mainnet"), path).toBe(KYC_ONLY_MESSAGE);
       expect(navHrefVisible(path, "mainnet"), path).toBe(false);
     }
@@ -218,11 +221,12 @@ describe("pages while the mode is on (mainnet default)", () => {
     expect(kycOnlyRoute("/issuer/assets/tokenize/x")?.mode).toBe("gate");
   });
 
-  it("module pages stay module pages (not available), off even with their switch on", () => {
+  it("module pages stay module pages, off even with their switch on, with the same sentence", () => {
     clearModules({ custodyConversion: "true" });
     for (const path of ["/portfolio/conversion", "/issuer/vesting-series"]) {
       const state = moduleRouteState(path, "mainnet");
-      expect(state, path).toMatchObject({ disabled: true, kyc: false, route: { mode: "notice" } });
+      expect(state, path).toMatchObject({ disabled: true, route: { mode: "notice" } });
+      expect(MODULE_ROUTES, path).toContain(state!.route);
       expect(moduleNoticeText(state!, "mainnet")).toBe(KYC_ONLY_MESSAGE);
     }
   });
@@ -273,7 +277,7 @@ describe("the mode off is today's", () => {
 
   it("a module page on mainnet is unchanged", () => {
     mode("off");
-    expect(moduleRouteState("/portfolio/offers", "mainnet")).toMatchObject({ disabled: true, kyc: false, route: { mode: "notice" } });
+    expect(moduleRouteState("/portfolio/offers", "mainnet")).toMatchObject({ disabled: true, route: { mode: "notice" } });
     expect(moduleNoticeText(moduleRouteState("/portfolio/offers", "mainnet")!, "mainnet")).toBe(
       "Secondary trading (OTC deals, offers and the resell board): not available on Solana mainnet.",
     );
@@ -390,38 +394,46 @@ describe("before the wallet (KYC_ONLY_FLOWS)", () => {
   });
 });
 
-describe("the mode's wording holds under the mainnet Terms", () => {
+describe("the mode's wording holds whatever the Terms in force offer", () => {
+  // Terms versions differ in what clause 2 offers (a later version may offer
+  // trading and conversion). So nothing the mode says claims which services
+  // are or are not offered: every notice is labelled "Paused."
+  // (components/pilot-module-notice.tsx, tests/kyc-only-ui.test.ts) and
+  // every sentence says "paused for now", which the emergency-pause clause
+  // covers for what the Terms offer and is true of what they do not.
   const terms = () => legalDocumentText(MAINNET_TERMS!);
-  const scope = () => MAINNET_TERMS!.clauses.find((c) => c.title === "2. Scope of the Service")!;
+  const SCOPE_CLAIM = /not available|not offered|switched off|on Solana mainnet/i;
 
-  it("primary sales are offered by the Terms and can be paused under them: their pages say 'Paused.', not 'not available'", () => {
-    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
-    mode("");
-    const offeredAt = scope().blocks.findIndex((b) => b.kind === "paragraph" && b.text === "The Service currently offers the following:");
-    const offered = scope().blocks[offeredAt + 1];
-    expect(offered.kind === "list" ? offered.items[0] : "").toMatch(/^Primary sales of share-class tokens/);
+  it("the Terms in force let the operator pause primary sales, and a pause never blocks exits", () => {
     expect(terms()).toMatch(/Emergency pause\. Any administrator can pause one or more areas of platform-mediated activity: onboarding, primary sales/);
     expect(terms()).toContain("A pause never blocks exits");
-    // The paused areas' pages carry the KYC-only state ("Paused." in components/pilot-module-notice.tsx).
-    for (const path of ["/marketplace/launchpad", "/marketplace/launchpad/S", "/apply", "/issuer/onboarding"]) {
-      expect(moduleRouteState(path, "mainnet")?.kyc, path).toBe(true);
-    }
-    // A module page is not offered by the Terms: it keeps "Not available." with the same sentence.
-    expect(moduleRouteState("/portfolio/conversion", "mainnet")?.kyc).toBe(false);
   });
 
-  it("the one sentence: paused for what the Terms offer, not available for the rest, and no promise of a date", () => {
-    expect(terms()).toContain("The following are not available at present, and the pages that carry them say so:");
-    expect(KYC_ONLY_MESSAGE).toContain("Primary sales and issuance are paused for now");
-    expect(KYC_ONLY_MESSAGE).toContain("other services are not available at the moment");
-    expect(KYC_ONLY_MESSAGE).not.toMatch(/\b(later|soon|will|shortly)\b/i);
+  it("every notice, 403, wallet refusal and the About line: paused, no claim of what is offered, no date", () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    mode("");
+    // Switches that a later Terms version could offer, set on: still paused.
+    clearModules({ secondaryTrading: "true", custodyConversion: "true" });
+    const sentences: Array<[string, string]> = [
+      ["KYC_ONLY_MESSAGE", KYC_ONLY_MESSAGE],
+      ...PILOT_MODULES.map((m): [string, string] => [m, moduleDisabledMessage(m, "mainnet")]),
+      ...SCOPE_AREAS.map((a): [string, string] => [a, scopeDisabledMessage(a, "mainnet")]),
+      ...[...MODULE_ROUTES, ...KYC_ONLY_ROUTES].map((r): [string, string] => {
+        const state = moduleRouteState(r.prefix, "mainnet");
+        return [r.prefix, state ? moduleNoticeText(state, "mainnet") : ""];
+      }),
+      ["KycOnlyFlowError", new KycOnlyFlowError(AssetRegistryInstruction.Buy).message],
+      ["modulesFact", modulesFact("mainnet")],
+    ];
+    for (const [name, sentence] of sentences) {
+      expect(sentence, name).toMatch(/paused for now/);
+      expect(sentence, name).not.toMatch(SCOPE_CLAIM);
+      expect(sentence, name).not.toMatch(/\b(later|soon|will|shortly)\b/i);
+    }
   });
 
   it("the About line names nothing as live or shipped while the mode is on", () => {
     mode("");
-    const fact = modulesFact("mainnet");
-    expect(fact).not.toMatch(/\b(live|shipped)\b/);
-    expect(fact).toMatch(/launchpad and issuer applications paused for now/);
-    expect(fact).toMatch(/built, not available on Solana mainnet$/);
+    expect(modulesFact("mainnet")).not.toMatch(/\b(live|shipped)\b/);
   });
 });

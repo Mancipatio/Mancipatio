@@ -58,7 +58,7 @@ export function AccountVerificationCard({ verification }: { verification: Accoun
           one new request taken; a company's KYB (raising, issuing) only for a
           dossier that exists (kybShown). */}
       <p className="account-card-description">{kycOnly()
-        ? "Identity verification (KYC) is open. The services that require it are not available at the moment. It applies to the wallet you are connected with."
+        ? "Identity verification (KYC) is open. The services that require it are paused for now. It applies to the wallet you are connected with."
         : "Buying and trading tokens does not require verification. It is required to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It applies to the wallet you are connected with."}</p>
       <div className="verification-rows">
         <Row kind="kyc" status={verification.kyc} documents={verification.documents_requested} />

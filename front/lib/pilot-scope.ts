@@ -23,9 +23,8 @@
 // with the same two kinds. It is consulted before MODULE_ROUTES and ONLY
 // while the mode is on (the most specific entry wins), so with the mode off
 // it adds no notice and hides nothing; the module pages need no entry there,
-// since the mode turns every module off. Its notice says "Paused." (the
-// Terms offer primary sales and issuance), a module page keeps "Not
-// available.", and both say the one KYC_ONLY_MESSAGE.
+// since the mode turns every module off. While it is on, every notice (a
+// module page's included) says "Paused." and the one KYC_ONLY_MESSAGE.
 //
 // Offered asset classes (lib/asset-classes.ts): every public list of asset
 // classes (the overview tiles, the marketplace and whitepaper filters,
@@ -144,20 +143,18 @@ export type ModuleRouteState = {
   off: ScopeName[];
   /** True when every module of the route is off. */
   disabled: boolean;
-  /** True for a page of KYC-only mode's own table (KYC_ONLY_ROUTES): its notice says "Paused.". */
-  kyc: boolean;
 };
 
 /** The module state of `path`, or null for a page outside every module. */
 export function moduleRouteState(path: string, network: Network = detectNetwork()): ModuleRouteState | null {
   if (kycOnly(network)) {
     const locked = kycOnlyRoute(path);
-    if (locked) return { route: locked, off: [...locked.modules], disabled: true, kyc: true };
+    if (locked) return { route: locked, off: [...locked.modules], disabled: true };
   }
   const route = MODULE_ROUTES.find((r) => routeMatches(path, r));
   if (!route) return null;
   const off = route.modules.filter((m) => !scopeEnabled(m, network));
-  return { route, off, disabled: off.length === route.modules.length, kyc: false };
+  return { route, off, disabled: off.length === route.modules.length };
 }
 
 /**
