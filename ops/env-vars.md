@@ -32,13 +32,13 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
-| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | pilot: leave unset (off); see "Pilot scope" | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with pause bit 0x04 cleared last (runbook §20). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms. Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | leave unset (off): physical delivery is not offered. Never `true` to let a conversion through (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
 | `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry, alarm, sanctions and fx (automatic EUR rate, 0080) workers refuse every call | `lib/server/retry-worker.ts` |
@@ -96,12 +96,24 @@ explicitly on or off.
 
 ### Pilot scope (module switches)
 
-The mainnet pilot is closed and narrow: primary sales of one issuer's
-Mature class in USDC. Every other product module has a switch
-(`lib/features.ts` `pilotModules`, same spellings and build guard as the
-flags above). **On mainnet a module is off unless its variable reads as
-on; on devnet, testnet and localnet it is on unless it reads as off**
-(`=false` rehearses the pilot scope on devnet).
+On mainnet the Terms in force decide which modules are offered. Primary
+sales in USDC are the base. Trading through Manci and conversion into
+company shares are switched on only once a Terms version that offers them
+is live: the flag goes into the **same production build** as those Terms,
+and the program's pause bit is cleared only after that build is verified
+(runbook §20 for trading, §21 for conversion, where 0x08 is cleared only
+for a short window per conversion). Every module other than primary sales
+has a switch (`lib/features.ts` `pilotModules`, same spellings and build
+guard as the flags above). **On mainnet a module is off unless its
+variable reads as on; on devnet, testnet and localnet it is on unless it
+reads as off** (`=false` rehearses the mainnet scope on devnet).
+
+Switching a module off (rollback, incident) never waits for a Terms
+change: a module the Terms offer may have its flag off. Turning trading
+through Manci off: set pause bit 0x04 first (any Admin, `/admin/platform`;
+the program then refuses direct calls too), then set the flag to `false`
+and redeploy. Conversion needs no pause step: 0x08 stays set outside its
+windows.
 
 | Module | Variable | Entry routes that answer 403 when off | On-chain entries refused before the wallet (`MODULE_FLOWS`) | Pages |
 |---|---|---|---|---|
