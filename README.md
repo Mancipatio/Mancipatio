@@ -6,8 +6,32 @@ classes with Token-2022 mints behind a transfer hook (KYC, jurisdiction and
 blocklist checks on every transfer), primary sales, custody vaults, OTC
 deals, distributions and vesting, plus the operator and investor web app.
 
-Status: **devnet only**. The programs are the v1.0.0-rc release candidate
-and have **not been audited**. Nothing here is live on mainnet.
+## Status
+
+The programs are **live on Solana mainnet since 2026-10-02**, deployed from
+the release
+[`v1.0.0-rc.1`](https://github.com/Mancipatio/Mancipatio/releases/tag/v1.0.0-rc.1)
+(commit `ec254c4`):
+
+| Program | Mainnet address | Executable hash (`solana-verify`) |
+| --- | --- | --- |
+| `asset_registry` | `FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS` | `2cfb162e19605f4613f87988e3443a8d6e0f87db99b49822588649daaca955fa` |
+| `transfer_hook` | `GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy` | `724cb70bd672698e39c28005e5dc99084cb50ec13e5363b2ffe26b33e294fbf6` |
+
+- **Verified builds**: both programs are verified against that release
+  with `solana-verify` (OtterSec's remote verification; status at
+  `https://verify.osec.io/status/<program address>`). The hashes are the
+  release's `hashes.txt`.
+- **Upgrade authority**: a Squads vault
+  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`); upgrades follow the
+  runbook (§9).
+- **Devnet** runs the same program addresses with identical bytecode.
+- **Independent audit**: formal verification with Second Prover in
+  progress. No audit report has been published yet.
+
+Which product modules are switched on is decided per network by the Terms
+in force, the module switches and the program's pause flags
+([`ops/env-vars.md`](ops/env-vars.md), "Pilot scope").
 
 ## Repository
 
