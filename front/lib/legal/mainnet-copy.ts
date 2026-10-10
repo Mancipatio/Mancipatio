@@ -6,39 +6,93 @@
 // What is here: the mainnet Terms of Service, Privacy Policy and the
 // acceptance-dialog summary.
 //
-// Version 2026-10-03 (THIS TEXT): written by engineering from the owner's
-// decisions D1-D7 of 2026-10-03, whose model counsel approved: units of an
-// open class are bearer instruments that need no identity verification to
-// buy, hold or transfer; buying needs only a wallet linked to the Service
-// (connected and signed in, the Terms in force accepted, sanctions screening
-// passed); buying in a primary sale outside the Service is not supported and
-// may lead to the blocklist and clawback; public primary sales, each
-// approved by the Operator; issuers may also transfer units from their
-// treasury directly; KYC only to convert into company shares (where the
-// issuer offers it, once switched on) and for physical delivery.
+// Version 2026-10-10 (THIS TEXT, HELD until counsel confirms its exact
+// wording): written by engineering from the owner's decisions of 2026-10-10
+// to offer trading through Manci (offers, OTC deals and the resell board)
+// and conversion into company shares on mainnet, with the identity
+// verification a conversion needs reviewed manually by the Operator. It
+// changes version 2026-10-03 without renumbering any clause: the two new
+// clauses are 7A and 7B, so every "clause N" reference keeps its meaning.
+//   - Terms: clauses 1, 2 (trading and conversion move to "currently
+//     offers"; the Operator may suspend any feature), 4 (the Operator's role
+//     in trades and conversions), 6 (identity verification at conversion),
+//     new 7A "Trading through Manci", new 7B "Conversion into company
+//     shares", 9 (OTC deal cancellation, conversion escrows, the keys as they
+//     are), 10 (screening of OTC deals, listings, conversion requests and
+//     offers), 11, 12 (trading and conversion risks), 14, 18 and 21.
+//     offeredModules: secondaryTrading and custodyConversion.
+//   - Privacy Policy: clauses 1, 2, 3, 4, 6, 7, 8, 10 and 11 (clause 11
+//     states the keys as they are and claims no hardware wallet).
+//   - Acceptance-dialog summary: points 1 and 4 (formerly 3) changed, and a
+//     new point 3 on trades; now 6 points.
+//   - Risk warning (lib/legal/risk-warning.ts): point 10 changed, new points
+//     11-13 on trades. It is shown before both deposits of an OTC deal (the
+//     seller's units and the buyer's price), as clause 12 says.
+// The hold, in code: PURCHASE_RISK_WARNING.status is "draft", so a mainnet
+// build refuses this version (lib/legal/readiness.ts), and the facts still
+// open are written as "[placeholder for counsel: ...]", which the same guard
+// refuses as a drafting leftover (lib/legal/document.ts). Keep this version
+// off main until counsel has confirmed the exact wording: on main it would
+// refuse every mainnet build, hotfixes included. The commit that records the
+// confirmation:
+//   - fills the placeholders and sets the risk warning's status back to
+//     "counsel";
+//   - if that is on a later day, moves `version` and `lastUpdated` of both
+//     documents to that day, with every other place that names the date:
+//     MAINNET_VERSION in tests/helpers/mainnet-legal-version.ts, the headers
+//     of this file, lib/legal/risk-warning.ts and lib/tos-version.ts, the
+//     HELD comment in scripts/ci/mainnet-build.sh and the switches note in
+//     ops/env-vars.md (`grep -rn 2026-10-10 front ops` lists them, next to
+//     comments where the date names the owner's decisions and stays);
+//   - turns tests/legal-slots.test.ts (HOLD_PROBLEMS, COUNSEL_PLACEHOLDERS,
+//     the rendered Terms page) and scripts/ci/mainnet-build.sh back to the
+//     pass expectations;
+//   - needs the code these Terms describe: the sanctions screen and the Terms
+//     check on a conversion request (app/api/conversion/create/route.ts,
+//     clauses 7B and 10) and the gate that lets an admin open a conversion
+//     escrow while physical delivery stays off (lib/pause-gate.ts, clause 2).
+//     "HOLD release preconditions" in tests/legal-slots.test.ts fails while
+//     either is missing from the branch;
+//   - re-reads, over a public RPC on the day of publication, the keys that
+//     clause 9 and clause 11 of the Privacy Policy describe (the super
+//     administrator, treasury, Blocklist Authority and KYC authority, the
+//     second administrator and the upgrade authority): the tests pin the
+//     wording, not the on-chain facts.
 //
-// Counsel confirmed the exact wording on 2026-10-03 (the owner's statement,
-// recorded in PR #57): PURCHASE_RISK_WARNING.status is "counsel"
-// (lib/legal/risk-warning.ts), a mainnet build takes this version, and it is
-// the text live on mainnet. The hold for a LATER version stays in code, not
-// only here, because MAINNET_LEGAL_COPY_APPROVED=true is set in production
-// and is not bound to a version: wording counsel has not confirmed yet goes
-// in with the risk warning's status set to "draft", which a mainnet build
-// refuses (lib/legal/readiness.ts). The commit that records counsel's
-// confirmation sets it back to "counsel", together with the expectations
-// that follow it (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh);
-// if that is on a later day, `version` and `lastUpdated` of both documents
-// move to that day.
+// Version 2026-10-03 (the previous one, live on mainnet): written by
+// engineering from the owner's decisions D1-D7 of 2026-10-03, whose model
+// counsel approved: units of an open class are bearer instruments that need
+// no identity verification to buy, hold or transfer; buying needs only a
+// wallet linked to the Service (connected and signed in, the Terms in force
+// accepted, sanctions screening passed); buying in a primary sale outside
+// the Service is not supported and may lead to the blocklist and clawback;
+// public primary sales, each approved by the Operator; issuers may also
+// transfer units from their treasury directly; KYC only to convert into
+// company shares (where the issuer offers it, once switched on) and for
+// physical delivery.
 //
-// Review of 2026-10-03 (PR #57): conversion into company shares is worded as
-// not available yet (its module and on-chain custody entry are off on
-// mainnet); "buying outside the Service" covers a purchase in a primary sale
+// Counsel confirmed the exact wording of 2026-10-03 on 2026-10-03 (the
+// owner's statement, recorded in PR #57): PURCHASE_RISK_WARNING.status became
+// "counsel" (lib/legal/risk-warning.ts), a mainnet build took that version,
+// and it is the text live on mainnet. The hold for a LATER version (such as
+// 2026-10-10 above) stays in code, not only here, because
+// MAINNET_LEGAL_COPY_APPROVED=true is set in production and is not bound to
+// a version: wording counsel has not confirmed yet goes in with the risk
+// warning's status set to "draft", which a mainnet build refuses
+// (lib/legal/readiness.ts). The commit that records counsel's confirmation
+// sets it back to "counsel", together with the expectations that follow it
+// (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh); if that is on a
+// later day, `version` and `lastUpdated` of both documents move to that day.
+//
+// Review of 2026-10-03 (PR #57): conversion into company shares was worded
+// as not available yet (its module and on-chain custody entry were off on
+// mainnet; version 2026-10-10 offers it); "buying outside the Service" covers a purchase in a primary sale
 // only, never units received by an issuer's direct transfer or from another
 // wallet; the EUR 3,000,000 limit applies per issuer or, where it issues
 // through an SPV, per SPV, as 0066 counts it, and the admin routes refuse a
 // higher limit on mainnet (lib/raise-cap.ts).
 //
-// Version 2026-10-02 (the previous one): the owner stated on 2026-10-02 that
+// Version 2026-10-02 (before that): the owner stated on 2026-10-02 that
 // counsel approved the drafts of 2026-09-30 (the mainnet kit's
 // 05-mainnet-copy.draft.ts and 06-privacy.draft.ts, outside the repository);
 // they were transferred verbatim, with three changes the owner decided the
@@ -48,7 +102,8 @@
 // company hardware wallet: super administrator, KYC authority, Blocklist
 // Authority, treasury; a multisig whose member is a separate hardware wallet:
 // the programs' upgrade authority; a second administrator: a software
-// wallet). Clause 11 is unchanged in 2026-10-03.
+// wallet). Clause 11 is unchanged in 2026-10-03; version 2026-10-10
+// rewrites it to the keys as they are (no hardware wallet holds them).
 //
 // Changing a text:
 //   - Each document is a LegalDocument (lib/legal/document.ts): plain
@@ -75,16 +130,17 @@
 
 import type { LegalDocument, TermsDocument } from "./document";
 
-/** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
+/** The mainnet Terms of Service, version 2026-10-10 (trading through Manci and conversion; HELD until counsel confirms the exact wording). */
 export const MAINNET_TERMS: TermsDocument | null = {
-  version: "2026-10-03",
-  lastUpdated: "2026-10-03",
+  version: "2026-10-10",
+  lastUpdated: "2026-10-10",
   lede:
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
-  // The modules clause 2 offers. It offers primary sales and an issuer's
-  // direct transfers, which have no switch, and lists every module that has
-  // one as not available: none.
-  offeredModules: [],
+  // The modules clause 2 offers: besides primary sales and an issuer's direct
+  // transfers, which have no switch, trading through Manci (clause 7A) and
+  // conversion into company shares (clause 7B). Every other module is listed
+  // there as not available.
+  offeredModules: ["secondaryTrading", "custodyConversion"],
   clauses: [
     {
       title: "1. Acceptance and scope",
@@ -99,7 +155,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Each primary sale has its own offering document, which describes the instrument, the issuer's obligations and your rights against the issuer. Your purchase transaction records the identifier and the hash of the offering document in force. On the rights attached to an instrument the offering document prevails; on your use of the Service these Terms prevail.",
+          text: "Each primary sale has its own offering document, which describes the instrument, the issuer's obligations and your rights against the issuer. Your purchase transaction records the identifier and the hash of the offering document in force. Units you acquire in a trade through Manci (clause 7A) or through an issuer's direct transfer (clause 7) carry the rights described in the offering document of their instrument, whose hash is recorded on-chain for the asset; read it before you trade or convert. On the rights attached to an instrument the offering document prevails; on your use of the Service these Terms prevail.",
         },
       ],
     },
@@ -112,19 +168,24 @@ export const MAINNET_TERMS: TermsDocument | null = {
           items: [
             "Primary sales of share-class tokens, open to the public: no invitation is needed. The Operator approves each sale (clause 7). To buy, you need a wallet linked to the Service as clause 7 describes. Buying, holding and transferring units of an open class need no identity verification (clause 6).",
             "Direct transfers by an issuer of units from its treasury to wallets it chooses (clause 7).",
+            "Trading through Manci: offers, OTC deals and the resell board, through which holders and buyers trade units with each other, paid in USDC and settled through the programs' escrow (clause 7A). Trading units of an open class needs no identity verification.",
+            "Conversion of tokens into company shares, where the issuer offers it. It requires identity verification (clauses 6 and 7B).",
           ],
         },
         { kind: "paragraph", text: "The following are not available at present, and the pages that carry them say so:" },
         {
           kind: "list",
           items: [
-            "Conversion of tokens into company shares. Once the Operator switches it on, it will be available where the issuer offers it, and it will require identity verification (clause 6).",
-            "Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances, which are switched off.",
+            "Vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances, which are switched off.",
           ],
         },
         {
           kind: "paragraph",
           text: "The on-chain programs have been through internal security reviews and automated testing only. No independent external audit has been completed.",
+        },
+        {
+          kind: "paragraph",
+          text: "The Operator may suspend any feature of the Service, including trading through Manci and conversion, at any time and without notice, for example to comply with the law or a sanctions measure, for security or for maintenance. A suspension stops new offers, deals, listings and requests through the Service; the exits of positions already opened (cancellations, expiries, refunds and returns) keep working, and your units stay in your wallet or in the escrow that holds them.",
         },
         {
           kind: "paragraph",
@@ -162,6 +223,14 @@ export const MAINNET_TERMS: TermsDocument | null = {
           kind: "paragraph",
           text: "Nothing on the Service is investment, legal, tax or accounting advice, or a recommendation to buy, hold or sell any instrument. The Operator does not assess whether an instrument is suitable for you.",
         },
+        {
+          kind: "paragraph",
+          text: "In a trade through Manci (clause 7A) the Operator provides the software and the on-chain escrow only. It is not a party to the trade and does not act for either party as agent, broker or dealer. The Service has no order book and does not match buyers and sellers; the Operator sets no price, gives no valuation and makes no promise of best execution. You choose your counterparty and agree the terms of your trade. An administrator of the Operator opens each OTC deal, and may refuse to open one or cancel it before it settles.",
+        },
+        {
+          kind: "paragraph",
+          text: "In a conversion (clause 7B) the Operator verifies your identity and runs the on-chain escrow. The shares are transferred to you by the issuer, or by the person the offering document names as the transferor; the Operator does not take title to them at any point.",
+        },
       ],
     },
     {
@@ -193,6 +262,10 @@ export const MAINNET_TERMS: TermsDocument | null = {
         {
           kind: "paragraph",
           text: "The Operator may revoke a passport, for example when a later review fails, when sanctions screening returns a match, or at your request. A wallet whose passport is revoked or has expired cannot receive units of a KYC-gated class; it keeps the units it already holds unless clause 9 applies.",
+        },
+        {
+          kind: "paragraph",
+          text: "For a conversion (clause 7B), the Operator's staff review your verification file themselves before they approve it, and the Operator then issues a passport for the wallet that holds the units to be converted. That passport must still be live, and its jurisdiction permitted, when your units are burned at the end of the conversion: the programs refuse the burn otherwise. To carry out the conversion, the Operator passes the identity details the share transfer requires to the issuer or the transferor, the notary and the company register (clause 7B and the Privacy Policy).",
         },
       ],
     },
@@ -230,6 +303,83 @@ export const MAINNET_TERMS: TermsDocument | null = {
       ],
     },
     {
+      title: "7A. Trading through Manci",
+      blocks: [
+        {
+          kind: "paragraph",
+          text: "Holders and buyers can trade units of a share class with each other through the Service. Trades are paid in USDC and settled by the on-chain programs, which hold the units, and in an OTC deal also the payment, in escrow until the trade completes. Trading takes three forms:",
+        },
+        {
+          kind: "list",
+          items: [
+            "Offers. A seller deposits units into the escrow of an offer at a fixed price for the whole quantity. Any wallet may take the offer: in one transaction the price goes from the taker straight to the seller, and the units go from the escrow to the taker. The seller can cancel the offer and take the units back until it is taken; if the seller set an expiry, an offer not taken by then can be closed by anyone, and the units return to the seller.",
+            "OTC deals. The buyer and the seller agree the terms between themselves, and either of them asks for an escrow through the Service, naming the other. Both parties are screened (clause 10), and an administrator then opens a deal that records both wallets, the units, the price and an expiry of at most 90 days. Each party deposits its side: the seller the units, the buyer the price. The deal settles when the second deposit arrives, in the same transaction: the units go to the buyer and the price to the seller. If an administrator cancels the deal before it settles, or it expires, each party's deposit is refunded to it; a deal cannot expire while it holds a deposit of a party whose wallet is on the blocklist, and an administrator cancels it instead.",
+            "Resell board. A holder can post a listing with the units, an asking price and contact details, which the board shows publicly. A listing is not a binding offer: a trade agreed through a listing is carried out as an OTC deal. The Operator may refuse or remove a listing.",
+          ],
+        },
+        {
+          kind: "paragraph",
+          text: "On the Service, you create and take offers, deposit into OTC deals and post listings with a wallet connected to the Service that has accepted the version of these Terms in force. A request for an OTC deal and a listing are also refused if the requesting wallet is on a sanctions list or belongs to a client profile the Operator has suspended (clause 10), or if the request comes from a country or region where the Service is not offered. Trading units of an open class needs no identity verification and no investor passport; on a KYC-gated class, a trade settles only to a wallet with a live passport from a permitted jurisdiction (clause 8).",
+        },
+        {
+          kind: "paragraph",
+          text: "Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service, and the parties of an OTC deal can make their deposits the same way. The Service's checks (acceptance of these Terms and the geographic restrictions of clause 10, and for an offer also payment in USDC) do not apply to such a transaction, and the Operator does not support it. The Operator screens the wallets that create or take an offer on the blockchain afterwards against sanctions lists, and may place a wallet that matches on the blocklist and move its units into quarantine (clause 9). Both parties of an OTC deal are screened before an administrator opens it (clause 10), whether or not they deposit through the Service.",
+        },
+        {
+          kind: "paragraph",
+          text: "The Operator is not a party to any trade (clause 4). The Service shows no reference price: the price is what the seller asks or what the parties agree. Your counterparty can be anyone, and the Operator does not verify who it is, beyond screening the parties of an OTC deal. A trade that has settled on-chain is final and cannot be reversed or refunded; any claim arising from it is between you and your counterparty.",
+        },
+        {
+          kind: "paragraph",
+          text: "To prevent money laundering, fraud and the evasion of sanctions, the Operator may refuse to open an OTC deal or cancel it, remove a listing, and place a wallet on the blocklist and move its units into quarantine under clause 9.",
+        },
+        {
+          kind: "paragraph",
+          text: "The programs take no fee on a trade, and the Operator charges none (clause 11). You pay the Solana network fees of your own transactions, and any tax on your trades is your own responsibility (clause 3).",
+        },
+      ],
+    },
+    {
+      title: "7B. Conversion into company shares",
+      blocks: [
+        {
+          kind: "paragraph",
+          text: "Where the issuer offers it, you can convert units into shares of the company that the offering document names. Conversion is possible only for a share class for which the issuer and the Operator have recorded a conversion target on-chain. The offering document states how many shares, or what ownership interest, each unit converts into, and the conditions that apply; on those points it prevails (clause 1).",
+        },
+        { kind: "paragraph", text: "A conversion takes these steps:" },
+        {
+          kind: "list",
+          items: [
+            "You request the conversion from your portfolio, with the wallet that holds the units, once your identity verification has been approved (clause 6). The request is screened against sanctions lists and needs your acceptance of the version of these Terms in force. You can withdraw it until an administrator opens the escrow.",
+            "An administrator reviews the request and, if it approves it, opens a conversion escrow for your wallet with a deadline between 24 hours and 365 days after opening, which is recorded on-chain. The administrator may refuse a request.",
+            "You deposit the units into the escrow. While they are there, you cannot transfer them.",
+            "The administrator starts the conversion, and the shares are transferred off-chain under the law of the company. For a company registered in Serbia, this is a written share-transfer agreement between you and the transferor, with the signatures certified by a notary, followed by the registration of the transfer with the Serbian Business Registers Agency. You must sign the documents and provide the details that the notary and the register require.",
+            "Only after the transfer has been registered does the administrator burn the escrowed units and record the completion on-chain. The burn cannot be reversed: the units cease to exist, and from the registration you hold the shares as a member of the company, under company law and the company's articles rather than under these Terms.",
+          ],
+        },
+        {
+          kind: "paragraph",
+          text: "The Operator aims to complete a conversion within [placeholder for counsel: the target period from your deposit to the registration of the transfer]. The timing also depends on you, the issuer, the notary and the register, and the escrow's deadline is set to leave room for them.",
+        },
+        {
+          kind: "paragraph",
+          text: "A transfer may need the consent of the company or of its other members, or be subject to their pre-emption right, under the law or the company's articles. Obtaining those consents and waivers is the issuer's responsibility. If a consent is refused or a pre-emption right is exercised, the conversion does not go ahead.",
+        },
+        {
+          kind: "paragraph",
+          text: "If the conversion does not go ahead, for example because a consent or the registration is refused, or because your passport has expired or been revoked before the burn, an administrator returns your units from the escrow to your wallet. Once the deadline has passed, you can also take back yourself any units that have not been burned. Your rights against the issuer under the offering document are not affected.",
+        },
+        {
+          kind: "paragraph",
+          text: "If units come back to your wallet after the transfer of the shares to you has been registered, for example because the deadline passed before the burn, they no longer carry any rights: you must not transfer them, and the Operator may place your wallet on the blocklist and move the units into quarantine, from which they can only be burned (clause 9).",
+        },
+        {
+          kind: "paragraph",
+          text: "The costs of the share transfer are borne as follows: [placeholder for counsel: who bears the notary's fees, the register's fee and any tax on the share transfer, and whether the Operator charges a fee for a conversion].",
+        },
+      ],
+    },
+    {
       title: "8. Transfers and transfer checks",
       blocks: [
         { kind: "paragraph", text: "Every transfer of a share-class token runs through the transfer_hook program:" },
@@ -260,6 +410,8 @@ export const MAINNET_TERMS: TermsDocument | null = {
             "Issuer proceeds freeze. Any administrator can freeze the proceeds of one issuer: its sales, withdrawals and payouts to it stop, and only the super administrator can lift the freeze. While it lasts, money that buyers have already paid into that issuer's sale stays locked in the sale's escrow: it is neither paid to the issuer nor refunded to buyers, who keep the units they bought.",
             "Blocklist. The Blocklist Authority can add any wallet, including a program escrow, to the blocklist, for example after a sanctions match or a purchase in a primary sale made other than through the Service (clause 7), and can remove it.",
             "Clawback. An administrator can move a holder's units, without the holder's signature, into a quarantine vault of the same share class from which they can only be burned: on any class, when the holder's wallet is on the blocklist; on a KYC-gated class, when the holder's passport was revoked, or expired at least 30 days earlier. Units moved into quarantine are never returned on-chain, including when the wallet is later removed from the blocklist.",
+            "OTC deals. An administrator can refuse to open an OTC deal and can cancel an open deal at any time before it settles; each party's deposit is then refunded to it (clause 7A).",
+            "Conversion escrows. An administrator opens a conversion escrow, starts the conversion, burns the escrowed units once the share transfer has been registered, or returns them to your wallet (clause 7B).",
             "Share-class mode. The Blocklist Authority can switch a class between open and KYC-gated transfers (clause 8).",
             "Permitted jurisdictions. The Operator's KYC authority can change at any time, with immediate effect, which jurisdictions' passports KYC-gated classes accept. A holder whose jurisdiction is no longer permitted cannot buy or receive further units of such a class.",
             "Roles and recovery. Adding an administrator or replacing the super administrator takes effect only after 48 hours, during which it can be cancelled; pausing and removing an administrator take effect at once. If the super administrator's or the Blocklist Authority's key is lost, the holder of the programs' upgrade authority can move that role to a new key after 7 days unless the current key holder cancels. If an issuer loses its key, the super administrator can move the issuer's authority to a new key after 7 days unless the issuer cancels.",
@@ -268,7 +420,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role only, and a separate key controls the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, to act on purchases in a primary sale made other than through the Service (clause 7), and in the other cases these Terms describe.",
+          text: "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role and is also the issuer authority of one issuer on the Service; and a multisig vault holds the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, to act on purchases in a primary sale made other than through the Service (clause 7), and in the other cases these Terms describe.",
         },
       ],
     },
@@ -277,7 +429,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Operator screens wallets against sanctions lists, and the Service screens your wallet before each purchase. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. A purchase in a primary sale sent directly to the programs bypasses this screening and is not supported (clause 7); the Operator screens such a purchase afterwards and may blocklist the wallet and claw back its units (clause 9), whether or not the screening finds a match. If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
+          text: "The Operator screens wallets against sanctions lists. The Service screens your wallet before each purchase; it screens the wallet that requests an OTC deal, posts a listing or requests a conversion, and both parties of an OTC deal again before the deal is opened. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. A purchase in a primary sale sent directly to the programs bypasses this screening and is not supported (clause 7); the Operator screens such a purchase afterwards and may blocklist the wallet and claw back its units (clause 9), whether or not the screening finds a match. Offers are not screened before they are created or taken: the Operator screens the wallets that create or take them on the blockchain afterwards (clause 7A). If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
         },
         {
           kind: "paragraph",
@@ -290,7 +442,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Operator currently charges buyers and holders no fee for using the Service. No platform fee is taken on-chain on purchases, and the programs' yield-routing feature, which would pay a share of routed yield to the Operator, is switched off. You pay the Solana network fees of your own transactions (clause 5).",
+          text: "The Operator currently charges buyers and holders no fee for using the Service. No platform fee is taken on-chain on purchases, trades through Manci or conversions, and the programs' yield-routing feature, which would pay a share of routed yield to the Operator, is switched off. You pay the Solana network fees of your own transactions (clause 5). The costs of the share transfer in a conversion are set out in clause 7B.",
         },
         {
           kind: "paragraph",
@@ -303,7 +455,15 @@ export const MAINNET_TERMS: TermsDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it, and only after identity verification. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
+          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
+        },
+        {
+          kind: "paragraph",
+          text: "Trading through Manci has risks of its own. There is no order book and no reference price, so you may trade at a price far from any fair value. Your counterparty can be anyone, and the Operator does not verify who it is. A settled trade is final. In an OTC deal your deposit stays in escrow until the other side deposits, and an administrator may cancel the deal before it settles. The Operator may suspend trading through Manci at any time (clause 2).",
+        },
+        {
+          kind: "paragraph",
+          text: "Conversion depends on steps outside the blockchain: the co-operation of the issuer and, where needed, of the company's other members, a notary and the company register. A consent or the registration can be refused or delayed. The burn of your units at the end of a conversion cannot be reversed, and afterwards you hold shares of the company, which may be harder to sell than units.",
         },
         {
           kind: "paragraph",
@@ -311,7 +471,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "The risk disclosure page and the risk warning shown before each purchase describe these risks in more detail. Do not commit money you cannot afford to lose entirely.",
+          text: "The risk disclosure page and the risk warning shown before each purchase, before you take an offer and before you deposit into an OTC deal describe these risks in more detail. Do not commit money you cannot afford to lose entirely.",
         },
       ],
     },
@@ -345,6 +505,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
             "hiding your location or identity, using another person's identity or wallet, or acting for a person who is not eligible under clause 3;",
             "money laundering, terrorist financing, fraud or market manipulation;",
             "buying in a primary sale other than through the Service (clause 7);",
+            "manipulating prices or volumes through offers, OTC deals or listings, including trading with yourself or with wallets you control or act together with, and posting a listing you do not intend to honour;",
             "interfering with the Service or the on-chain programs, or exploiting a defect in them instead of reporting it to the security contact published on the Security page;",
             "scraping, overloading or attacking the Service.",
           ],
@@ -395,7 +556,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Privacy Policy describes how the Operator processes personal data. The Service records your wallet address with each acceptance of these Terms. Information written to the Solana blockchain, including your passport, if one is issued (clause 6), and your transactions, is public and cannot be deleted.",
+          text: "The Privacy Policy describes how the Operator processes personal data. The Service records your wallet address with each acceptance of these Terms. Information written to the Solana blockchain, including your passport, if one is issued (clause 6), and your transactions, is public and cannot be deleted. If you convert units into company shares, your identity and your shareholding are entered in the company register, which the public can consult (clause 7B).",
         },
       ],
     },
@@ -427,7 +588,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
         {
           kind: "list",
           items: [
-            "These Terms, together with the Privacy Policy, the offering document of each sale you take part in and the risk warning you confirm, are the whole agreement between you and the Operator on your use of the Service.",
+            "These Terms, together with the Privacy Policy, the offering document of each sale you take part in and of each instrument you trade or convert, and the risk warning you confirm, are the whole agreement between you and the Operator on your use of the Service.",
             "If a provision of these Terms is invalid, the others remain in force.",
             "You may not transfer your rights under these Terms without the Operator's consent. The Operator may transfer them to a successor that takes over the operation of the Service.",
             "These Terms are written in English. A translation is for convenience only.",
@@ -438,10 +599,10 @@ export const MAINNET_TERMS: TermsDocument | null = {
   ],
 };
 
-/** The mainnet Privacy Policy, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
+/** The mainnet Privacy Policy, version 2026-10-10 (trading through Manci and conversion; HELD until counsel confirms the exact wording). */
 export const MAINNET_PRIVACY: LegalDocument | null = {
-  version: "2026-10-03",
-  lastUpdated: "2026-10-03",
+  version: "2026-10-10",
+  lastUpdated: "2026-10-10",
   lede:
     "This Privacy Policy explains what personal data we collect when you use Manci, why we use it, who receives it, how long we keep it and which rights you have. It also explains what becomes public on the Solana blockchain when you use the platform, which no one can delete.",
   clauses: [
@@ -454,7 +615,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Some features described below are available only where an issuer offers them, or not at all times. Where a feature is not offered to you, we do not collect the data it needs. You do not need to verify your identity to buy or hold tokens of an open class (a class that is not KYC-gated under our Terms).",
+          text: "Some features described below are available only where an issuer offers them, or not at all times. Where a feature is not offered to you, we do not collect the data it needs. You do not need to verify your identity to buy, hold or trade tokens of an open class (a class that is not KYC-gated under our Terms); you do to convert tokens into company shares.",
         },
       ],
     },
@@ -472,7 +633,8 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "your token balances and the history of your holdings;",
             "your investor passport, if we issue one: the wallet it belongs to, its status, a numeric code of your jurisdiction, your investor category, its expiry and a one-way reference to your verification file with us (it contains no name and no document);",
             "the fact that a wallet was placed on the blocklist, that its tokens were moved into quarantine, or that an issuer's proceeds were frozen, if we take one of these measures under our Terms;",
-            "the identifier and fingerprint of the offering document you accepted, which your purchase transaction records.",
+            "the identifier and fingerprint of the offering document you accepted, which your purchase transaction records;",
+            "the trades and conversions your wallet takes part in: for an offer, the seller's wallet, the units, the price and the wallet that takes it; for an OTC deal, both wallets, the units and the price; for a conversion, your wallet, the units you deposit into the escrow, their burn and the fingerprint of the document the escrow records.",
           ],
         },
         {
@@ -497,11 +659,12 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "Company verification (KYB) data, when you act for a company: its name, registration number, country, registered address and website, your role, your name, country of residence, address and contact details, a copy of your passport or identity card, and corporate documents such as the certificate of incorporation or a registry extract, board resolutions and a description of the company's ownership and beneficial owners.",
             "Verification records: the status and history of our verification decisions and their dates, the documents we requested and their review status, notes our staff add to your file, and a log of each time our staff open or export your documents.",
             "Investor passport requests: the wallet, the jurisdiction you state, any note you add, and the outcome.",
-            "Transaction records: your purchases (wallet, sale, amount and transaction reference), including purchases in a primary sale made outside the platform that we see on the blockchain, each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
+            "Transaction records: your purchases (wallet, sale, amount and transaction reference), including purchases in a primary sale made outside the platform that we see on the blockchain, your trades through Manci and your conversions, each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
             "Issuer applications: when you apply to raise funds, information about the company (for example its valuation, revenue, existing investors and plans), the founder's name, email address, social media profiles and statement, pitch materials, and the history of our review.",
             "Requests you make where these services are offered: contact details and notes for converting tokens into shares, a delivery address and contact details for the delivery of goods, requests for over-the-counter trades, and contact details you add to a resale listing, which the resale board shows publicly.",
+            "Conversion records, when you convert tokens into company shares: the share-transfer agreement, the notary's certification, the company register's decision, the data these require, such as your full name, your personal identification or passport number and your address, and the evidence of each step of the conversion.",
             "Messages: your name, email address, company and message when you use the contact form or write to us.",
-            "Sanctions screening results: before each purchase through the platform, when a wallet uses certain other features, and afterwards for each purchase we see on the blockchain, we check the wallet against public sanctions lists, currently the list of Specially Designated Nationals published by the United States Treasury. A match creates an internal compliance record with the wallet, the list and the details of the match.",
+            "Sanctions screening results: before each purchase through the platform, when a wallet uses certain other features, and afterwards for each purchase and each offer created or taken that we see on the blockchain, we check the wallet against public sanctions lists, currently the list of Specially Designated Nationals published by the United States Treasury. A match creates an internal compliance record with the wallet, the list and the details of the match.",
             "Technical data: your IP address and the country derived from it, which we use while handling a request to limit abuse, to run a bot check and to refuse access from countries where the service is not offered. We store the IP address only as a one-way hash in short-lived abuse counters. Our hosting provider keeps request and error logs, which include IP addresses and can include other identifiers contained in error messages, such as email or wallet addresses. The error reports we send to our error-monitoring provider have identifiers such as email and wallet addresses removed as far as we can detect them.",
           ],
         },
@@ -520,6 +683,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "To create and run your account, let you sign in and provide the features you use: to perform our agreement with you.",
             "To verify the identity of investors and issuers, keep records of that verification, screen wallets against sanctions lists, monitor purchases in primary sales made outside the platform, and prevent money laundering, terrorist financing and fraud: to comply with our legal obligations and, where no specific law requires a step, for our legitimate interest in keeping the platform lawful and safe.",
             "To issue, renew and revoke investor passports and to apply the transfer rules of the tokens you hold: to perform our agreement with you and to comply with our legal obligations.",
+            "To carry out a conversion of tokens into company shares that you request, including preparing the share transfer with the issuer and the notary and filing it with the company register: to perform our agreement with you and to comply with our legal obligations.",
             "To review applications from issuers and decide on them: to take the steps you ask for before entering into an agreement.",
             "To secure the platform, limit abuse, refuse access from countries where the service is not offered, and find and fix errors: our legitimate interest in a secure and lawful service.",
             "To send you messages about your account, sign-in, verification, requests and transactions: to perform our agreement with you. We do not send marketing email.",
@@ -551,7 +715,8 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "Our staff and the people who operate the platform for us, each only as far as their role requires. Only administrators and staff with the verification role can open identity documents, through links that expire after two minutes (ten minutes in a data export, which only administrators can create), and every opening and export is logged.",
             "Service providers that process data for us under our instructions: Supabase (database and file storage), Vercel (website hosting and server functions), our email delivery and mailbox providers, Cloudflare (bot check on the email sign-in and contact forms), Helius (blockchain infrastructure, including the requests your browser sends to read the blockchain and submit transactions, and notices of platform transactions), and Sentry (error monitoring).",
             "Google, if you choose to sign in with or link a Google account. Google handles that sign-in under its own privacy terms.",
-            "Issuers see the purchases made in their own sales (wallet, amount and status), which are also public on the blockchain; they do not receive your verification data from us. Where you request a conversion of tokens into shares or a delivery of goods, where these services are offered, we share with the issuer, the custodian or a public register only the details needed to carry it out.",
+            "Issuers see the purchases made in their own sales (wallet, amount and status), which are also public on the blockchain; they do not receive your verification data from us except for a conversion, as described next. Where you request a conversion of tokens into shares, we share the details needed to carry it out with the issuer (or the person who transfers the shares to you), the company whose shares you receive, the notary who certifies the transfer and the company register, which publishes the entry; and with the tax authorities where the law requires it. Where you request a delivery of goods, where this service is offered, we share with the issuer or the custodian only the details needed to carry it out.",
+            "Your counterparties in a trade through Manci see your wallet address, and anyone can see the contact details you add to a resale listing.",
             "Authorities, courts and our professional advisers, where the law requires it or where it is necessary to establish, exercise or defend legal claims, including reports that anti-money-laundering or sanctions law requires.",
             "A successor or trustee, if the business is transferred or wound down, bound by the same obligations as in this policy.",
           ],
@@ -567,7 +732,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Our database and file storage are hosted in Ireland and our server functions run in Dublin, Ireland. Other service providers, for example for email, blockchain infrastructure, the bot check and Google sign-in, may process data in other countries, including the United States. The controller named at the top of this page is incorporated outside the European Economic Area, and our staff and service providers may access the data from other countries. Where the law that applies requires it, we protect these transfers with appropriate safeguards, such as the standard contractual clauses approved by the European Commission. Data on the blockchain is replicated worldwide.",
+          text: "Our database and file storage are hosted in Ireland and our server functions run in Dublin, Ireland. Other service providers, for example for email, blockchain infrastructure, the bot check and Google sign-in, may process data in other countries, including the United States. The controller named at the top of this page is incorporated outside the European Economic Area, and our staff and service providers may access the data from other countries. Where the law that applies requires it, we protect these transfers with appropriate safeguards, such as the standard contractual clauses approved by the European Commission. When you convert tokens into shares of a company registered in Serbia, the data the transfer needs goes to the notary and the company register in Serbia, which is outside the European Economic Area. Data on the blockchain is replicated worldwide.",
         },
       ],
     },
@@ -580,6 +745,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "Verification data and documents, verification records and transaction records: while our relationship with you lasts and afterwards for the period that the anti-money-laundering and record-keeping laws that apply to us require. We then delete your documents and verification details and remove your name and contact details from your file. We keep a minimal record of our verification decisions and of your transactions, linked to your wallet, because the on-chain records cannot be removed and we must be able to account for them.",
             "Your account (display name, email address and linked Google account): until you ask us to delete it or we close the account.",
             "Issuer applications, messages and service requests: as long as we need them to handle the matter, and afterwards as long as the law or the defence of legal claims requires.",
+            "Conversion records: for the period that the anti-money-laundering, company and record-keeping laws that apply require, and afterwards as long as the defence of legal claims requires. The entry in the company register is kept by the register under its own rules.",
             "Sanctions screening records and the log of our staff's actions: for the period that the law requires for compliance records.",
             "Your acceptances of our Terms: as long as the Terms can be relied on by you or by us, including after the rest of your file has been deleted.",
             "Email sign-in links expire after 20 minutes and are deleted after they expire. Links to confirm a new email address expire after 30 minutes; the new address stays pending in your account until you confirm it, cancel the change or ask for another link. One-time sign-in values are deleted within minutes after they expire. Hashed abuse counters are deleted after about a day without use.",
@@ -634,7 +800,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Some of these rights are limited: we cannot erase or change on-chain records (clause 2), and we may keep data that the law requires us to keep, or that we need for legal claims, until that period ends.",
+          text: "Some of these rights are limited: we cannot erase or change on-chain records (clause 2) or the entries a company register has made public, and we may keep data that the law requires us to keep, or that we need for legal claims, until that period ends.",
         },
         {
           kind: "paragraph",
@@ -647,7 +813,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "We protect personal data with technical and organisational measures appropriate to the risk, including: encrypted connections; identity documents kept in private storage that browsers cannot reach directly; database tables with personal data closed to the public keys the website uses; staff access to documents through links that expire within minutes (two minutes for a single view, ten minutes in a data export), with every opening and export logged; wallet signatures for administrative actions; our company's hardware wallet, which holds the super administrator, KYC authority and Blocklist Authority roles and the treasury; and a multisig, with a separate hardware wallet as its member, that holds the authority to upgrade the on-chain programs. A second administrator uses a software wallet.",
+          text: "We protect personal data with technical and organisational measures appropriate to the risk, including: encrypted connections; identity documents kept in private storage that browsers cannot reach directly; database tables with personal data closed to the public keys the website uses; staff access to documents through links that expire within minutes (two minutes for a single view, ten minutes in a data export), with every opening and export logged; and wallet signatures for administrative actions. The keys that control the platform are currently held as follows: one company key, a software wallet, holds the super administrator, KYC authority and Blocklist Authority roles and the treasury; a second administrator key, also a software wallet, is also the authority key of one issuer on the platform; and a Squads multisig vault holds the authority to upgrade the on-chain programs.",
         },
         {
           kind: "paragraph",
@@ -685,11 +851,12 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
   ],
 };
 
-/** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-03 (wording confirmed by counsel on 2026-10-03). */
+/** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-10 (HELD until counsel confirms the exact wording). */
 export const MAINNET_TOS_GATE_POINTS: string[] | null = [
-  "You can buy in a primary sale only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying an open class needs no identity verification; converting tokens into company shares does.",
+  "You can buy in a primary sale only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying or trading an open class needs no identity verification; converting tokens into company shares does, and ends with your tokens burned once the share transfer is registered.",
   "Tokens are bearer instruments held in your own wallet. A lost key or a confirmed transaction cannot be reversed, and a confirmed purchase is not refunded.",
-  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, blocklist wallets (for example after a sanctions match or a purchase in a primary sale made outside the Manci site), and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
+  "In trades through Manci (offers and OTC deals), Manci is not a party: it sets no prices and does not verify who your counterparty is. Trades are paid in USDC, and a settled trade is final.",
+  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, cancel an OTC deal before it settles (refunding the deposits), blocklist wallets (for example after a sanctions match or a purchase in a primary sale made outside the Manci site), and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
   "The on-chain programs have had internal security reviews only, and no independent external audit. You can lose all of the money you commit, and no investor protection scheme covers it.",
   "Your acceptance is recorded against your wallet address and this version of the Terms.",
 ];

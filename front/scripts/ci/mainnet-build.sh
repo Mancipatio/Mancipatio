@@ -42,8 +42,9 @@
 #     { notAssigned }, as the committed mainnet record states both), which
 #     must pass; a tax ID left null must not. It never leaves this checkout;
 #     the committed slots stay as they are: before the fixture is written,
-#     the config must load with them (and the licence waiver), and
-#     tests/legal-slots.test.ts checks their content. The
+#     the config must load with them (and the licence waiver), or, while a
+#     new version of the texts is held for counsel, be refused for the hold
+#     (see "8.1" below), and tests/legal-slots.test.ts checks their content. The
 #     fixture avoids the words the guard treats as drafts (placeholder, TODO,
 #     TBD, devnet, ...).
 # A run killed where no trap fires (SIGKILL, OOM) leaves the fixture in those
@@ -247,23 +248,37 @@ expect_refusal "NEXT_PUBLIC_KYC_REGISTRY is not set" "${PLACEHOLDERS[@]}" NEXT_P
 if grep -q '^export const MAINNET_TERMS: TermsDocument | null = null;$' lib/legal/mainnet-copy.ts; then
   expect_refusal "the operator and legal slots are not complete" "${PLACEHOLDERS[@]}"
 else
-  # The committed slots (version 2026-10-03 of the legal texts) pass with
-  # counsel's licence waiver (no licence recorded): counsel confirmed the
-  # 2026-10-03 wording (owner, 2026-10-03, PR #57) and the risk warning's
-  # status is "counsel" (lib/legal/risk-warning.ts). A later version committed
-  # before counsel confirms it carries status "draft"; this case then expects
-  #   expect_refusal "Purchase risk warning: still engineering's draft" \
+  # HELD: the committed slots carry version 2026-10-10 of the legal texts
+  # (trading through Manci and conversion), which counsel has not confirmed
+  # word for word yet. The risk warning's status is "draft"
+  # (lib/legal/risk-warning.ts) and the Terms still carry counsel's
+  # placeholders, so even with counsel's licence waiver the build is refused,
+  # on both counts. The commit that records counsel's confirmation fills the
+  # placeholders, sets the status back to "counsel" and swaps these two
+  # refusals back to
+  #   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
   #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
-  # until the commit that records the confirmation (drop the waiver here if a
-  # licence is ever recorded).
-  expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
+  # followed by the module cases against the committed Terms, which the hold
+  # does not reach (the legal guard runs first): the flags production ships
+  # with them (trading through Manci and conversion on) pass, and the same
+  # flags with physical delivery, or any module the Terms do not offer, are
+  # refused:
+  #   expect_config_pass "the committed Terms with the production flags (trading and conversion on)" \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true \
+  #     NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true
+  #   expect_refusal 'NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY="true" switches on custodyDelivery, which the mainnet Terms do not offer' \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true \
+  #     NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true \
+  #     NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=true
+  #   expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
+  # (drop the waiver here if a licence is ever recorded). Until then
+  # tests/terms-modules.test.ts checks the committed offeredModules against
+  # the guard directly.
+  expect_refusal "Purchase risk warning: still engineering's draft" \
     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
-  # The module flags are checked against the committed Terms
-  # (MAINNET_TERMS.offeredModules): they do not offer governance, so its
-  # flag on is refused (the cases after 8.4 use the fixture's Terms; change
-  # the module here if a version ever offers governance).
-  expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
-    "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
+  expect_refusal "Terms of Service: contains wording that must not reach mainnet \(placeholder\)" \
+    "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
 fi
 write_legal_fixture incomplete-operator
 expect_refusal "operator\.taxId \(tax identification number, .*\) is not set" "${PLACEHOLDERS[@]}"

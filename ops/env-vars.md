@@ -139,7 +139,8 @@ pilot keeps set), and `lib/pause-gate.ts` reads those before a wallet signs.
 **The switches follow the Terms.** A mainnet build refuses a module flag
 that reads as on while the mainnet Terms do not offer that module:
 `MAINNET_TERMS.offeredModules` in `lib/legal/mainnet-copy.ts` lists, by
-name, the modules clause 2 offers (none in version 2026-10-03). This
+name, the modules clause 2 offers (none in version 2026-10-03;
+`secondaryTrading` and `custodyConversion` from version 2026-10-10). This
 covers the seven switches above plus `PAYOUT_AIRDROP` and `STARTUP_RAISES`
 (`next.config.ts` `assertBuildMainnetModules`, `TERMS_MODULE_FLAGS`);
 `ISSUER_ROTATION` and `PASSPORT_CLOSE` are operational and not covered.

@@ -96,9 +96,11 @@ export function featureDisabledMessage(
 
 // ── Pilot scope: one switch per product module (lansiranje-6) ─────────────
 //
-// The mainnet scope is narrow: primary sales (Mature, USDC) and nothing else
-// (Terms clause 2, lib/legal/mainnet-copy.ts). Every other module is a switch
-// here, OFF on mainnet
+// The mainnet scope is what Terms clause 2 offers (lib/legal/mainnet-copy.ts):
+// primary sales (Mature, USDC) and, from version 2026-10-10, trading through
+// Manci (secondaryTrading) and conversion into company shares
+// (custodyConversion); the other modules are not offered. Every module is a
+// switch here, OFF on mainnet
 // unless its NEXT_PUBLIC_FEATURE_* variable reads as on, and ON elsewhere
 // unless it reads as off (so devnet can rehearse the pilot scope). Same
 // spellings and build guard as the flags above (next.config.ts

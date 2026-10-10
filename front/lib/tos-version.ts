@@ -9,11 +9,13 @@
 // (app/(marketing)/legal/terms/devnet-terms.tsx): bump DEVNET_TOS_VERSION when
 // that text changes materially. Mainnet shows counsel's Terms
 // (lib/legal/mainnet-copy.ts), whose own `version` is the one accepted there:
-// 2026-10-03, the Terms of the owner's decisions D1-D7 (the acceptance dialog
-// shows "v2026-10-03", /legal/terms "Last updated: 2026-10-03"). It replaced
-// 2026-10-02, so every mainnet wallet accepts again: the client cache key, the
-// /api/tos/accept check and the server gate all take this version, and the
-// 2026-10-02 rows stay as history.
+// 2026-10-10, the Terms that offer trading through Manci and conversion into
+// company shares (the acceptance dialog shows "v2026-10-10", /legal/terms
+// "Last updated: 2026-10-10"). It is held until counsel confirms its exact
+// wording: a mainnet build refuses it until then (lib/legal/risk-warning.ts
+// status "draft"). It replaces 2026-10-03, so every mainnet wallet accepts
+// again: the client cache key, the /api/tos/accept check and the server gate
+// all take this version, and the 2026-10-03 rows stay as history.
 
 import { detectNetwork, type Network } from "@/lib/network";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";

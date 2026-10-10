@@ -62,8 +62,10 @@ const FRESH = [
 ];
 const CURRENT = tosVersionFor("mainnet");
 const OLD = DEVNET_TOS_VERSION;
-/** The buy's block time: after the current mainnet version's date. */
-const T = Date.parse("2026-10-05T12:00:00Z");
+/** The buy's block time: two and a half days after the current mainnet
+ *  version's date (2026-10-05T12:00Z for version 2026-10-03), so the cases
+ *  follow a new Terms version. */
+const T = Date.parse(`${CURRENT}T00:00:00Z`) + 2.5 * 86_400_000;
 const at = (offsetMs: number) => new Date(T + offsetMs).toISOString();
 
 const buyIx = (buyer: string, units: bigint = BigInt(250), mint: string = MINT, program: string = R): Ix => ({
