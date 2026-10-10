@@ -10,6 +10,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { getSupabase, recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
+import { scopeEnabled } from "@/lib/features";
 import {
   markVestingMilestonePublished,
   readVestingBeneficiaries,
@@ -103,6 +104,10 @@ export default function VestingDetailPage() {
   }, [refresh]);
 
   const canEdit = canManage;
+  // KYC-only mode (lib/features.ts): issuance is paused, so publishing and
+  // going live are refused (api/vesting answers 403); marking completed and
+  // cancelling stay. With the mode off the page is today's.
+  const entriesOn = scopeEnabled("issuance");
 
   const vestedNow = useMemo(() => {
     if (!milestones) return BigInt(0);
@@ -297,7 +302,7 @@ export default function VestingDetailPage() {
 
         {canEdit && (
           <div className="mt-5 flex flex-wrap gap-2">
-            {schedule.status === "merkle_built" && (
+            {schedule.status === "merkle_built" && entriesOn && (
               <button
                 type="button"
                 onClick={() =>
@@ -312,7 +317,7 @@ export default function VestingDetailPage() {
                 Mark as published
               </button>
             )}
-            {schedule.status === "published" && (
+            {schedule.status === "published" && entriesOn && (
               <button
                 type="button"
                 onClick={() =>
@@ -409,7 +414,7 @@ export default function VestingDetailPage() {
                         {ms.length} / {beneficiaries?.length ?? 0}
                       </td>
                       <td className="px-4 py-2 text-right">
-                        {canEdit && !m.published && (
+                        {canEdit && entriesOn && !m.published && (
                           <button
                             type="button"
                             onClick={() => void markMilestonePublished(m.idx)}

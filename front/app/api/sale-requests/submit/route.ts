@@ -29,6 +29,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { requireArea } from "@/lib/server/feature-gate";
 import { detectNetwork } from "@/lib/network";
 import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
 import { requireDocumentVersion } from "@/lib/server/document-versions";
@@ -48,6 +49,8 @@ import { ARCHIVED_ASSET_REFUSAL, requireNotArchived } from "@/lib/server/archive
 
 export async function POST(request: Request) {
   try {
+    // KYC-only mode (lib/features.ts): an issuer's request to open a sale is a primary-sales entry.
+    requireArea("primarySales");
     const { wallet, params, via } = await verifySigned(request, "saleRequests.submit");
     const network = detectNetwork();
     const shareClass = addressParam(params.share_class, "share_class");

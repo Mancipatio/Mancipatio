@@ -42,6 +42,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireDocumentVersion } from "@/lib/server/document-versions";
 import { requireProfileOwner } from "@/lib/server/profile-read";
+import { requireArea } from "@/lib/server/feature-gate";
 import { protectSaleRequest } from "@/lib/server/sale-requests";
 import { protectArchive } from "@/lib/archive";
 
@@ -129,6 +130,22 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** The fields of a take-down: components/asset-detail.tsx setPublished(false). */
+const TAKE_DOWN_FIELDS = new Set(["asset_pda", "category", "issuer_pda", "status", "is_published"]);
+
+/**
+ * True for a patch that only takes the profile down (is_published=false,
+ * status draft or untouched, nothing else): the Unpublish button. An exit,
+ * open in KYC-only mode like a listing's take-down.
+ */
+function isProfileTakeDown(cleaned: Record<string, unknown>): boolean {
+  return (
+    cleaned.is_published === false &&
+    (cleaned.status === undefined || cleaned.status === "draft") &&
+    Object.keys(cleaned).every((key) => TAKE_DOWN_FIELDS.has(key))
+  );
+}
+
 /** Non-throwing admin probe: 403 -> false; 503 (RPC down) propagates so we
  *  never fall through to a weaker path while auth checks are blind. */
 async function isAdminWallet(wallet: string): Promise<boolean> {
@@ -209,6 +226,9 @@ export async function POST(request: Request) {
       (whitepaperStatus !== undefined && SSC_STATUS_VALUES.has(whitepaperStatus));
     const touchesExemption = Object.keys(cleaned).some((k) => EXEMPTION_FIELDS.has(k));
     if (!admin) {
+      // KYC-only mode (lib/features.ts): editing or publishing a profile is an
+      // issuance entry; taking it down (Unpublish) stays open.
+      if (!isProfileTakeDown(cleaned)) requireArea("issuance");
       if (touchesSsc) {
         throw new SiwsError(
           403,

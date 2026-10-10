@@ -2,10 +2,14 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { AppShell } from "@/components/app-shell";
 import { VerificationForm } from "@/components/verification-form";
+import { kycOnly } from "@/lib/features";
 
 export const metadata: Metadata = {
   title: "Verification · Manci",
-  description: "Verify your identity (KYC) to convert tokens into company shares, take delivery, get an investor passport for KYC-gated classes or raise as an individual founder — or your company (KYB) to raise and issue on Manci.",
+  // KYC-only mode (lib/features.ts): identity verification is the one open action.
+  description: kycOnly()
+    ? "Verify your identity (KYC) on Manci."
+    : "Verify your identity (KYC) to convert tokens into company shares, take delivery, get an investor passport for KYC-gated classes or raise as an individual founder — or your company (KYB) to raise and issue on Manci.",
 };
 
 export default function VerifyPage() {

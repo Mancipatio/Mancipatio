@@ -21,6 +21,7 @@ import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireProfileOwner } from "@/lib/server/profile-read";
+import { requireArea } from "@/lib/server/feature-gate";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -94,6 +95,8 @@ export async function POST(request: Request) {
     // ---- Authorization: admin OR the on-chain Issuer.authority. ----
     const admin = await isAdminWallet(wallet);
     if (!admin) {
+      // KYC-only mode (lib/features.ts): an issuer's company profile is an issuance entry.
+      requireArea("issuance");
       await requireProfileOwner(wallet, issuerPda, "issuer");
     }
 

@@ -35,6 +35,12 @@
 // DeliveryEscrow), the page that builds the instruction declares what it is
 // for (withGateFacts), and the gate reads that declaration.
 //
+// KYC-only mode (lib/features.ts kycOnly) refuses more on top of the
+// modules: KYC_ONLY_FLOWS below lists the entries of primary sales and
+// issuance (no module switch of their own) and the follow-up entries into
+// what a module started. It is read first, and only while the mode is on, so
+// with the mode off the scope check is exactly MODULE_FLOWS.
+//
 // Enforcement stays on-chain (the pause) and on the server (the module
 // routes). This is a display gate: the pause read is cached for a few
 // seconds and fails OPEN (a failed read lets the transaction go on to the
@@ -48,6 +54,8 @@
 
 import type { Address } from "@solana/kit";
 import {
+  kycOnly,
+  KYC_ONLY_MESSAGE,
   moduleDisabledMessage,
   moduleEnabled,
   type PilotModule,
@@ -381,11 +389,60 @@ export class ModuleDisabledFlowError extends Error {
   }
 }
 
-/** Throws ModuleDisabledFlowError when an instruction belongs to a switched-off module. No chain read. */
+// ── KYC-only mode: the on-chain entries it refuses on top of the modules ──
+
+/**
+ * While KYC-only mode is on (lib/features.ts kycOnly) every module is off,
+ * so MODULE_FLOWS above refuses its entries already; these are refused too:
+ * primary sales and issuance (no module switch; on-chain only PAUSE_PRIMARY
+ * 0x02 and PAUSE_ONBOARDING 0x01 stop them) and the follow-up entries into
+ * what a module started (a custody deposit, a vesting series' positions, its
+ * finalization and its escrow deposit). Like MODULE_FLOWS it has no wallet
+ * context: an admin's open_sale, mint_to_treasury, register_issuer,
+ * create_asset or share-class set-up is refused as well while the mode is
+ * on. Never listed: exits, the KYC registry (approve/revoke holder, registry
+ * authority), KYB decisions, the pause, custody recording
+ * (trigger/realize/return/revert), clawback, share-class configuration
+ * (set_convertible_to, update_mint_metadata), and the obligations of what
+ * exists (approve_vesting_tranche, post_update, cast_vault_vote).
+ */
+export const KYC_ONLY_FLOWS: readonly AssetRegistryInstruction[] = [
+  Ix.Buy, Ix.OpenSale, Ix.MintToTreasury,
+  Ix.RegisterIssuer, Ix.CreateAsset, Ix.AddShareClass, Ix.InitializeShareClassMint,
+  Ix.DepositToCustodyVault, Ix.AddVestingPosition, Ix.FinalizeVestingSeries, Ix.DepositToVestingEscrow,
+];
+
+/** The first instruction KYC-only mode refuses, or null (always null while the mode is off). */
+export function kycOnlyInstruction(
+  instructions: readonly InstructionLike[],
+  network: Network = detectNetwork(),
+): AssetRegistryInstruction | null {
+  if (!kycOnly(network)) return null;
+  for (const { instruction } of registryInstructions(instructions)) if (KYC_ONLY_FLOWS.includes(instruction)) return instruction;
+  return null;
+}
+
+/** Thrown before any wallet prompt for an entry KYC-only mode pauses. */
+export class KycOnlyFlowError extends Error {
+  readonly instruction: AssetRegistryInstruction;
+  constructor(instruction: AssetRegistryInstruction) {
+    super(`${KYC_ONLY_MESSAGE} Nothing was sent to your wallet.`);
+    this.name = "KycOnlyFlowError";
+    this.instruction = instruction;
+  }
+}
+
+/**
+ * Throws KycOnlyFlowError for an entry KYC-only mode pauses, then
+ * ModuleDisabledFlowError when an instruction belongs to a switched-off
+ * module. No chain read.
+ */
 export function assertInstructionsInScope(
   instructions: readonly InstructionLike[],
   network: Network = detectNetwork(),
 ): void {
+  const locked = kycOnlyInstruction(instructions, network);
+  if (locked !== null) throw new KycOnlyFlowError(locked);
   const hit = outOfScopeInstruction(instructions, network);
   if (hit) throw new ModuleDisabledFlowError(hit.module, hit.instruction, network);
 }

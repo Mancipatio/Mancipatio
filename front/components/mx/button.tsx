@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { kycOnlyHides } from "@/lib/pilot-scope";
 import { cx } from "./cx";
 
 export type ButtonProps = {
@@ -52,6 +53,10 @@ export function Button({
     size === "sm" && "mx-btn--sm",
     className,
   );
+
+  // KYC-only mode: no link into what it pauses (lib/pilot-scope.ts
+  // kycOnlyHides; exactly today's behaviour while the mode is off).
+  if (href !== undefined && kycOnlyHides(href)) return null;
 
   if (href !== undefined) {
     return (
@@ -114,6 +119,13 @@ export function TextLink({
   target?: string;
   rel?: string;
 }) {
+  // KYC-only mode: no link into what it pauses (lib/pilot-scope.ts
+  // kycOnlyHides; exactly today's behaviour while the mode is off). The
+  // words stay as plain text, so a sentence around the link still reads;
+  // a trailing link arrow ("Issuer operations →") goes with the link.
+  if (kycOnlyHides(href)) {
+    return <span className={className}>{typeof children === "string" ? children.replace(/\s*[→↗]$/, "") : children}</span>;
+  }
   return (
     <Link href={href} className={cx("mx-link", className)} target={target} rel={rel}>
       {children}

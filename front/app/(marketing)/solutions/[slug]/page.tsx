@@ -13,8 +13,30 @@ import {
   TextLink,
   type StepItem,
 } from "@/components/mx";
-import { navHrefVisible } from "@/lib/pilot-scope";
+import { allAssetClassesOffered, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
 import { getSolution, SOLUTIONS } from "@/lib/solutions";
+import { ASSET_TYPE_LABEL } from "@/lib/format";
+import { slugForEnum } from "@/lib/asset-types";
+import type { AssetType } from "@/lib/generated/asset_registry";
+
+/**
+ * The tokenization guide's asset types: the classes offered on this network
+ * (lib/asset-classes.ts), in the on-chain enum order of ASSET_TYPE_LABEL.
+ * With every class offered, the sentence is the one it always was.
+ */
+function OfferedAssetTypes() {
+  const terms = "An asset identifies the instrument; its share classes define the units and their economic terms.";
+  if (allAssetClassesOffered()) {
+    return <>Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other. {terms}</>;
+  }
+  const offered = ASSET_TYPE_LABEL.filter((_, i) => assetClassOffered(slugForEnum(i as AssetType))).map((label) => label.toLowerCase());
+  // The subject of the sentence is the set, so "and" (the choice above says "or").
+  const list = offered.length <= 1 ? offered.join("") : `${offered.slice(0, -1).join(", ")} and ${offered[offered.length - 1]}`;
+  const sentence = offered.length === 1
+    ? `${list} is the asset type Manci offers at the moment.`
+    : `${list} are the asset types Manci offers at the moment.`;
+  return <>{sentence.charAt(0).toUpperCase() + sentence.slice(1)} {terms}</>;
+}
 
 type ToolGuide = {
   intro: string;
@@ -58,7 +80,7 @@ const GUIDES: Record<string, ToolGuide> = {
     details: [
       {
         title: "Asset types",
-        body: "Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other. An asset identifies the instrument; its share classes define the units and their economic terms.",
+        body: <OfferedAssetTypes />,
       },
       {
         title: "Document reference",
@@ -113,6 +135,8 @@ const GUIDES: Record<string, ToolGuide> = {
       {
         title: "Unique physical goods",
         body: "A unique physical good uses one class capped at one unit, with post-launch minting disabled. This prevents separate classes from representing multiple claims to the same item.",
+        // Physical goods are an asset class that may not be offered (lib/asset-classes.ts).
+        onlyIf: "/markets/types/physical",
       },
     ],
   },
