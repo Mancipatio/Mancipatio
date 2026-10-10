@@ -542,10 +542,13 @@ export const TERMS_MODULE_FLAGS: Readonly<Record<TermsModule, string>> = {
  * that is on while its module is not in MAINNET_TERMS.offeredModules
  * (lib/legal/mainnet-copy.ts), and an offeredModules entry that is no module.
  * One-way on purpose: a module the Terms offer may have its flag off, so a
- * rollback that switches a module off builds without a new Terms version.
- * Spellings are assertBuildFeatureFlags' check, which runs first. Other
- * networks (they render the devnet Terms and switch every module on unless
- * its flag is off), `next dev` and tests are unaffected.
+ * rollback that switches a module off builds without a new Terms version
+ * (the Terms version that offers a module should also say the Operator may
+ * suspend it: TermsDocument.offeredModules). Spellings are
+ * assertBuildFeatureFlags' check, which runs first. Other networks (they
+ * render the devnet Terms and switch every module on: a pilot module unless
+ * its flag is off, payout airdrops and Startup raises whatever their flags
+ * say), `next dev` and tests are unaffected.
  */
 export function assertBuildMainnetModules(
   phase: string,

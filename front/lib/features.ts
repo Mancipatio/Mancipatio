@@ -109,7 +109,8 @@ export function featureDisabledMessage(
 // build refuses a module flag that is on (these switches, and the payout
 // airdrop and Startup raise flags) while its module is not in
 // MAINNET_TERMS.offeredModules (lib/legal/mainnet-copy.ts; next.config.ts
-// assertBuildMainnetModules). One-way: an offered module may be switched off.
+// assertBuildMainnetModules). One-way: an offered module may be switched off
+// (the Terms version that offers it should say the Operator may suspend it).
 //
 // Off means: the module's ENTRY routes answer 403 with moduleDisabledMessage
 // (lib/server/feature-gate.ts requireModule), the navigation hides the

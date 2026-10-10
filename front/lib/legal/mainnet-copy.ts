@@ -64,7 +64,11 @@
 //     (TERMS_MODULES, lib/legal/document.ts). Keep it equal to clause 2: a
 //     mainnet build refuses a NEXT_PUBLIC_FEATURE_* module flag that is on
 //     while its module is not listed (next.config.ts
-//     assertBuildMainnetModules); a listed module may be switched off.
+//     assertBuildMainnetModules); a listed module may be switched off. The
+//     version that first lists a module should also say that the Operator
+//     may suspend a module at any time, so that switching one off by flag
+//     alone keeps the Terms accurate. tests/terms-modules.test.ts checks the
+//     list against clause 2's "not available" list.
 //   - MAINNET_TOS_GATE_POINTS: the short summary shown in the acceptance
 //     dialog (components/tos-gate.tsx).
 //   - Then `npx vitest run tests/legal-slots.test.ts --silent=false`: the
@@ -83,7 +87,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
   // The modules clause 2 offers. It offers primary sales and an issuer's
   // direct transfers, which have no switch, and lists every module that has
-  // one as not available: none.
+  // one as not available (payout airdrops as part of "distributions"): none.
   offeredModules: [],
   clauses: [
     {

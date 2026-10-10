@@ -954,6 +954,13 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   on-chain 0x08 also opens delivery entry, which the Terms keep switched off
   (its module switch stays off): put the wording of that to counsel, and
   publish Terms that no longer say "not available yet", before either step.
+  The build enforces the order: a mainnet build refuses the flag unless the
+  Terms in the same build list `custodyConversion` in
+  `MAINNET_TERMS.offeredModules` (`front/next.config.ts`
+  `assertBuildMainnetModules`; `ops/env-vars.md`, "Pilot scope"), and the
+  same holds for `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+  `secondaryTrading`. The check is one-way: switching a flag off again (a
+  rollback; set the pause bit first) builds with the same Terms.
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage (the destination from
   the role map or its device, never from a transaction history: §1,
@@ -3433,7 +3440,15 @@ When a detail changes (or, for a new company, when its data arrive):
    pages render from the operator record. `MAINNET_TERMS.version` is the
    Terms version every mainnet wallet accepts (`TOS_VERSION`); a later
    material change needs a new version. The devnet version stays
-   `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`).
+   `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`). The Terms are a
+   `TermsDocument`: `MAINNET_TERMS.offeredModules` names the modules
+   clause 2 offers (`TERMS_MODULES`, `front/lib/legal/document.ts`), and
+   `tests/terms-modules.test.ts` checks it against clause 2's "not
+   available" list. A mainnet build refuses a module flag that is on while
+   its module is not listed (`assertBuildMainnetModules`). The check is
+   one-way: a listed module may have its flag off, so a rollback builds
+   without a Terms change. A version that lists a module should therefore
+   also say the Operator may suspend a module at any time.
 3. `npx vitest run tests/legal-slots.test.ts --silent=false` until the
    "mainnet legal slots" report says complete. (CI's mainnet build,
    `front/scripts/ci/mainnet-build.sh`, loads the config once with the

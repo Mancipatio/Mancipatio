@@ -4,7 +4,9 @@
 // MAINNET_TERMS.offeredModules (lib/legal/mainnet-copy.ts). One-way: a module
 // the Terms offer may have its flag off, so a rollback that switches a module
 // off builds without a new version of the Terms. The end-to-end cases (the
-// guard wired into `next build`) are in scripts/ci/mainnet-build.sh.
+// guard wired into `next build`) are in scripts/ci/mainnet-build.sh. The
+// list itself is kept by hand: the last block checks it against clause 2's
+// "not available" list, whatever the version.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,7 +16,7 @@ import {
   assertBuildMainnetModules,
   featureFlagOn,
 } from "@/next.config";
-import { TERMS_MODULES, type TermsModule } from "@/lib/legal/document";
+import { TERMS_MODULES, type LegalBlock, type TermsDocument, type TermsModule } from "@/lib/legal/document";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
 import { PILOT_MODULE_ENV, PILOT_MODULES, features, parseFeatureFlag, pilotModules, type PilotModule } from "@/lib/features";
 
@@ -68,7 +70,7 @@ describe("TERMS_MODULES and their flags", () => {
 });
 
 describe("MAINNET_TERMS.offeredModules (committed)", () => {
-  it("offers no switchable module in version 2026-10-03: clause 2 lists them all as not available", () => {
+  it("offers no switchable module in version 2026-10-03: clause 2 lists them all as not available (payout airdrops as distributions)", () => {
     expect(MAINNET_TERMS?.version).toBe("2026-10-03");
     expect(MAINNET_TERMS?.offeredModules).toEqual([]);
   });
@@ -164,5 +166,86 @@ describe("assertBuildMainnetModules", () => {
     expect(() => assertBuildMainnetModules(DEV, { ...allOn, ...MAINNET }, offering())).not.toThrow();
     expect(() => assertBuildMainnetModules(BUILD, { ...allOn, NEXT_PUBLIC_SOLANA_RPC_URL: "https://rpc.mainnet.example" }, offering()))
       .toThrow(/Refusing a mainnet build/);
+  });
+});
+
+// How clause 2 of the mainnet Terms names each module: any one pattern
+// counts. Clause 2 of version 2026-10-03 does not name payout airdrops (an
+// admin wallet pushing a payout to holders) on their own; this code reads
+// them as part of "distributions". A version that words a module
+// differently updates its patterns here.
+const CLAUSE_2_NAMES: Readonly<Record<TermsModule, readonly RegExp[]>> = {
+  secondaryTrading: [/trading through Manci/i, /\bOTC\b/],
+  governance: [/\bgovernance\b/i],
+  vesting: [/\bvesting\b/i],
+  rights: [/\bRights-Tokens?\b/i],
+  distributions: [/\bdistributions?\b/i],
+  custodyConversion: [/\bconversion\b/i],
+  custodyDelivery: [/\bdelivery\b/i],
+  payoutAirdrop: [/\bairdrops?\b/i, /\bdistributions?\b/i],
+  startupRaises: [/\bStartup\b/i],
+};
+
+/** Clause 2's "not available" statement: the paragraph that says so and the list right after it ("" when there is none). */
+function clause2NotAvailable(terms: TermsDocument): string {
+  const clause = terms.clauses.find((c) => /^2\.\s/.test(c.title));
+  if (!clause) throw new Error("the Terms have no clause 2");
+  const at = clause.blocks.findIndex((block) => block.kind === "paragraph" && /not available/i.test(block.text));
+  if (at < 0) return "";
+  const text = (block: LegalBlock) => (block.kind === "paragraph" ? block.text : block.items.join("\n"));
+  const next = clause.blocks[at + 1];
+  return [clause.blocks[at], ...(next?.kind === "list" ? [next] : [])].map(text).join("\n");
+}
+
+/** Where offeredModules and clause 2's "not available" list disagree, in either direction. */
+function clause2Mismatches(terms: TermsDocument): string[] {
+  const notAvailable = clause2NotAvailable(terms);
+  const named = (name: TermsModule) => CLAUSE_2_NAMES[name].some((pattern) => pattern.test(notAvailable));
+  return TERMS_MODULES.flatMap((name) => {
+    const offered = terms.offeredModules.includes(name);
+    if (offered && named(name)) return [`${name} is offered, but clause 2 lists it as not available`];
+    if (!offered && !named(name)) return [`${name} is not offered, but clause 2's "not available" list does not name it`];
+    return [];
+  });
+}
+
+describe.skipIf(MAINNET_TERMS === null)("MAINNET_TERMS.offeredModules against the wording of clause 2 (any version)", () => {
+  const terms = MAINNET_TERMS as TermsDocument;
+
+  it("offers no module that clause 2 calls not available, and names there every module it does not offer", () => {
+    expect(clause2Mismatches(terms)).toEqual([]);
+  });
+
+  it("the check catches a module offered while clause 2 still calls it not available", () => {
+    for (const name of TERMS_MODULES.filter((module) => !terms.offeredModules.includes(module))) {
+      expect(clause2Mismatches({ ...terms, offeredModules: [...terms.offeredModules, name] }), name).toContain(
+        `${name} is offered, but clause 2 lists it as not available`,
+      );
+    }
+  });
+
+  it("the check catches a module that is neither offered nor named as not available", () => {
+    const scope = (notAvailable: string): TermsDocument => ({
+      version: "2026-01-01",
+      lastUpdated: "2026-01-01",
+      offeredModules: ["secondaryTrading", "custodyConversion"],
+      clauses: [
+        {
+          title: "2. Scope of the Service",
+          blocks: [
+            { kind: "paragraph", text: "The Service currently offers trading through Manci and conversion of tokens into company shares." },
+            { kind: "paragraph", text: "The following are not available at present:" },
+            { kind: "list", items: [notAvailable] },
+          ],
+        },
+      ],
+    });
+    expect(clause2Mismatches(scope("Startup raises, physical delivery, distributions, vesting, governance and Rights-Token issuances."))).toEqual([]);
+    expect(clause2Mismatches(scope("Startup raises, distributions, vesting and Rights-Token issuances."))).toEqual([
+      `governance is not offered, but clause 2's "not available" list does not name it`,
+      `custodyDelivery is not offered, but clause 2's "not available" list does not name it`,
+    ]);
+    expect(clause2Mismatches(scope("OTC deals, Startup raises, physical delivery, distributions, vesting, governance and Rights-Token issuances.")))
+      .toEqual(["secondaryTrading is offered, but clause 2 lists it as not available"]);
   });
 });

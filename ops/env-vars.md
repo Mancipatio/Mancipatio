@@ -146,7 +146,13 @@ covers the seven switches above plus `PAYOUT_AIRDROP` and `STARTUP_RAISES`
 The check is one-way: a module the Terms offer may have its flag off, so
 switching a module off again (a rollback) builds without a new version of
 the Terms. Switching one on takes the Terms version that offers it, with
-its flag, in the same production build.
+its flag, in the same production build. That version should also say that
+the Operator may suspend a module at any time: the build allows a
+flag-only rollback, and that sentence keeps the published Terms accurate
+when one happens (without it, the rollback needs a new Terms version too).
+`tests/terms-modules.test.ts` checks `offeredModules` against clause 2's
+"not available" list (payout airdrops are read as part of
+"distributions").
 
 ### Geoblocking
 

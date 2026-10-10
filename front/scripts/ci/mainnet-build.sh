@@ -110,6 +110,20 @@ PLACEHOLDERS=(
   # 8.5: counsel's geoblock list. ISO 3166 user-assigned codes (AA, ZZ, QM):
   # well-formed and no real country's.
   GEOBLOCK_COUNTRIES=AA,ZZ,QM-01
+  # The module flags (next.config.ts TERMS_MODULE_FLAGS), pinned off: `next
+  # build` and the config loader below also read front/.env.local and the
+  # shell, and @next/env never overrides a variable that is set, even to "".
+  # A case that switches one on names it after the placeholders (with env,
+  # the last value wins).
+  NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=
+  NEXT_PUBLIC_FEATURE_GOVERNANCE=
+  NEXT_PUBLIC_FEATURE_VESTING=
+  NEXT_PUBLIC_FEATURE_RIGHTS=
+  NEXT_PUBLIC_FEATURE_DISTRIBUTIONS=
+  NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=
+  NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=
+  NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=
+  NEXT_PUBLIC_FEATURE_STARTUP_RAISES=
 )
 # The licence waiver (MAINNET_LICENSE_NOT_REQUIRED) is not a placeholder: the
 # fixture's licence and the waiver are exclusive, so each case sets it.
@@ -217,14 +231,20 @@ expect_refusal() {
   echo "refused as expected: $pattern"
 }
 
-# expect_config_pass <label> [NAME=value ...]: every guard passes. Loads the
-# config the way `next build` does first (next/dist/server/config), without
-# building: the full build below covers compilation.
+# config_loads [NAME=value ...]: every guard passes (exit status; output in
+# $LOG). Loads the config the way `next build` does first
+# (next/dist/server/config), without building: the full build below covers
+# compilation.
+config_loads() {
+  env "$@" node -e "require('next/dist/server/config').default('phase-production-build', process.cwd())
+    .then(() => process.exit(0), (error) => { console.error(error?.message ?? error); process.exit(1); })" >"$LOG" 2>&1
+}
+
+# expect_config_pass <label> [NAME=value ...]: every guard passes.
 expect_config_pass() {
   local label="$1"
   shift
-  if ! env "$@" node -e "require('next/dist/server/config').default('phase-production-build', process.cwd())
-    .then(() => process.exit(0), (error) => { console.error(error?.message ?? error); process.exit(1); })" >"$LOG" 2>&1; then
+  if ! config_loads "$@"; then
     echo "::error::the mainnet guards should pass ($label)"
     tail -40 "$LOG"
     exit 1
@@ -255,15 +275,24 @@ else
   #   expect_refusal "Purchase risk warning: still engineering's draft" \
   #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
   # until the commit that records the confirmation (drop the waiver here if a
-  # licence is ever recorded).
+  # licence is ever recorded). Only this line changes: the governance case
+  # below follows on its own.
   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
   # The module flags are checked against the committed Terms
   # (MAINNET_TERMS.offeredModules): they do not offer governance, so its
   # flag on is refused (the cases after 8.4 use the fixture's Terms; change
-  # the module here if a version ever offers governance).
-  expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
-    "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
+  # the module here if a version ever offers governance). The legal guard
+  # runs before the module guard (next.config.ts config()), so this case
+  # needs committed slots that pass. While a version waits for counsel (the
+  # draft refusal above), the build is refused before the module guard runs:
+  # the case is skipped, and the fixture cases below still cover the guard.
+  if config_loads "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true; then
+    expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
+      "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
+  else
+    echo "skipped: governance on against the committed Terms (the committed legal slots are refused first)"
+  fi
 fi
 write_legal_fixture incomplete-operator
 expect_refusal "operator\.taxId \(tax identification number, .*\) is not set" "${PLACEHOLDERS[@]}"

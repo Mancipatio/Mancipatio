@@ -39,7 +39,10 @@ export type LegalDocument = {
  * (`payoutAirdrop`, `startupRaises`). `issuerRotation` and `passportClose`
  * are operational switches and have none. Each has a NEXT_PUBLIC_FEATURE_*
  * flag (next.config.ts TERMS_MODULE_FLAGS); tests/terms-modules.test.ts keeps
- * this list, those flags and lib/features.ts equal.
+ * this list, those flags and lib/features.ts equal, and checks offeredModules
+ * against the wording of clause 2. Clause 2 of version 2026-10-03 names each
+ * module except payout airdrops (an admin wallet pushing a payout to
+ * holders), which this code reads as part of "distributions".
  */
 export const TERMS_MODULES = [
   "secondaryTrading",
@@ -63,8 +66,12 @@ export type TermsDocument = LegalDocument & {
    * that is on while its module is not listed here (next.config.ts
    * assertBuildMainnetModules). The check is one-way: a listed module may
    * have its flag off, so switching a module off (a rollback) builds without
-   * a new version of the Terms. Primary sales and an issuer's direct
-   * transfers have no switch and are not listed.
+   * a new version of the Terms. The build is only half of it: the Terms
+   * version that first lists a module should also say that the Operator may
+   * suspend a module at any time. Without that sentence, a module switched
+   * off by flag alone stays offered in the published Terms, and the rollback
+   * needs a new Terms version after all. Primary sales and an issuer's
+   * direct transfers have no switch and are not listed.
    */
   offeredModules: readonly TermsModule[];
 };
