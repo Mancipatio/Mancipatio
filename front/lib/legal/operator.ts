@@ -205,13 +205,12 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     contacts: CURRENT_CONTACTS,
     // Owner's decision 2026-09-30: the Terms are governed by the law of the
     // company's jurisdiction. The forum follows it (the BVI courts); change it
-    // here if counsel prefers arbitration. This record is the contracting
-    // party for every user of the mainnet Service (Terms clause 1: "the
-    // company named as the operator on this page"), whether or not the site
-    // is open to the public. Moving users of some jurisdictions to another
-    // group company would need that company's own record here, the pages to
-    // pick it, and a new version of the Terms, all confirmed with counsel;
-    // until then nobody contracts with any other entity.
+    // here if counsel prefers arbitration. The Terms name the operator by
+    // this record (clause 1: "the company named as the operator on this
+    // page"). Whether users of some jurisdictions should contract with another
+    // group company is still open for the owner and counsel to record before
+    // the site opens to the public. Such a company would need its own record
+    // here, the pages to pick it, and a new version of the Terms.
     governingLaw: "the laws of the British Virgin Islands",
     disputeResolution: "the courts of the British Virgin Islands",
     pilotNotice: null,

@@ -44,8 +44,8 @@ export function isNotApplicable(
  *  every instrument page so two pages cannot answer the same question
  *  differently. */
 export const TERM_FIELDS = [
-  { key: "spv", label: "Serbian SPV" },
-  { key: "cap", label: "Annual cap" },
+  { key: "spv", label: "Special purpose vehicle" },
+  { key: "cap", label: "Raise limit" },
   { key: "distributions", label: "Distributions" },
   { key: "conversion", label: "Conversion" },
   { key: "pledge", label: "Share pledge" },
@@ -124,14 +124,35 @@ const LEGAL_STRUCTURE: InstrumentCta = {
 };
 const TELL_US: InstrumentCta = { label: "Tell us your idea", href: "/contact" };
 
-const EUR_CAP = "EUR 3,000,000 per SPV";
+/*
+ * Structure, raise limit and transfers, worded so they hold for every
+ * issuance and before and after a module is switched on (lib/features.ts):
+ *  - whether an issuance uses a special purpose vehicle (SPV) or a share
+ *    pledge depends on that issuance (/legal-structure), so neither is stated
+ *    as the rule for an instrument;
+ *  - the raise limit is the Terms' (clause 7): per issuer over any twelve
+ *    months, applied to the vehicle where an issuer issues through one;
+ *  - units move wallet to wallet subject to the transfer checks (clause 8);
+ *    trading through Manci, distributions, conversion and delivery are module
+ *    switches, so the copy says "where available" rather than promising them.
+ */
+const EUR_CAP =
+  "EUR 3,000,000 per issuer over any twelve months (per SPV where one is used)";
+const SPV_POINT =
+  "Where an issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer";
+const RAISE_LIMIT_POINT =
+  "At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used";
+const PLEDGE_POINT =
+  "Where the issuance provides for one, a share pledge can be registered for the benefit of token holders";
+const TRANSFERABLE_POINT =
+  "Transferable from wallet to wallet; trading through Manci where it is available";
 
 const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
   equity: {
     slug: "equity",
     label: "Company ownership",
     headline: "Convertible into real shares",
-    lede: "A token carrying the right to become an actual shareholder in your company, issued through a Serbian SPV.",
+    lede: "A token that can carry the right to become an actual shareholder in your company.",
     blurb: "Convertible into real shares in the company.",
     ctas: [APPLY, COMPARE],
     whatItIs: [
@@ -167,10 +188,10 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       {
         heading: "Structure & protections",
         points: [
-          "Issued through a Serbian SPV, incorporated for you if you don't have one",
-          "Maximum issuance EUR 3 million per year per SPV",
-          "A share pledge can be registered for the benefit of token holders",
-          "Freely transferable and tradeable",
+          SPV_POINT,
+          RAISE_LIMIT_POINT,
+          PLEDGE_POINT,
+          TRANSFERABLE_POINT,
           "Can carry dividend or revenue payments, structured per issuance",
         ],
       },
@@ -180,11 +201,11 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         title: "Company ownership",
         right: "Conversion into company shares",
         terms: {
-          spv: "Required",
+          spv: "Per issuance",
           cap: EUR_CAP,
           distributions: "Optional · issuer-push",
-          conversion: "Yes · off-chain",
-          pledge: "Available",
+          conversion: "Where offered · share transfer off-chain",
+          pledge: "Per issuance",
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },
@@ -193,10 +214,10 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
     typicalUse:
       "an early-stage software company raising without setting a valuation.",
     differs: [
-      "Issuance follows the same six steps as every standard instrument. Two things are specific here: conversion into shares, and registration of a share pledge in holders' favour. Both happen off-chain, through the legal process.",
+      "Issuance follows the same six steps as every standard instrument. Two things can be specific here: conversion into shares, where the issuer offers it and it is available, and registration of a share pledge in holders' favour, where the issuance provides for one. The share transfer and the pledge registration happen off-chain, through the legal process.",
     ],
     recourse: [
-      "Conversion runs through the standard legal share-transfer procedure, and the holder's right to it is binding on the issuer. If the company or its founders won't facilitate the transfer, the holder has legal recourse against them. The registered share pledge is what makes that recourse worth something.",
+      "Where the token carries the right to convert, conversion runs through the standard legal share-transfer procedure, and that right is binding on the issuer. If the company or its founders won't facilitate the transfer, the holder has legal recourse against them. Where a share pledge is registered, it is what makes that recourse worth something.",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },
@@ -231,9 +252,9 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       {
         heading: "Protections",
         points: [
-          "Issued through a Serbian SPV, incorporated for you if you don't have one",
-          "Maximum issuance EUR 3 million per year per SPV",
-          "Freely transferable and tradeable",
+          SPV_POINT,
+          RAISE_LIMIT_POINT,
+          TRANSFERABLE_POINT,
           "If a bond is not paid, holders have legal recourse",
         ],
       },
@@ -243,7 +264,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         title: "Debt instruments",
         right: "Repayment, with interest where the note carries a coupon",
         terms: {
-          spv: "Required",
+          spv: "Per issuance",
           cap: EUR_CAP,
           distributions: "Coupon · issuer-push",
           conversion: "Optional",
@@ -253,7 +274,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       },
     ],
     differs: [
-      "Issuance follows the same six steps. What's specific here is the coupon: the issuer deposits the payment on the agreed schedule, and the contract distributes each holder's share.",
+      "Issuance follows the same six steps. What's specific here is the coupon: the issuer deposits the payment on the agreed schedule and, where distributions are available, the contract distributes each holder's share.",
     ],
     recourse: [
       "Repayment is a binding obligation on the issuer, not a discretionary payment. If a bond is not paid, holders have legal recourse.",
@@ -276,8 +297,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Rental income is a major driver of real-estate investing — but managing property is much harder work than people think",
           "Buying a whole property is capital-intensive; buying a portion of one is far more achievable",
-          "Once the issuer deposits the rent, each holder's portion is distributed to their wallet — monthly or quarterly, set by the instrument",
-          "Freely transferable and tradeable",
+          "Where distributions are available, once the issuer deposits the rent, each holder's portion is distributed to their wallet — monthly or quarterly, set by the instrument",
+          TRANSFERABLE_POINT,
           "If the issuer avoids paying holders their share of the income, there is legal recourse",
         ],
       },
@@ -287,7 +308,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           "A token alone cannot make you the registered owner — but it can carry the right to have the property transferred to you at a time of your choosing",
           "Acquiring actual ownership still goes through the regular transfer process",
           "The rental income can sit with the token holder or with the legal owner — this varies per project",
-          "Freely transferable and tradeable",
+          TRANSFERABLE_POINT,
           "If the legal owner fails to facilitate the transfer of ownership, there is legal recourse",
           "Ownership structures are prepared and deployed case by case — there are no standard terms",
         ],
@@ -309,7 +330,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         right: "The right to acquire the property itself",
         terms: {
           spv: "Case by case",
-          cap: "Case by case",
+          cap: EUR_CAP,
           distributions: "Deal term",
           conversion: "Right to acquire",
           delivery: NOT_APPLICABLE,
@@ -348,8 +369,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       {
         heading: "How holders are paid",
         points: [
-          "Once the issuer deposits the income, each holder's portion is distributed to their wallet",
-          "Freely transferable and tradeable",
+          "Where distributions are available, once the issuer deposits the income, each holder's portion is distributed to their wallet",
+          TRANSFERABLE_POINT,
           "If the issuer avoids paying holders their share of the income, there is legal recourse",
         ],
       },
@@ -367,7 +388,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       },
     ],
     differs: [
-      "Issuance follows the same six steps. What's specific here is the distribution: the issuer deposits the royalty income on the agreed schedule, and the contract distributes each holder's share.",
+      "Issuance follows the same six steps. What's specific here is the distribution: the issuer deposits the royalty income on the agreed schedule and, where distributions are available, the contract distributes each holder's share.",
     ],
     recourse: [
       "The share of income is a binding obligation on the issuer, not a discretionary payment. If the issuer avoids paying holders their share, holders have legal recourse.",
@@ -413,11 +434,11 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       {
         heading: "Protections",
         points: [
-          "Issued through a Serbian SPV, incorporated for you if you don't have one",
-          "Maximum issuance EUR 3 million per year per SPV",
-          "A share pledge can be registered for the benefit of token holders",
-          "Once the issuer deposits the funds, each holder's portion is distributed automatically to their wallet",
-          "Freely transferable and tradeable",
+          SPV_POINT,
+          RAISE_LIMIT_POINT,
+          PLEDGE_POINT,
+          "Where distributions are available, once the issuer deposits the funds, each holder's portion is distributed automatically to their wallet",
+          TRANSFERABLE_POINT,
         ],
       },
     ],
@@ -426,11 +447,11 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         title: "Revenue share",
         right: "A defined share of revenue over a defined period",
         terms: {
-          spv: "Required",
+          spv: "Per issuance",
           cap: EUR_CAP,
           distributions: "Yes · issuer-push",
           conversion: "Optional",
-          pledge: "Available",
+          pledge: "Per issuance",
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },
@@ -439,7 +460,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
     typicalUse:
       "a defined share of revenue from an operating business over three years.",
     differs: [
-      "Issuance follows the same six steps. What's specific here is the distribution: the issuer deposits revenue to the contract on the agreed schedule, and the contract distributes each holder's share. The instrument can also be structured as convertible.",
+      "Issuance follows the same six steps. What's specific here is the distribution: the issuer deposits revenue on the agreed schedule and, where distributions are available, the contract distributes each holder's share. The instrument can also be structured as convertible.",
     ],
     recourse: [
       "The revenue share is a binding obligation on the issuer, not a discretionary payment. If the issuer avoids paying holders their share, holders have legal recourse. The share pledge, where registered, is what gives that recourse teeth.",
@@ -469,13 +490,13 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         heading: "What can be tokenised",
         points: [
           "Most asset types, from stored grain to concert tickets",
-          "Tokenised assets are freely transferable and tradeable",
+          "Tokenised assets are transferable from wallet to wallet, with trading through Manci where it is available",
         ],
       },
       {
         heading: "Physical delivery",
         points: [
-          "Deliverable assets can be redeemed: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
+          "Where delivery is offered, deliverable assets can be redeemed: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
           "If a delivery is cancelled, the tokens are returned to the holder",
           "Redemption requires identity verification (KYC); buying and trading the token do not, unless the class is KYC-gated",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
@@ -497,8 +518,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
     typicalUse:
       "a stored agricultural commodity, or bottled output from a producer.",
     differs: [
-      "Issuance follows the same six steps. What's specific here is redemption: an identity-verified holder deposits the tokens into escrow, and once delivery is confirmed the tokens are burned. If the delivery is cancelled they're returned. We don't move the goods ourselves.",
-      "Transfers are not restricted and buying needs no identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
+      "Issuance follows the same six steps. What's specific here is redemption, where delivery is offered: an identity-verified holder deposits the tokens into escrow, and once delivery is confirmed the tokens are burned. If the delivery is cancelled they're returned. We don't move the goods ourselves.",
+      "Unless the class is KYC-gated, neither a transfer nor a purchase needs identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },
@@ -525,13 +546,13 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         heading: "What can be tokenised",
         points: [
           "Most asset types, from art pieces to used cars",
-          "Tokenised assets are freely transferable and tradeable",
+          "Tokenised assets are transferable from wallet to wallet, with trading through Manci where it is available",
         ],
       },
       {
         heading: "Physical delivery",
         points: [
-          "Deliverable assets can be redeemed: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
+          "Where delivery is offered, deliverable assets can be redeemed: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
           "If a delivery is cancelled, the token is returned to the holder",
           "Redemption requires identity verification (KYC); buying and trading the token do not, unless the class is KYC-gated",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
@@ -551,8 +572,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       },
     ],
     differs: [
-      "Issuance follows the same six steps. What's specific here is redemption: an identity-verified holder deposits the token into escrow, and once delivery is confirmed the token is burned. If the delivery is cancelled it's returned. We don't move the item ourselves.",
-      "Transfers are not restricted and buying needs no identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
+      "Issuance follows the same six steps. What's specific here is redemption, where delivery is offered: an identity-verified holder deposits the token into escrow, and once delivery is confirmed the token is burned. If the delivery is cancelled it's returned. We don't move the item ourselves.",
+      "Unless the class is KYC-gated, neither a transfer nor a purchase needs identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },
@@ -634,16 +655,15 @@ export function termLabel(key: TermKey): string {
 
 /**
  * The legal anchors that *are* settled, each traceable to a value above:
- * `spv` / `cap` on equity, debt and revenue share; `pledge` on equity and
- * revenue share; `delivery` on the two deliverable instruments; `recourse`
+ * `spv` / `pledge` per issuance on equity, debt and revenue share; `cap` as
+ * the Terms set it; `delivery` on the two deliverable instruments; `recourse`
  * wherever it is answered. Nothing here claims anything about an instrument
  * it does not name.
  */
 export const SETTLED_ANCHORS: string[] = [
-  "Company ownership, debt instruments and revenue share are issued through a Serbian SPV",
-  "EUR 3,000,000 maximum issuance per SPV per year",
-  "A share pledge can be registered for company ownership and revenue share",
+  "Whether an issuance uses a special purpose vehicle or a share pledge is stated per issuance",
+  "At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used",
   "Property ownership is structured case by case with the legal team",
-  "Fungible and non-fungible assets are redeemed by deposit, confirmation and burn",
+  "Where delivery is offered, fungible and non-fungible assets are redeemed by deposit, confirmation and burn",
   "Legal recourse against the issuer on every instrument that pays or converts",
 ];

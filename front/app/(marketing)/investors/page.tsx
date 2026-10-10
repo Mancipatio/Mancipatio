@@ -11,7 +11,7 @@ import {
   Small,
   TextLink,
 } from "@/components/mx";
-import { moduleEnabled } from "@/lib/features";
+import { features, moduleEnabled } from "@/lib/features";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
@@ -112,23 +112,30 @@ export default function InvestorsPage() {
         <Body className="mt-4">
           Use Portfolio to review your holdings and transaction history. Its
           navigation also opens vesting, payouts, governance, conversion and
-          delivery when relevant to your positions. If recording is pending, use
-          the saved transaction receipt to retry the record instead of repeating
-          the payment.
+          delivery where these are available and relevant to your positions. If
+          recording is pending, use the saved transaction receipt to retry the
+          record instead of repeating the payment.
         </Body>
-        <Body className="mt-4">
-          Startup payout-vault entitlements follow their saved original-investor
-          snapshot, even if token balances later change. Read the{" "}
-          <TextLink href="/solutions/governance">
-            snapshot and payout-rights guide
-          </TextLink>{" "}
-          for that distinction.
-        </Body>
+        {/* Startup raises and vesting are switches (lib/features.ts): the
+            guide names them only while they are on for this build. */}
+        {features().startupRaises ? (
+          <Body className="mt-4">
+            Startup payout-vault entitlements follow their saved
+            original-investor snapshot, even if token balances later change.
+            Read the{" "}
+            <TextLink href="/solutions/governance">
+              snapshot and payout-rights guide
+            </TextLink>{" "}
+            for that distinction.
+          </Body>
+        ) : null}
         <ButtonRow>
           <Button href="/portfolio">Open Portfolio</Button>
-          <Button href="/portfolio/vesting" variant="ghost">
-            Check vesting
-          </Button>
+          {navHrefVisible("/portfolio/vesting") ? (
+            <Button href="/portfolio/vesting" variant="ghost">
+              Check vesting
+            </Button>
+          ) : null}
         </ButtonRow>
       </Section>
     </>

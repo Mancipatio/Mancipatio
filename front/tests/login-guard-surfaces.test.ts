@@ -1,8 +1,11 @@
 // Email sign-in client body, the Turnstile widget's opt-in wiring and the
 // Securities Commission approval label on the public document surfaces.
-// Pages are client components (no jsdom here), so wiring is pinned by source.
+// Pages are client components (no jsdom here), so wiring is pinned by source;
+// the whitepapers board's row, which has no effects, is also rendered.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startEmailSignIn } from "@/lib/account-login";
 import { SSC_NOT_APPROVED_LABEL, sscApprovalRef, sscDecisionRef } from "@/lib/whitepaper-approval";
@@ -85,5 +88,57 @@ describe("Securities Commission approval label", () => {
     expect(src("app/(marketing)/markets/whitepapers/page.tsx")).toMatch(
       /approved by the Serbian Securities Commission \(SSC\)\s+only where it is marked as approved, with the decision reference\s+given/,
     );
+  });
+
+  describe("the whitepapers board on mainnet, from the public profile projection", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    /** One board row for an ssc_approved whitepaper, as /api/profiles/public projects it. */
+    async function boardLabel(decisionVersionId: string | null): Promise<string> {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      vi.resetModules();
+      const { projectPublicAssetProfile } = await import("@/lib/profile-public");
+      const { DocumentRow } = await import("@/app/(marketing)/markets/whitepapers/whitepapers-board");
+      const profile = projectPublicAssetProfile({
+        asset_pda: "Asset1111111111111111111111111111111111111",
+        network: "mainnet",
+        category: "equity",
+        display_name: "Example",
+        status: "published",
+        is_published: true,
+        whitepaper_status: "ssc_approved",
+        whitepaper_sha256: "a".repeat(64),
+        whitepaper_version_id: "11111111-1111-1111-1111-111111111111",
+        whitepaper_published_at: "2026-10-01T00:00:00Z",
+        ssc_decision_ref: "KHoV 1/2026",
+        ssc_decision_version_id: decisionVersionId,
+      });
+      expect(profile).not.toBeNull();
+      const html = renderToStaticMarkup(
+        createElement(DocumentRow, {
+          item: { profile: profile!, linkId: null, whitepaper: true, documentUrl: null },
+        }),
+      );
+      return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    }
+
+    it("shows the approval only with the verified decision document, which the projection carries", async () => {
+      // The projection keeps the field the label needs; a narrower one would
+      // turn every mainnet approval into "not approved".
+      const { PUBLIC_ASSET_PROFILE_FIELDS } = await import("@/lib/profile-public");
+      expect(PUBLIC_ASSET_PROFILE_FIELDS).toContain("ssc_decision_version_id");
+
+      const approved = await boardLabel("22222222-2222-2222-2222-222222222222");
+      expect(approved).toContain("SSC approved");
+      expect(approved).toContain("KHoV 1/2026");
+      expect(approved).not.toContain(SSC_NOT_APPROVED_LABEL);
+
+      const bareReference = await boardLabel(null);
+      expect(bareReference).toContain(SSC_NOT_APPROVED_LABEL);
+      expect(bareReference).not.toContain("SSC approved");
+    });
   });
 });

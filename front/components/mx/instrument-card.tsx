@@ -39,8 +39,8 @@ export const MX_TONE_CLASS: Record<MxValueTone, string | false> = {
  * <InstrumentCard
  *   title="Company ownership"
  *   rows={[
- *     { label: "Serbian SPV", value: "Required" },
- *     { label: "Annual cap", value: "EUR 3,000,000 per SPV" },
+ *     { label: "Special purpose vehicle", value: "Per issuance" },
+ *     { label: "Recourse", value: "Yes" },
  *     { label: "Delivery", value: "Not applicable", tone: "na" },
  *     { label: "Whitepaper approval", value: null }, // unresolved → omitted
  *   ]}

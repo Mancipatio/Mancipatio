@@ -41,9 +41,10 @@ export default function RecoveryGuide() {
           </Body>
           <Body className="mt-4">
             A pending or unavailable status is not proof of failure. Verify the
-            chain result before retrying a transaction. Vesting and distribution
-            setup resume their saved addresses and steps; confirmed returns are
-            recorded separately from the refund transaction.
+            chain result before retrying a transaction. Where vesting and
+            distributions are available, their setup resumes from the saved
+            addresses and steps; confirmed returns are recorded separately from
+            the refund transaction.
           </Body>
         </Section>
         <Section>
@@ -85,9 +86,9 @@ export default function RecoveryGuide() {
             <Card title="Execute only a saved plan">
               <Body>
                 Where a workflow saves its terms or recipients before funding,
-                as a vesting series or a distribution does, fund and execute
-                only that saved plan, then check its receipts and the remaining
-                escrow balance.{" "}
+                as a vesting series or a distribution does where these are
+                available, fund and execute only that saved plan, then check its
+                receipts and the remaining escrow balance.{" "}
                 <TextLink href="/how-it-works#distributions">
                   Distribution workflow →
                 </TextLink>

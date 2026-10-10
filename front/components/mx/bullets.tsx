@@ -7,7 +7,7 @@ import { cx } from "./cx";
  *
  * ```tsx
  * <Bullets items={[
- *   "Company ownership, debt and revenue share are issued through a Serbian SPV.",
+ *   "Whether an issuance uses a special purpose vehicle depends on that issuance.",
  *   "Every application is reviewed by a person, and we can decline for any reason.",
  * ]} />
  * ```

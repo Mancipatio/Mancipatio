@@ -2,16 +2,26 @@
 // must match the live setup (tokenization, issuers' direct transfers and
 // primary sales the operator approves) and stay true before and after
 // trading through Manci and conversion are switched on (lib/features.ts).
-// No page states a structure every issuance uses (a Serbian SPV, a share
-// pledge), implies a regulator's approval that is not recorded, promises a
-// launch phase or a cohort, or still reads like the devnet pilot.
+//
+// Checked here, page by page:
+//  - /risks, /legal-structure, /pricing and /about name no Serbian SPV, no
+//    Securities Commission and no incorporation "for you";
+//  - the instruments catalog (/markets/types and every fact sheet under it,
+//    with the data in lib/instruments.ts and lib/asset-types.tsx) and the
+//    /apply issuer flow state an SPV, a share pledge and the raise limit per
+//    issuance and as the Terms set them (clause 7), never as the rule;
+//  - no page checked here promises a launch phase or a cohort, or still reads
+//    like the devnet pilot; switched-off modules are named "where available"
+//    or only while their switch is on.
+// The whitepaper approval label (Securities Commission) is pinned in
+// tests/login-guard-surfaces.test.ts.
 //
 // Pages are rendered as the mainnet build would render them, with every
 // module switch off (the live state) and, where a page follows a switch,
 // with it on.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement, type ComponentType, type ReactNode } from "react";
+import { createElement, Fragment, type ComponentType, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,6 +42,7 @@ const MODULE_VARS = [
   "DISTRIBUTIONS",
   "CUSTODY_CONVERSION",
   "CUSTODY_DELIVERY",
+  "STARTUP_RAISES",
 ];
 
 const src = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8");
@@ -54,6 +65,33 @@ async function render(modulePath: string): Promise<{ html: string; text: string 
   const html = renderToStaticMarkup(createElement(Page));
   return { html, text: visibleText(html) };
 }
+
+/** An async page with route params (a server component), rendered the same way. */
+async function renderRoute(
+  modulePath: string,
+  slug: string,
+): Promise<{ html: string; text: string; description: string | undefined }> {
+  vi.resetModules();
+  const mod = (await import(modulePath)) as {
+    default: (props: { params: Promise<{ slug: string }> }) => Promise<ReactNode>;
+    generateMetadata: (props: { params: Promise<{ slug: string }> }) => Promise<{ description?: string }>;
+  };
+  const element = await mod.default({ params: Promise.resolve({ slug }) });
+  const html = renderToStaticMarkup(createElement(Fragment, null, element));
+  const { description } = await mod.generateMetadata({ params: Promise.resolve({ slug }) });
+  return { html, text: visibleText(html), description };
+}
+
+/** Every string in a value (React elements skipped), as in tests/legal-slots.test.ts. */
+const strings = (value: unknown): string[] => {
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object" || "$$typeof" in value) return [];
+  return Object.values(value).flatMap(strings);
+};
+
+/** Wording that states an SPV, its incorporation or free trading as the rule. */
+const SPV_AS_RULE =
+  /Serbian SPV|issued through an? (Serbian )?SPV|incorporated for you|incorporates? the company|we incorporate one|open the company[^.]*for you|per SPV per year|per year per SPV|EUR 3M per SPV|freely transferable and tradeable/i;
 
 const PAGES = {
   risks: "@/app/(marketing)/risks/page",
@@ -98,14 +136,23 @@ describe("public pages on mainnet, every module switched off (the live state)", 
   it("/risks: regulatory position and raise limit as the Terms state them, trading and conversion only where available", async () => {
     const { text } = await render(PAGES.risks);
     expect(text).toContain("Each issuer is responsible for the licences, approvals and consents its offering requires.");
+    // What the platform knows (whether an approval is on record), not a
+    // statement about what the regulator decided.
     expect(text).toContain(
-      "A whitepaper is shown as approved by a regulator only where the approval and its decision reference are recorded; otherwise it has not been approved.",
+      "A whitepaper is shown as approved by a regulator only where the approval and its decision reference are recorded; otherwise no approval is on record, and the whitepaper is shown as not approved.",
     );
+    expect(text).not.toContain("otherwise it has not been approved");
     expect(text).toContain("at most EUR 3,000,000 over any twelve months");
     expect(text).toContain("Where an issuer issues through a special purpose vehicle, the limit applies to that vehicle.");
     expect(text).toContain("Where trading through Manci is available, holders can post what they hold on the resell board");
     expect(text).toContain("Where trading through Manci is available, an OTC deal cannot expire");
     expect(text).toContain("Conversion into shares is possible only where the issuer offers conversion and it is available.");
+    // Units are escrowed and burned on-chain; only the share transfer is off-chain.
+    expect(text).toContain("the share transfer itself does not happen on-chain");
+    expect(text).not.toMatch(/It is not automatic and does not happen on-chain/);
+    expect(text).toContain(
+      "Where delivery of a physical asset is available, it is arranged with the issuer: Manci does not move the goods",
+    );
     expect(text).not.toMatch(/capped at EUR 3 million per SPV/);
   });
 
@@ -159,15 +206,129 @@ describe("public pages on mainnet, every module switched off (the live state)", 
     expect(on.html).toContain('href="/marketplace/otc"');
   });
 
+  it("/investors names vesting and startup payout vaults only while their switches are on", async () => {
+    const off = await render(PAGES.investors);
+    expect(off.html).not.toContain('href="/portfolio/vesting"');
+    expect(off.text).not.toContain("Startup payout-vault");
+    expect(off.text).toContain("delivery where these are available and relevant to your positions");
+
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_VESTING", "true");
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_STARTUP_RAISES", "true");
+    const on = await render(PAGES.investors);
+    expect(on.html).toContain('href="/portfolio/vesting"');
+    expect(on.text).toContain("Startup payout-vault entitlements follow their saved original-investor snapshot");
+  });
+
   it("/faq answers the selling question for both states of trading through Manci", async () => {
     const { text } = await render(PAGES.faq);
     expect(text).toContain("Where trading through Manci is available, you can create an OTC offer or post on the resell board");
     expect(text).toContain("where it is not, those pages say so");
   });
 
+  it("/faq: verification only where conversion or delivery is available; the vesting question only while vesting is on", async () => {
+    const off = await render(PAGES.faq);
+    expect(off.text).toContain(
+      "Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good, where these are available.",
+    );
+    expect(off.text).not.toContain("Where do I check my vesting?");
+    expect(off.html).not.toContain('href="/portfolio/vesting"');
+    const { metadata } = (await import(PAGES.faq)) as { metadata: { description: string } };
+    expect(metadata.description).not.toMatch(/vesting/i);
+
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_VESTING", "true");
+    const on = await render(PAGES.faq);
+    expect(on.text).toContain("Where do I check my vesting?");
+  });
+
+  it("/solutions: the launchpad and OTC guides name trading through Manci only where it is available", async () => {
+    const launchpad = await renderRoute("@/app/(marketing)/solutions/[slug]/page", "launchpad");
+    expect(launchpad.text).toContain("Where trading through Manci is available, existing holders can use the OTC market");
+    const otc = await renderRoute("@/app/(marketing)/solutions/[slug]/page", "otc");
+    expect(otc.text).toContain("Where trading through Manci is available, create a sell offer");
+    expect(otc.description).toMatch(/^Where trading through Manci is available/);
+  });
+
+  it("/docs/recovery names vesting and distributions only where they are available", async () => {
+    const { text } = await render(PAGES.recovery);
+    expect(text).toContain("Where vesting and distributions are available, their setup resumes from the saved addresses and steps");
+    expect(text).toContain("as a vesting series or a distribution does where these are available");
+  });
+
   it("the home page description promises no OTC offers or vesting", async () => {
     const { metadata } = (await import("@/app/page")) as { metadata: { description: string } };
     expect(metadata.description).not.toMatch(/OTC|vesting/);
+  });
+});
+
+describe("the instruments catalog and /apply state an SPV, a pledge and the raise limit per issuance", () => {
+  // Linked from /legal-structure ("Compare the instruments"), /risks,
+  // /investors, /about, the header menu and the footer.
+  const FACT_SHEET = "@/app/(marketing)/markets/types/[slug]/page";
+  const TRANSFERABLE = "Transferable from wallet to wallet; trading through Manci where it is available";
+
+  it("no fact sheet and not the comparison table states an SPV, incorporation or free trading as the rule", async () => {
+    const { INSTRUMENT_LIST } = await import("@/lib/instruments");
+    for (const { slug } of INSTRUMENT_LIST) {
+      const { text, description } = await renderRoute(FACT_SHEET, slug);
+      expect(text, slug).not.toMatch(SPV_AS_RULE);
+      expect(text, slug).not.toMatch(/\bSerbian\b/);
+      // Every "SPV" left is conditional: "per SPV where one is used" or
+      // "Where an issuance uses a special purpose vehicle (SPV), …".
+      expect(text, slug).not.toMatch(/\bSPV\b(?! where one is used)(?!\), Manci can incorporate one)/);
+      expect(description ?? "", slug).not.toMatch(/SPV|Serbian/);
+    }
+    const index = await render("@/app/(marketing)/markets/types/page");
+    expect(index.text).not.toMatch(SPV_AS_RULE);
+    expect(index.text).not.toMatch(/\bSerbian\b/);
+  });
+
+  it("company ownership (MANCI0's category), debt and revenue share: SPV and pledge per issuance, the limit as the Terms set it", async () => {
+    for (const slug of ["equity", "debt", "revenue_share"]) {
+      const { text } = await renderRoute(FACT_SHEET, slug);
+      expect(text, slug).toContain("Special purpose vehicle Per issuance");
+      expect(text, slug).toContain("Raise limit EUR 3,000,000 per issuer over any twelve months (per SPV where one is used)");
+      expect(text, slug).toContain(
+        "Where an issuance uses a special purpose vehicle (SPV), Manci can incorporate one for the issuer",
+      );
+      expect(text, slug).toContain("At most EUR 3,000,000 raised per issuer over any twelve months; per SPV where one is used");
+      expect(text, slug).toContain(TRANSFERABLE);
+      expect(text, slug).not.toMatch(/Special purpose vehicle Required|Share pledge Available/);
+    }
+    const equity = await renderRoute(FACT_SHEET, "equity");
+    expect(equity.description).toBe("A token that can carry the right to become an actual shareholder in your company.");
+    expect(equity.text).toContain("Share pledge Per issuance");
+    expect(equity.text).toContain("Conversion Where offered · share transfer off-chain");
+    expect(equity.text).toContain("Where a share pledge is registered, it is what makes that recourse worth something.");
+    expect(equity.text).not.toContain("The registered share pledge is what makes");
+  });
+
+  it("the catalog data carries no SPV rule either, rendered or not (lib/instruments.ts, lib/asset-types.tsx)", async () => {
+    const { INSTRUMENT_LIST, SETTLED_ANCHORS } = await import("@/lib/instruments");
+    const { ASSET_TYPES } = await import("@/lib/asset-types");
+    const copy = [...strings(INSTRUMENT_LIST), ...strings(SETTLED_ANCHORS), ...strings(ASSET_TYPES)];
+    expect(copy.length).toBeGreaterThan(100);
+    for (const line of copy) {
+      expect(line, line).not.toMatch(SPV_AS_RULE);
+      if (/\bSPV\b/.test(line) && line !== "SPV reference") {
+        expect(line, line).toMatch(/where one is used|where (an|the) issuance uses/i);
+      }
+    }
+  });
+
+  it("/apply: incorporation and the raise limit are per issuance, in every state of the wizard", () => {
+    const apply = src("app/(marketing)/apply/page.tsx");
+    expect(apply).not.toMatch(SPV_AS_RULE);
+    expect(apply).not.toMatch(/Serbian SPV|capped at EUR 3 million per SPV/);
+    // The verification gate, the individual's card and the incorporation hint.
+    expect(apply).toContain("once it is approved you can apply, and where your issuance needs a company, Manci can incorporate one.");
+    expect(apply).toContain("Your identity is verified. Where your issuance needs a company, Manci can incorporate one");
+    expect(apply).toContain('"You are applying as an individual. Where your issuance needs a company, Manci can incorporate one."');
+    expect(apply).toContain(
+      '"Where your issuance uses a special purpose vehicle and you have no company for it, Manci can incorporate one."',
+    );
+    expect(apply).toMatch(
+      /Each issuer can raise at most EUR 3,000,000 over any twelve\s+months \(per special purpose vehicle where one is used\)\./,
+    );
   });
 });
 
@@ -187,10 +348,17 @@ describe("the transaction recovery guide replaces the pilot operator guide", () 
     }
   });
 
-  it("/docs/pilot forwards to /docs/recovery", () => {
-    const page = src("app/docs/pilot/page.tsx");
-    expect(page).toContain('redirect("/docs/recovery")');
-    expect(page).not.toMatch(/<[A-Z]/); // no page of its own left behind
+  it("/docs/pilot forwards to /docs/recovery with a temporary (307) redirect", async () => {
+    const { default: FormerPilotGuide } = (await import("@/app/docs/pilot/page")) as { default: () => unknown };
+    let thrown: unknown = null;
+    try {
+      FormerPilotGuide();
+    } catch (error) {
+      thrown = error;
+    }
+    // next/navigation's redirect() throws NEXT_REDIRECT;<type>;<url>;<status>;
+    expect((thrown as { digest?: string } | null)?.digest).toMatch(/^NEXT_REDIRECT;(replace|push);\/docs\/recovery;307;/);
+    expect(src("app/docs/pilot/page.tsx")).not.toMatch(/<[A-Z]/); // no page of its own left behind
   });
 
   it("carries the sentence the deployment smoke test checks, on the old and the new address alike", async () => {

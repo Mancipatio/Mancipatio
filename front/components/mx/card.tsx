@@ -23,7 +23,7 @@ export type CardProps = {
  * <Card title="Company ownership" body="Convertible into real shares."
  *       href="/markets/types/equity" />
  * <Card title="Structure & protections">
- *   <Bullets items={["Issued through a Serbian SPV…"]} />
+ *   <Bullets items={["Transferable from wallet to wallet…"]} />
  * </Card>
  * ```
  */

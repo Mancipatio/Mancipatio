@@ -215,7 +215,8 @@ const GUIDES: Record<string, ToolGuide> = {
         title: "After a purchase",
         body: (
           <>
-            Purchased units appear in Portfolio. Existing holders can use the{" "}
+            Purchased units appear in Portfolio. Where trading through Manci is
+            available, existing holders can use the{" "}
             <TextLink href="/solutions/otc">OTC market</TextLink> to offer units
             for resale; a sale does not promise a future buyer or market price.
           </>
@@ -225,7 +226,7 @@ const GUIDES: Record<string, ToolGuide> = {
   },
   otc: {
     intro:
-      "Create a sell offer for existing units, fund its escrow and settle with a buyer under the recorded terms.",
+      "Where trading through Manci is available, create a sell offer for existing units, fund its escrow and settle with a buyer under the recorded terms.",
     appHref: "/marketplace/otc",
     appLabel: "Browse OTC offers",
     details: [

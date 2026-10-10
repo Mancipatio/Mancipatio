@@ -78,10 +78,10 @@ export default function RisksPage() {
         <SectionHead title="Conversion runs through an off-chain legal process" />
         <Body className="mt-4">
           Conversion into shares is possible only where the issuer offers
-          conversion and it is available. It is not automatic and does not
-          happen on-chain: it goes through the standard legal share-transfer
-          procedure, which depends on the issuer and its founders doing their
-          part.
+          conversion and it is available. It is not automatic, and the share
+          transfer itself does not happen on-chain: it goes through the
+          standard legal share-transfer procedure, which depends on the issuer
+          and its founders doing their part.
         </Body>
         <Body className="mt-3.5">
           If they won&apos;t facilitate the transfer, the holder&apos;s route is
@@ -109,9 +109,9 @@ export default function RisksPage() {
           check that they can before buying.
         </Body>
         <Body className="mt-3.5">
-          Manci does not move the goods. Delivery is arranged with the
-          issuer, and a cancelled delivery returns the tokens rather than the
-          asset.
+          Where delivery of a physical asset is available, it is arranged
+          with the issuer: Manci does not move the goods, and a cancelled
+          delivery returns the tokens rather than the asset.
         </Body>
       </Section>
 
@@ -139,8 +139,9 @@ export default function RisksPage() {
           Each issuer is responsible for the licences, approvals and consents
           its offering requires. A whitepaper is shown as approved by a
           regulator only where the approval and its decision reference are
-          recorded; otherwise it has not been approved. Where an approval is
-          needed, it is not guaranteed.
+          recorded; otherwise no approval is on record, and the whitepaper is
+          shown as not approved. Where an approval is needed, it is not
+          guaranteed.
         </Body>
         <Body className="mt-3.5">
           The operator limits what each issuer may raise through Manci to at

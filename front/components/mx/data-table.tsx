@@ -23,11 +23,11 @@ export type TableRow = {
  *
  * ```tsx
  * <DataTable
- *   columns={["Instrument", "Serbian SPV", "Annual cap"]}
+ *   columns={["Instrument", "Conversion", "Delivery"]}
  *   minWidth={640}
  *   rows={[
  *     { header: "Company ownership",
- *       cells: ["Required", "EUR 3M / SPV / yr"] },
+ *       cells: ["Where offered", { value: "—", tone: "na" }] },
  *     { header: "Fungible assets",
  *       cells: [{ value: "—", tone: "na" }, { value: "—", tone: "na" }] },
  *   ]}

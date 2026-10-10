@@ -24,10 +24,13 @@ type PublishedProfile = Pick<
   | "whitepaper_sha256"
   | "whitepaper_version_id"
   | "ssc_decision_ref"
+  // sscApprovalRef needs it on mainnet: without it every approval would read
+  // as not approved.
+  | "ssc_decision_version_id"
   | "updated_at"
 >;
 
-type Item = {
+export type Item = {
   profile: PublishedProfile;
   linkId: string | null;
   whitepaper: boolean;
@@ -133,7 +136,9 @@ function displayDate(raw: string | null): string | null {
   });
 }
 
-function DocumentRow({ item }: { item: Item }) {
+/** One document on the board. Exported for tests/login-guard-surfaces.test.ts,
+ *  which renders its approval label on mainnet. */
+export function DocumentRow({ item }: { item: Item }) {
   const { profile, linkId, whitepaper, documentUrl } = item;
   // The asset PDA is the public identity (e2e §6); a bare asset_id can be
   // shared by two issuers and would land on the chooser. The indexer join is

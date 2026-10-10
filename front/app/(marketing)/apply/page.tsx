@@ -68,8 +68,9 @@ import { featureDisabledMessage, features } from "@/lib/features";
  *
  * Copy changes taken from the prototype:
  * - the raise step no longer says founders sell "actual company equity" —
- *   backers receive tokens convertible into shares, and the cap is stated in
- *   EUR per SPV per year (it was written as a dollar figure elsewhere);
+ *   backers receive tokens that can carry conversion into shares, and the
+ *   limit is stated in EUR per issuer, per SPV where one is used (Terms
+ *   clause 7; it was written as a dollar figure elsewhere);
  * - the Serbian-entity question the prototype asks up front is folded into the
  *   existing incorporation field rather than added as a new stored field;
  * - a data-handling line sits above the submit button.
@@ -85,9 +86,10 @@ const STARTUP_RAISES = features().startupRaises;
 const CATEGORIES = ["DeFi","Infrastructure","Consumer","AI / ML","Gaming","Social","DAO Tooling","Payments","RWA","Other"];
 const STAGES_STARTUP = ["Pre-seed","Seed","Series A","Post-revenue","Bootstrapped"];
 const STAGES_MATURE = ["Post-revenue","Series B+","Profitable"];
-// "Serbia" leads the list: company ownership, debt and revenue share are
-// issued through a Serbian SPV, so this answers the prototype's qualifying
-// question ("Do you have a Serbian company?") without a new column.
+// "Serbia" leads the list: it answers the prototype's qualifying question
+// ("Do you have a Serbian company?") without a new column. Whether an
+// issuance uses a special purpose vehicle depends on that issuance; the copy
+// below never states one as the rule.
 const INCORP = ["Not yet","Serbia","US (Delaware)","US (Wyoming)","BVI","Cayman Islands","Singapore","UK","Estonia","Switzerland","Other"];
 const STEPS = [
   { id: "type", label: "Type" }, { id: "basics", label: "Basics" }, { id: "company", label: "Company" },
@@ -113,8 +115,8 @@ const EMPTY: Form = {
   founderName: "", founderEmail: "", founderTwitter: "", founderLinkedin: "", founderWhy: "", pitchDeck: "",
 };
 
-// The equity raise counts against the SPV's EUR 3M/year cap, so every money
-// figure on this page is in euro.
+// The equity raise counts against the issuer's EUR 3M limit (per SPV where
+// one is used), so every money figure on this page is in euro.
 const fmtM = (v: number) => `€${(v / 1_000_000).toFixed(v >= 1_000_000 ? 1 : 2)}M`;
 const fmtEur = (v: number) => `€${v.toLocaleString()}`;
 
@@ -851,7 +853,7 @@ export default function ApplyPage() {
             ) : inProgress ? (
               <>We are reviewing your verification{kyc === "more_info" || kyb === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
             ) : (
-              <>A verified account is required for these services. As an <strong>individual</strong>, complete identity verification (KYC) — once approved, we open the company for you and tokenize your raise. Already have a company? Verify it (KYB) instead.</>
+              <>A verified account is required for these services. As an <strong>individual</strong>, complete identity verification (KYC); once it is approved you can apply, and where your issuance needs a company, Manci can incorporate one. Already have a company? Verify it (KYB) instead.</>
             )
           }
         >
@@ -900,8 +902,8 @@ export default function ApplyPage() {
           {isIndividual ? (
             <Card className="mb-8" title="Applying as an individual">
               <p>
-                Your identity is verified. We will open the company (a Serbian SPV) for you and tokenize your raise
-                {capacity ? <> — up to <span className="mx-strong">{fmtEur(raiseMax)}</span> in {capacity.year}</> : null}.
+                Your identity is verified. Where your issuance needs a company, Manci can incorporate one
+                {capacity ? <>, and you can apply to raise up to <span className="mx-strong">{fmtEur(raiseMax)}</span> in {capacity.year}</> : null}.
                 Tell us about the business below.
               </p>
             </Card>
@@ -1093,8 +1095,8 @@ export default function ApplyPage() {
                 id="incorporation"
                 label="Incorporation"
                 hint={isIndividual
-                  ? "You are applying as an individual, so Manci incorporates the company (a Serbian SPV) for you."
-                  : "Company ownership, debt and revenue share are issued through a Serbian SPV. If you don't have a Serbian company, we incorporate one."}
+                  ? "You are applying as an individual. Where your issuance needs a company, Manci can incorporate one."
+                  : "Where your issuance uses a special purpose vehicle and you have no company for it, Manci can incorporate one."}
               >
                 <Select
                   id="incorporation"
@@ -1194,10 +1196,11 @@ export default function ApplyPage() {
             <div className="mt-8">
               <H2>Structure your raise</H2>
               <Body className="mt-4">
-                Issuance is capped at EUR 3 million per SPV per year. Backers
-                receive tokens carrying the right to convert into shares, and
-                conversion runs through the standard legal share-transfer
-                procedure.
+                Each issuer can raise at most EUR 3,000,000 over any twelve
+                months (per special purpose vehicle where one is used). Backers
+                receive tokens that can carry the right to convert into shares;
+                where you offer conversion and it is available, it runs through
+                the standard legal share-transfer procedure.
                 {isStartup
                   ? " Funds are vested to build investor confidence."
                   : " Funds are disbursed immediately upon close."}
