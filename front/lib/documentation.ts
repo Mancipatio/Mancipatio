@@ -50,7 +50,7 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         href: "/markets/types",
         title: "Asset types",
         description:
-          "Compare the eight categories and open their individual fact sheets.",
+          "Compare the asset types and open their fact sheets.",
         keywords:
           "equity debt real estate royalty revenue share commodity physical",
       },

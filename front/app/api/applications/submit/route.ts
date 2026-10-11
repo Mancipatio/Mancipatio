@@ -11,6 +11,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { requireArea } from "@/lib/server/feature-gate";
 import { detectNetwork } from "@/lib/network";
 import {
   insertApplicationEvent,
@@ -21,6 +22,8 @@ import { assertWithinCapacity, getRaiseCapacity, raiseLimitError } from "@/lib/s
 
 export async function POST(request: Request) {
   try {
+    // KYC-only mode (lib/features.ts): a raise application is a issuance entry.
+    requireArea("issuance");
     const { wallet, params } = await verifySigned(request, "applications.submit");
 
     const sb = getSupabaseAdmin();

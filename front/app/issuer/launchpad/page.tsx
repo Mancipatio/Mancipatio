@@ -2,7 +2,8 @@
 
 import { SalePublicationRecovery } from "./publication-recovery";
 import { detectNetwork } from "@/lib/network";
-import { featureDisabledMessage, features } from "@/lib/features";
+import { featureDisabledMessage, features, scopeEnabled } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
@@ -200,6 +201,10 @@ function LaunchpadInner() {
   // path refuses again before the wallet opens (lib/proceeds-gate.ts).
   const proceedsFrozen = issuerFreeze.isFrozen({ issuer: issuerPda }) === true;
   const canOpen = verified && mintableScs.length > 0 && !proceedsFrozen;
+  // KYC-only mode (lib/features.ts): primary sales are paused, so no sale is
+  // opened here (the button, the ?application= auto-open, the hints and the
+  // publication recovery go); closing a sale and collecting stay.
+  const salesOn = scopeEnabled("primarySales");
 
   // After a sale closes (instant close_sale for Mature, or the
   // open_payout_vault close flow for Startup) the server alone books what was
@@ -322,7 +327,7 @@ function LaunchpadInner() {
             Open or closed launchpad sales under your share classes.
           </p>
         </div>
-        <button
+        {salesOn && <button
           type="button"
           disabled={!canOpen}
           onClick={() => setShowOpen(true)}
@@ -338,7 +343,7 @@ function LaunchpadInner() {
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
         >
           + Open sale
-        </button>
+        </button>}
       </div>
 
       {!verified && me && (
@@ -349,7 +354,7 @@ function LaunchpadInner() {
       {proceedsFrozen && (
         <ProceedsFrozenNotice className="mt-6" closed="no sale can be opened or closed, and no payout vault opened," />
       )}
-      {verified && mintableScs.length === 0 && (
+      {salesOn && verified && mintableScs.length === 0 && (
         <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700">
           You need at least one share class with an initialized Token-2022 mint
           before opening a sale.{" "}
@@ -361,7 +366,7 @@ function LaunchpadInner() {
           </Link>
         </div>
       )}
-      {verified && approvals !== null && approvals.length > 0 && (
+      {salesOn && verified && approvals !== null && approvals.length > 0 && (
         <div className="mt-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
           Manci approved {approvals.length === 1 ? "a sale" : `${approvals.length} sales`} for
           your share classes. Use &quot;+ Open sale&quot; to open{" "}
@@ -369,7 +374,7 @@ function LaunchpadInner() {
         </div>
       )}
 
-      <SalePublicationRecovery />
+      {salesOn && <SalePublicationRecovery />}
 
       {failed ? (
         <p className="mt-8 text-sm text-red-600">Failed to load.</p>
@@ -380,7 +385,7 @@ function LaunchpadInner() {
       ) : !me ? (
         <NotIssuer />
       ) : rows.length === 0 ? (
-        <Empty />
+        <Empty paused={!salesOn} />
       ) : (
         <>
         {stuckStartupSales > 0 && (
@@ -493,6 +498,7 @@ function LaunchpadInner() {
       )}
 
       {showOpen &&
+        salesOn &&
         me &&
         issuerPda &&
         (approvals && approvals.length > 0 ? (
@@ -1057,23 +1063,27 @@ function NotIssuer() {
       <p className="text-sm font-semibold text-amber-900">
         No issuer found for this wallet
       </p>
-      <Link
-        href="/issuer/onboarding"
-        className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
-      >
-        Start onboarding →
-      </Link>
+      {navHrefVisible("/issuer/onboarding") && (
+        <Link
+          href="/issuer/onboarding"
+          className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
+        >
+          Start onboarding →
+        </Link>
+      )}
     </div>
   );
 }
 
-function Empty() {
+function Empty({ paused }: { paused: boolean }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">No primary sales yet.</p>
-      <p className="mt-1 text-xs text-slate-400">
-        Use &quot;+ Open sale&quot; above to launch one.
-      </p>
+      {!paused && (
+        <p className="mt-1 text-xs text-slate-400">
+          Use &quot;+ Open sale&quot; above to launch one.
+        </p>
+      )}
     </div>
   );
 }

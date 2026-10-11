@@ -245,3 +245,10 @@
 @media(prefers-reduced-motion:reduce) { [data-app] *,[data-app] *::before,[data-app] *::after { animation:none!important; transition:none!important; } }
 @media(max-width:1250px) { .app-floating-account { right:23px; } .app-section-tabs { padding-left:23px; } }
 @media(max-width:760px) { .app-topbar { display:flex; } .app-floating-account,.overview-account { display:none; } .app-section-tabs { padding:0 17px; } }
+/* Offered asset classes (lib/asset-classes.ts): fewer tiles than the eight,
+   then the non-interactive "More asset classes / Coming later" tile. Last in
+   the file so it overrides the media rules above; two columns on phones. */
+.overview-categories--few { grid-template-columns:repeat(auto-fill,minmax(170px,230px)); }
+.overview-category--later { cursor:default; background:transparent; border-style:dashed; color:#657267; }
+.overview-category--later:hover { background:transparent; border-color:var(--app-line); }
+@media(max-width:760px) { .overview-categories--few { grid-template-columns:repeat(2,minmax(0,1fr)); } }

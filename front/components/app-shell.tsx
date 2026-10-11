@@ -8,7 +8,7 @@ import { BrandLogo } from "@/components/brand-logo";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { features } from "@/lib/features";
+import { features, kycOnly } from "@/lib/features";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 import { tosGateMounted } from "@/lib/tos";
 import { moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
@@ -121,6 +121,15 @@ export function AppShell({ children, section = "overview" }: {
   const operatorLine = operatorFooterLine(operatorFor(network), new Date().getFullYear());
   // Existing holder and issuer pages own their main landmark.
   const Content = section === "portfolio" || section === "issuer" ? "div" : "main";
+  // KYC-only mode (lib/features.ts kycOnly): the issuer workspace and the
+  // raise promo leave the menu; the promo slot points to the one open action,
+  // identity verification, instead. With the mode off both are today's.
+  const issuerOn = navHrefVisible("/issuer", network);
+  const promoCard = navHrefVisible("/apply", network)
+    ? <><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></>
+    : kycOnly(network)
+      ? <><span className="app-issue-symbol">✓</span><strong>Get verified.</strong><p>Identity verification is open.</p><Link href="/verify">Verify your identity <IconArrowUpRight className="h-4 w-4" /></Link></>
+      : null;
   const navItems = (items: typeof primary) => items.filter(({ href }) => navHrefVisible(href, network)).map(({ href, label, icon: Icon }) => (
     <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined}
       className={`app-nav-link ${activePath(path, href) ? "is-active" : ""}`}>
@@ -138,12 +147,12 @@ export function AppShell({ children, section = "overview" }: {
           <p className="app-nav-label">MARKETPLACE</p>{navItems(primary)}
           <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
           <p className="app-nav-label">BUILD ON MANCI</p>
-          <Link href="/issuer" className={`app-nav-link ${section === "issuer" ? "is-active" : ""}`}><IconBuilding className="h-[18px] w-[18px]" />Issuer workspace</Link>
+          {issuerOn && <Link href="/issuer" className={`app-nav-link ${section === "issuer" ? "is-active" : ""}`}><IconBuilding className="h-[18px] w-[18px]" />Issuer workspace</Link>}
           <Link href="/docs" className={`app-nav-link ${section === "documentation" ? "is-active" : ""}`} aria-current={section === "documentation" ? "location" : undefined}><IconFile className="h-[18px] w-[18px]" />Documentation</Link>
           {section === "admin" && <Link href="/admin" className="app-nav-link is-active" aria-current="location"><IconBuilding className="h-[18px] w-[18px]" />Administration</Link>}
         </nav>
         <div ref={sidebarBottom} className="app-sidebar-bottom">
-          <div ref={promo} className="app-issue-card" hidden={!promoFits}><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></div>
+          {promoCard && <div ref={promo} className="app-issue-card" hidden={!promoFits}>{promoCard}</div>}
           <div className="app-sidebar-foot"><Link href="/about">About Manci ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
         </div>
       </aside>
@@ -155,7 +164,7 @@ export function AppShell({ children, section = "overview" }: {
         </header>
         {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
         {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
-        {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
+        {tabs && tabs.length > 0 && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{page}</div> : page}
         </Content>

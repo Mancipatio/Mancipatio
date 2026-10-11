@@ -70,7 +70,7 @@ import { tokenCountQuote, paymentTokenLabel } from "@/lib/purchase-quote";
 import { getAssetProfile, type PublicAssetProfile } from "@/lib/asset-profiles";
 import { tokenDecimal } from "@/lib/chain-evidence";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
-import { featureDisabledMessage, features, moduleEnabled } from "@/lib/features";
+import { featureDisabledMessage, features, moduleEnabled, scopeEnabled } from "@/lib/features";
 import { RAISE_LIMIT_NOTE, equityOfferedNote, whatYouAreBuying } from "@/lib/deal-terms-copy";
 import {
   assertChainRecordStorageAvailable,
@@ -531,10 +531,10 @@ export default function DealPage({
           ({detectNetwork()}).
         </p>
         <Link
-          href="/marketplace/launchpad"
+          href={scopeEnabled("primarySales") ? "/marketplace/launchpad" : "/marketplace"}
           className="mt-4 inline-block text-sm text-mx-ink-soft underline-offset-2 hover:underline"
         >
-          ← All raises
+          {scopeEnabled("primarySales") ? "← All raises" : "← Marketplace"}
         </Link>
       </section>
     );
@@ -647,11 +647,18 @@ export default function DealPage({
   // Startup sale (opened while the flag was on, or outside the issuer UI)
   // takes no commitments here either.
   const startupUnavailable = isStartup && !features().startupRaises;
+  // KYC-only mode (lib/features.ts): primary sales are paused. The page keeps
+  // the sale's information and the recovery of a purchase that already
+  // landed ("Retry recording"); the buy card shows no form.
+  const salesPaused = !scopeEnabled("primarySales");
   const saleOpen =
+    !salesPaused &&
     !startupUnavailable &&
     saleData.status === SaleStatus.Open && !soldOut && !notStarted && !expired;
   const closedReason = !saleOpen
-    ? startupUnavailable
+    ? salesPaused
+      ? "Primary sales are paused for now."
+      : startupUnavailable
       ? `${featureDisabledMessage("startupRaises")} This raise is not taking commitments.`
       : saleData.status !== SaleStatus.Open
       ? "This sale has been closed by the issuer."
@@ -826,11 +833,13 @@ export default function DealPage({
             </div>
           )}
 
+          {/* KYC-only mode: the raise list is the mode's gate, so a recovered
+              purchase goes back to the marketplace instead. */}
           <Link
-            href="/marketplace/launchpad"
+            href={salesPaused ? "/marketplace" : "/marketplace/launchpad"}
             className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-4 py-2 text-sm text-mx-ink-soft transition-colors hover:border-mx-rule-strong hover:text-mx-ink"
           >
-            ← Browse more raises
+            {salesPaused ? "← Marketplace" : "← Browse more raises"}
           </Link>
         </div>
       </section>
@@ -1298,6 +1307,8 @@ export default function DealPage({
           </div>
         )}
 
+        {/* KYC-only mode: no buy or commit form while primary sales are paused. */}
+        {!salesPaused && (<>
         {/* Amount input */}
         <div className="relative mb-3">
           <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-lg font-semibold text-mx-ink-faint">
@@ -1595,6 +1606,7 @@ export default function DealPage({
             </>
           )}
         </p>
+        </>)}
 
         {/* Progress, compact under the button */}
         {settlesOnChain ? (
@@ -1805,12 +1817,13 @@ export default function DealPage({
 
   return (
     <section>
-      {/* Back link */}
+      {/* Back link (to the marketplace while primary sales are paused: the
+          launchpad list is the KYC-only notice then). */}
       <Link
-        href="/marketplace/launchpad"
+        href={salesPaused ? "/marketplace" : "/marketplace/launchpad"}
         className="text-xs text-mx-ink-faint underline-offset-2 hover:underline"
       >
-        ← All raises
+        {salesPaused ? "← Marketplace" : "← All raises"}
       </Link>
 
       <SalePageLayout header={header} buy={buy} main={main} />

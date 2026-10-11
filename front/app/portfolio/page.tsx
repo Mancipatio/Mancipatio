@@ -815,20 +815,28 @@ function PassportRequestModalInner({
 
 
 function Empty() {
+  // Primary sales paused (KYC-only mode, lib/pilot-scope.ts): no buy prompt.
+  const salesOn = navHrefVisible("/marketplace/launchpad");
   return (
     <div className="mt-4 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         No Manci holdings yet.
       </p>
-      <p className="mt-1 text-xs text-slate-400">
-        Buy on a primary sale{navHrefVisible("/marketplace/otc") && " or take an OTC offer"} to see balances here.
-      </p>
-      <Link
-        href="/marketplace/launchpad"
-        className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
-      >
-        Browse launchpad →
-      </Link>
+      {salesOn ? (
+        <>
+          <p className="mt-1 text-xs text-slate-400">
+            Buy on a primary sale{navHrefVisible("/marketplace/otc") && " or take an OTC offer"} to see balances here.
+          </p>
+          <Link
+            href="/marketplace/launchpad"
+            className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
+          >
+            Browse launchpad →
+          </Link>
+        </>
+      ) : (
+        <p className="mt-1 text-xs text-slate-400">Holdings you receive appear here.</p>
+      )}
     </div>
   );
 }

@@ -25,6 +25,8 @@ import {
   type InstrumentCta,
   type TermSet,
 } from "@/lib/instruments";
+import { ASSET_CLASS_NOT_OFFERED, assetClassOffered } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 
 /** Headings that contain an apostrophe live here rather than in JSX text. */
 const HEADING_WHAT_IT_IS = "What it is";
@@ -32,6 +34,9 @@ const HEADING_WHO_ITS_FOR = "Who it's for";
 const HEADING_DIFFERS = "What's different about issuing this one";
 const HEADING_RECOURSE = "If the issuer doesn't perform";
 
+// All eight, offered or not (lib/asset-classes.ts): a class that is not
+// offered keeps its URL and shows a notice (noindex), so shared links do not
+// break.
 export async function generateStaticParams() {
   return INSTRUMENT_LIST.map((instrument) => ({ slug: instrument.slug }));
 }
@@ -45,6 +50,12 @@ export async function generateMetadata({
   const instrument = instrumentBySlug(slug);
   if (!instrument) {
     return { title: "Instrument · Manci" };
+  }
+  if (!assetClassOffered(instrument.slug)) {
+    // A page's robots replaces the root layout's (lib/indexing.ts): only
+    // where the build allows indexing is a noindex needed; elsewhere the
+    // root's stricter policy (noindex, nofollow) stays.
+    return { title: `${instrument.label} · Manci`, ...(indexingAllowed() ? { robots: { index: false, follow: true } } : {}) };
   }
   return {
     title: `${instrument.label} · Manci`,
@@ -92,6 +103,17 @@ export default async function InstrumentPage({
   const instrument = instrumentBySlug(slug);
   if (!instrument) {
     notFound();
+  }
+  // A class that is not offered on this network (lib/asset-classes.ts): the
+  // notice only, no fact sheet.
+  if (!assetClassOffered(instrument.slug)) {
+    return (
+      <PageHeader eyebrow="Asset guide" title={instrument.label} lede={ASSET_CLASS_NOT_OFFERED}>
+        <ButtonRow>
+          <Button href={MX_ROUTES.instruments} variant="ghost">See the asset types</Button>
+        </ButtonRow>
+      </PageHeader>
+    );
   }
 
   const {

@@ -35,7 +35,7 @@ import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { publishedSaleDocument } from "@/lib/server/sale-document";
-import { requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
+import { requireArea, requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
 import {
   BASE58_RE,
   enforceSaleAmountCap,
@@ -45,6 +45,8 @@ import {
 
 export async function POST(request: Request) {
   try {
+    // KYC-only mode (lib/features.ts): a commitment to a sale is a primary-sales entry.
+    requireArea("primarySales");
     const signedCopy=request.clone();
     const { wallet, params } = await verifySigned(request, "launchpad.commit");
 

@@ -2,9 +2,11 @@
 // render on every network (the About page's "Where things stand"). A module
 // that is switched off on the build's network (on mainnet, unless its
 // NEXT_PUBLIC_FEATURE_* variable is on: lib/features.ts, Terms clause 2) is
-// named as built, never as shipped or live.
+// named as built, never as shipped or live. In KYC-only mode everything but
+// sign-up and verification is named as paused, which holds whatever the
+// Terms in force offer (lib/features.ts KYC_ONLY_MESSAGE).
 
-import { moduleEnabled, type PilotModule } from "@/lib/features";
+import { kycOnly, moduleEnabled, type PilotModule } from "@/lib/features";
 import type { Network } from "@/lib/network";
 
 /** The modules the About page names, each behind its switch. */
@@ -19,6 +21,12 @@ function joinList(items: string[]): string {
 }
 
 export function modulesFact(network: Network): string {
+  // KYC-only mode (lib/features.ts): everything else is paused; no claim of
+  // what the Terms offer on this network ("not available on Solana mainnet"
+  // would turn false under Terms that offer trading).
+  if (kycOnly(network)) {
+    return `Sign-up and identity verification open; ${joinList(["launchpad", "issuer applications", ...SHIPPED_MODULES.map(([label]) => label)])} paused for now`;
+  }
   const on = SHIPPED_MODULES.filter(([, module]) => moduleEnabled(module, network)).map(([label]) => label);
   const off = SHIPPED_MODULES.filter(([, module]) => !moduleEnabled(module, network)).map(([label]) => label);
   if (off.length === 0) return "Launchpad, OTC settlement, governance and vesting shipped";
