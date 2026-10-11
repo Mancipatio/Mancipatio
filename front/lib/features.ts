@@ -213,13 +213,9 @@ export function moduleDisabledMessage(name: PilotModule, network: Network = dete
 //     answer 403 (lib/server/feature-gate.ts requireArea), and their on-chain
 //     entries are refused before the wallet opens (lib/pause-gate.ts
 //     KYC_ONLY_FLOWS);
-//   - the verification request is KYC (a person) only: a new KYB request (a
-//     company that wants to raise or issue) is an issuance entry, refused by
-//     /api/verification/submit and not offered on /verify; a KYB dossier
-//     that exists stays visible and its documents can still be uploaded
-//     (components/account-verification.tsx kybShown);
-//   - exits of existing positions, the verification request, the portfolio
-//     overview and the admin console keep working.
+//   - exits of existing positions, the verification request (a person's
+//     KYC and a company's KYB: /verify, /api/verification/submit), the
+//     portfolio overview and the admin console keep working.
 // Every notice of the mode, a module page's included, is labelled "Paused."
 // (components/pilot-module-notice.tsx), and every notice, 403 and wallet
 // refusal says the one sentence below. Neither says which services the

@@ -63,7 +63,7 @@ import { DocumentationFrame } from "@/components/documentation-frame";
 import { Button, TextLink } from "@/components/mx/button";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { KYC_ONLY_ROUTES, MODULE_ROUTES, moduleRouteState } from "@/lib/pilot-scope";
-import { AccountVerificationCard, kybShown } from "@/components/account-verification";
+import { AccountVerificationCard } from "@/components/account-verification";
 import { VerificationForm } from "@/components/verification-form";
 import type { AccountVerification } from "@/lib/account";
 
@@ -262,42 +262,37 @@ describe("guides, footer and shared links", () => {
 describe("the verification request", () => {
   const verification = { kyc: "none", kyb: "none", documents_requested: 0 } as unknown as AccountVerification;
 
-  it("mode on: identity (KYC) only; ?type=kyb is ignored and the company (KYB) request is not offered", () => {
+  it("mode on: both requests are offered, a person's KYC and a company's KYB (?type=kyb opens the company form)", () => {
     nav.path = "/verify";
     nav.search = "type=kyb";
     const form = html(createElement(VerificationForm));
     expect(form).toContain("Individual (KYC)");
-    expect(form).not.toContain("Company (KYB)");
-    expect(form).not.toContain("COMPANY REPRESENTATIVE");
+    expect(form).toContain("Company (KYB)");
+    expect(form).toContain("COMPANY REPRESENTATIVE");
     expect(form).not.toContain("Buying and trading tokens");
+    expect(form).not.toContain("raise capital or issue assets");
     const card = html(createElement(AccountVerificationCard, { verification }));
     expect(card).toContain("Identity verification (KYC)");
-    expect(card).not.toContain("Company verification (KYB)");
+    expect(card).toContain("Company verification (KYB)");
+    expect(hrefs(card)).toEqual(expect.arrayContaining(["/verify?type=kyc", "/verify?type=kyb"]));
     expect(card).not.toContain("Buying and trading tokens");
+    expect(card).not.toContain("Needed to create a raise");
   });
 
-  it("mode on: a KYB dossier that exists keeps its row, status and 'Continue verification'; a new one is not offered", () => {
-    for (const kyb of ["pending", "more_info", "verified", "suspended", "rejected"] as const) {
-      expect(kybShown(kyb), kyb).toBe(true);
-      const card = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb, documents_requested: 2 } as AccountVerification }));
-      expect(card, kyb).toContain("Company verification (KYB)");
-    }
+  it("mode on: a KYB dossier in progress keeps its status and 'Continue verification'", () => {
     const waiting = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb: "more_info", documents_requested: 2 } as AccountVerification }));
+    expect(waiting).toContain("Company verification (KYB)");
     expect(waiting).toContain("Documents needed");
     expect(waiting).toContain("Continue verification");
     expect(hrefs(waiting)).toContain("/verify?type=kyb");
-    for (const kyb of ["none", "expired", null, undefined] as const) {
-      expect(kybShown(kyb), String(kyb)).toBe(false);
-    }
-    const expired = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb: "expired" } as AccountVerification }));
-    expect(expired).not.toContain("Company verification (KYB)");
   });
 
   it("mode on: the copy promises nothing about when other services open", () => {
     nav.path = "/verify";
     const text = html(createElement(VerificationForm)) + html(createElement(AccountVerificationCard, { verification }));
-    expect(text).toContain("Identity verification (KYC) is open. The services that require it are paused for now.");
+    expect(text).toContain("Identity (KYC) and company (KYB) verification are open. The services that require them are paused for now.");
     expect(text).toContain("Identity verification is open.");
+    expect(text).toContain("Company verification is open.");
     expect(text).not.toMatch(/open later|Open now/);
   });
 
@@ -308,8 +303,10 @@ describe("the verification request", () => {
     const form = html(createElement(VerificationForm));
     expect(form).toContain("Company (KYB)");
     expect(form).toContain("COMPANY REPRESENTATIVE");
-    expect(html(createElement(AccountVerificationCard, { verification }))).toContain("Company verification (KYB)");
-    for (const kyb of ["none", "expired", "more_info"] as const) expect(kybShown(kyb), kyb).toBe(true);
+    expect(form).toContain("Verify your company to raise capital or issue assets.");
+    const card = html(createElement(AccountVerificationCard, { verification }));
+    expect(card).toContain("Company verification (KYB)");
+    expect(card).toContain("Needed to create a raise or issue assets as a company.");
   });
 });
 

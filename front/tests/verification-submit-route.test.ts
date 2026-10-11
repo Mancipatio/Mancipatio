@@ -38,10 +38,6 @@ const shared = vi.hoisted(() => ({ limit: vi.fn<(key: string, limit: number, win
 vi.mock("@/lib/server/shared-rate-limit", () => ({ consumeSharedRateLimit: shared.limit }));
 
 import { POST } from "@/app/api/verification/submit/route";
-import { KYC_ONLY_MESSAGE, kycOnly } from "@/lib/features";
-
-/** False in the "kyc-only-on" vitest project (vitest.config.ts): KYC-only mode takes no new KYB (403). */
-const KYB_INTAKE = !kycOnly();
 
 const kyc = {
   kind: "kyc", legal_name: "Ana Anić", date_of_birth: "1990-05-01", nationality: 688, residence_country: 688,
@@ -77,15 +73,8 @@ describe("/api/verification/submit", () => {
   });
 
   it("provisions a company (issuer) dossier for KYB without a passport request", async () => {
-    const { status, json } = await call(kyb);
-    if (!KYB_INTAKE) {
-      // KYC-only mode: a new company verification is an issuance entry, refused before any dossier work.
-      expect(status).toBe(403);
-      expect(json.error).toBe(KYC_ONLY_MESSAGE);
-      expect(m.ensureDossier).not.toHaveBeenCalled();
-      expect(m.calls).toEqual([]);
-      return;
-    }
+    // Also in the "kyc-only-on" vitest project: KYC-only mode takes a company's KYB like a person's KYC.
+    const { status } = await call(kyb);
     expect(status).toBe(200);
     // KYB always gets an upload link and its own document set, even on a KYC-verified dossier.
     expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), { accountId: "acc-1", wallet: expect.any(String) }, 688, "issuer", "verification-kyb", true);
@@ -105,8 +94,7 @@ describe("/api/verification/submit", () => {
     ["bad kind", { ...kyc, kind: "other" }],
   ])("rejects %s before touching the dossier", async (_label, params) => {
     const { status } = await call(params as Record<string, unknown>);
-    // KYC-only mode refuses a KYB (403) before validating it.
-    expect(status).toBe(!KYB_INTAKE && (params as { kind?: unknown }).kind === "kyb" ? 403 : 400);
+    expect(status).toBe(400);
     expect(m.ensureDossier).not.toHaveBeenCalled();
   });
 

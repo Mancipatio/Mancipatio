@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { WalletRequired } from "@/components/wallet-required";
-import { kybIntakeOpen, kybShown, VERIFICATION_LABEL } from "@/components/account-verification";
+import { VERIFICATION_LABEL } from "@/components/account-verification";
 import { IconArrowUpRight, IconBuilding, IconCheck, IconShield, IconUsers } from "@/components/icons";
 import type { AccountResponse, AccountWalletKycStatus } from "@/lib/account";
 import { COUNTRIES } from "@/lib/countries";
@@ -13,6 +13,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { signedFetch } from "@/lib/siws-client";
 import { accountFetch, useSignedInAccount } from "@/lib/account-login";
+import { kycOnly } from "@/lib/features";
 
 type Kind = "kyc" | "kyb";
 type Fields = Record<string, string>;
@@ -35,18 +36,13 @@ export function VerificationForm() {
   const search = useSearchParams();
   const next = search.get("next");
   const safeNext = next && SAFE_NEXT.test(next) ? next : null;
-  const [chosenKind, setKind] = useState<Kind>(search.get("type") === "kyb" ? "kyb" : "kyc");
+  const [kind, setKind] = useState<Kind>(search.get("type") === "kyb" ? "kyb" : "kyc");
   const [fields, setFields] = useState<Fields>(EMPTY);
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<{ kyc: AccountWalletKycStatus; kyb: AccountWalletKycStatus } | null>(null);
-  // KYC-only mode (lib/features.ts): a person's KYC is the one new request
-  // taken; a company's KYB is for raising and issuing (paused; the route
-  // answers 403 to a new one), so it is offered only for a dossier that
-  // exists, read-only (status and "Continue verification"); ?type=kyb falls
-  // back to KYC otherwise (components/account-verification.tsx kybShown).
-  const kybOpen = kybIntakeOpen();
-  const kinds: readonly Kind[] = kybShown(status?.kyb) ? ["kyc", "kyb"] : ["kyc"];
-  const kind: Kind = kinds.includes(chosenKind) ? chosenKind : "kyc";
+  // KYC-only mode (lib/features.ts): verification (KYC and KYB) is the one
+  // request the mode takes; only the copy says the services are paused.
+  const paused = kycOnly();
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -77,8 +73,7 @@ export function VerificationForm() {
 
   const current = status?.[kind] ?? "none";
   const inProgress = current === "pending" || current === "more_info";
-  // A new request, or an update of one in progress (not a new KYB while closed).
-  const showForm = !done && (current === "none" || current === "expired" || editing) && (kind === "kyc" || kybOpen);
+  const showForm = !done && (current === "none" || current === "expired" || editing);
   const set = (key: string) => (event: { target: { value: string } }) => setFields((f) => ({ ...f, [key]: event.target.value }));
   const maxDob = useMemo(() => { const d = new Date(); d.setFullYear(d.getFullYear() - 18); return d.toISOString().slice(0, 10); }, []);
 
@@ -128,9 +123,9 @@ export function VerificationForm() {
 
   return <div className="account-page verify-page">
     <header className="account-heading">
-      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{kybOpen
-        ? "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."
-        : "Identity verification (KYC) is open. The services that require it are paused for now. It takes a few minutes."}</p></div>
+      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{paused
+        ? "Identity (KYC) and company (KYB) verification are open. The services that require them are paused for now. It takes a few minutes."
+        : "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."}</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
@@ -144,12 +139,12 @@ export function VerificationForm() {
         </div>
       : <section className="account-card">
         <div className="verify-kinds" role="group" aria-label="What do you want to verify?">
-          {kinds.map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
+          {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
             {k === "kyc" ? <IconUsers size={20} /> : <IconBuilding size={20} />}
             <strong>{k === "kyc" ? "Individual (KYC)" : "Company (KYB)"}</strong>
-            <span>{k === "kyb" ? (kybOpen ? "Verify your company to raise capital or issue assets." : "Your company's verification dossier.")
-              : kybOpen ? "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder."
-              : "Verify your identity as an individual."}</span>
+            <span>{k === "kyb" ? (paused ? "Verify your company." : "Verify your company to raise capital or issue assets.")
+              : paused ? "Verify your identity as an individual."
+              : "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder."}</span>
             {status && <span className={`account-status ${status[k] === "verified" ? "account-status--verified" : ""}`} style={{ marginTop: 10 }}>{VERIFICATION_LABEL[status[k]]}</span>}
           </button>)}
         </div>
@@ -171,7 +166,7 @@ export function VerificationForm() {
           {current === "more_info" ? "We are waiting for your documents." : "Your submission is being reviewed."}
           <div className="account-form-actions" style={{ marginTop: 12 }}>
             <button type="button" className="account-button account-button--primary" onClick={() => void openDocuments()}>Continue verification<IconArrowUpRight size={15} /></button>
-            {(kind === "kyc" || kybOpen) && <button type="button" className="account-text-button" onClick={() => setEditing(true)}>Update my details</button>}
+            <button type="button" className="account-text-button" onClick={() => setEditing(true)}>Update my details</button>
           </div>
         </div>}
 

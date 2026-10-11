@@ -205,17 +205,15 @@ only on mainnet** when unset, every class elsewhere.
 
 What stays open while the mode is on: sign-in (wallet SIWS, email, Google)
 and account management; Terms acceptance; the verification request
-(`/verify` for a person's KYC, `/account/verify`, `/onboarding/[id]`,
-passport submission and status, KYC document uploads); read-only browsing
-of the marketing and marketplace pages; the portfolio overview and
-activity; exits of existing positions (cancels, reclaims, refunds, claims,
-conversion and delivery recording, purchase recovery); the whole admin
-console; and the contact form. A company's verification (KYB) is for
-raising and issuing, so `/verify` does not offer a new one and
-`/api/verification/submit` answers 403 to `kind=kyb`. A KYB dossier that
-already exists keeps its row on `/account` and its choice on `/verify`
-(status and "Continue verification": the document upload stays open), and
-the admin console keeps processing it.
+(`/verify` for a person's KYC and a company's KYB, `/account/verify`,
+`/onboarding/[id]`, passport submission and status, verification document
+uploads); read-only browsing of the marketing and marketplace pages; the
+portfolio overview and activity; exits of existing positions (cancels,
+reclaims, refunds, claims, conversion and delivery recording, purchase
+recovery); the whole admin console; and the contact form. A company's
+verification (KYB) stays open like a person's KYC (owner decision);
+raising and issuing themselves stay paused, and the admin console
+processes both.
 
 What is paused: every pilot module, **whatever its own variable says**
 (`moduleEnabled`; `pilotModules()` still reports the variables, which the
@@ -224,7 +222,7 @@ build guards read), and the two core areas without a switch of their own:
 | Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
 |---|---|---|---|
 | Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
-| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open), `verification/submit` (a new `kind=kyb`) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
 
 Also refused before the wallet: `deposit_to_custody_vault` and the vesting
 series follow-ups (`add_vesting_position`, `finalize_vesting_series`,

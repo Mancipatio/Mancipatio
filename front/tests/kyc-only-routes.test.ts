@@ -276,17 +276,15 @@ describe("routes an admin also uses: the non-admin branch only", () => {
     expect(notKycRefusal(await post(load))).toBe(true);
   });
 
-  it("verification/submit: a person's KYC goes on; a company's KYB is refused while the mode is on", async () => {
+  it("verification/submit: a person's KYC and a company's KYB both go on, mode on or off", async () => {
     const load = () => import("@/app/api/verification/submit/route");
-    modeOn();
-    signed(at.issuer, { kind: "kyb" });
-    expect(await post(load)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
-    expect(db.touched).toEqual([]);
-    signed(at.issuer, { kind: "kyc" });
-    expect(notKycRefusal(await post(load))).toBe(true);
-    modeOff();
-    signed(at.issuer, { kind: "kyb" });
-    expect(notKycRefusal(await post(load))).toBe(true);
+    for (const mode of [modeOn, modeOff]) {
+      mode();
+      for (const kind of ["kyc", "kyb"]) {
+        signed(at.issuer, { kind });
+        expect(notKycRefusal(await post(load)), `${mode.name} ${kind}`).toBe(true);
+      }
+    }
   });
 });
 
@@ -313,7 +311,6 @@ describe("source matrix", () => {
       ["issuer-profiles/upsert", 'requireArea("issuance")'],
       ["profiles/upsert", 'requireArea("issuance")'],
       ["storage/upload", 'requireArea("issuance")'],
-      ["verification/submit", 'if (kind === "kyb") requireArea("issuance")'],
       ["vesting/update-status", 'requireArea("issuance")'],
       ["vesting/publish-milestone", 'requireArea("issuance")'],
       // An issuer's unarchive that would re-publish (tests/archive-routes.test.ts).
@@ -326,7 +323,7 @@ describe("source matrix", () => {
 
   it("the verification request, sign-in, the Terms, support, purchase recovery and exits stay open", () => {
     for (const route of [
-      "passport/submit", "passport/status",
+      "verification/submit", "passport/submit", "passport/status",
       "clients/me", "clients/upload", "clients/link-wallet", "clients/accept-tos", "clients/onboarding-view", "clients/onboarding-requirements",
       "tos/accept", "tos/status", "auth/session", "auth/email/start", "auth/email/verify", "account/update", "account/wallets/attach",
       "inquiries/create", "launchpad/record-purchase", "conversion/cancel", "conversion/reclaim", "conversion/deposited",
@@ -392,7 +389,7 @@ describe("every API route is classified", () => {
     "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
     // Purchase recovery: a buy that already landed on-chain ("Retry recording").
     "launchpad/record-purchase": "recording",
-    "passport/status": "verification", "passport/submit": "verification",
+    "passport/status": "verification", "passport/submit": "verification", "verification/submit": "verification",
     // Withdraw a listing or mark it matched.
     "resell/update": "exit",
     "sale-approvals/mine": "read",
