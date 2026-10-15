@@ -34,6 +34,8 @@
 .app-sidebar-foot>a { display:flex; align-items:center; justify-content:center; background:#fff; color:var(--app-green); font-size:12px; font-weight:600; padding:9px 12px; border-radius:6px; box-shadow:0 1px 2px #00000033; transition:background .15s; }
 .app-sidebar-foot>a:hover { background:#e8f5ee; }
 .app-sidebar-foot>a:focus-visible { outline:2px solid #c8eaa9; outline-offset:2px; }
+.app-sidebar-foot>a+a { margin-top:-12px; }
+.app-follow-x-side { gap:8px; }
 .app-sidebar-foot>span { color:#87a398; display:flex; align-items:center; gap:7px; font-size:10px; }
 .app-sidebar-foot i { width:5px; height:5px; border-radius:50%; background:#86d3a9; }
 .app-body { position:relative; margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
@@ -42,10 +44,11 @@
 .app-breadcrumb-root { color:#657267; }
 .app-breadcrumb-separator { color:#ccd3cf; }
 .app-topbar-actions { gap:18px; }
-.app-account { border-left:1px solid var(--app-line); padding-left:18px; }
+.app-account { display:flex; align-items:center; gap:10px; border-left:1px solid var(--app-line); padding-left:18px; }
+.app-follow-x-icon { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:#0f1419; color:#fff; }
 .app-content { padding:31px 32px 24px; flex:1; min-width:0; width:100%; max-width:1660px; margin:0 auto; outline:none; }
 .app-content.app-content--overview { padding-top:22px; }
-.app-floating-account { position:absolute; top:22px; right:32px; z-index:20; }
+.app-floating-account { position:absolute; top:22px; right:32px; z-index:20; display:flex; align-items:center; gap:9px; }
 .app-section-tabs ~ .app-floating-account, .app-floating-account:has(~ .app-section-tabs) { top:7px; }
 .overview-account { display:flex; align-items:center; }
 .app-content--portfolio>main,.app-content--issuer>main { width:100%; min-width:0; }
@@ -97,6 +100,7 @@
 .app-footer { padding:18px 32px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
 .app-footer>div { display:flex; flex-wrap:wrap; gap:8px 21px; }
 .app-footer-dot { margin:0 7px; }
+.app-footer-x { display:inline-flex; align-items:center; gap:6px; }
 .app-footer-operator { flex-basis:100%; margin:0; line-height:1.6; }
 .app-market-content[data-mx] { background:transparent; }
 .app-market-content .mx-wrap { max-width:none; padding:0; }
@@ -117,6 +121,8 @@
 .overview-button { display:inline-flex; align-items:center; justify-content:center; gap:9px; background:#fff; border:1px solid #dfe6e1; border-radius:6px; min-height:37px; padding:9px 13px; font-size:12px; font-weight:500; white-space:nowrap; }
 .overview-button:hover { border-color:#82a590; }
 .overview-button-dark { background:#193e31; color:#fff; border-color:#193e31; }
+.overview-button-x { background:#0f1419; color:#fff; border-color:#0f1419; }
+.overview-button.overview-button-x:hover { background:#272c30; border-color:#272c30; }
 .app-wallet-menu { font-variant-numeric:tabular-nums; }
 .app-wallet-menu:hover { background:#224f3f; border-color:#224f3f; }
 .app-wallet-chevron { opacity:.75; margin-left:-3px; }

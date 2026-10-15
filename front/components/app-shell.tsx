@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AccountMenu } from "@/components/account-menu";
 import { BrandLogo } from "@/components/brand-logo";
+import { FollowOnX } from "@/components/follow-on-x";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
@@ -144,22 +145,22 @@ export function AppShell({ children, section = "overview" }: {
         </nav>
         <div ref={sidebarBottom} className="app-sidebar-bottom">
           <div ref={promo} className="app-issue-card" hidden={!promoFits}><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></div>
-          <div className="app-sidebar-foot"><Link href="/about">About Manci ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
+          <div className="app-sidebar-foot"><FollowOnX className="app-follow-x-side" /><Link href="/about">About Manci ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
         </div>
       </aside>
       <div className="app-body">
         {/* Mobile only: the sidebar toggle needs a home once the sidebar is hidden. */}
         <header className="app-topbar">
           <button ref={menuButton} className="app-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} aria-controls="app-sidebar" onClick={() => setMenuOpen(true)}>☰</button>
-          <div className="app-account"><AccountMenu /></div>
+          <div className="app-account"><FollowOnX compact className="app-follow-x-icon" /><AccountMenu /></div>
         </header>
         {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
-        {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
+        {path !== "/" && <div className="app-floating-account"><FollowOnX className="overview-button overview-button-x" /><AccountMenu /></div>}
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{page}</div> : page}
         </Content>
-        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link></div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
+        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link><FollowOnX className="app-footer-x" /></div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
       </div>
       {tosGateMounted(section, path) && <TosGate />}
     </div>
