@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { assetClassOffered } from "@/lib/pilot-scope";
 import { IconArrowUpRight, IconFile } from "@/components/icons";
 import { getSupabase } from "@/lib/supabase";
 import { listAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
@@ -295,7 +296,7 @@ export function WhitepapersBoard() {
           onChange={(event) => { setCategory(event.target.value); setPage(0); }}
         >
           <option value="all">All asset categories</option>
-          {CATEGORY_SLUGS.map((slug) => <option key={slug} value={slug}>{assetTypeBySlug(slug)?.title ?? slug}</option>)}
+          {CATEGORY_SLUGS.filter((slug) => assetClassOffered(slug)).map((slug) => <option key={slug} value={slug}>{assetTypeBySlug(slug)?.title ?? slug}</option>)}
         </select>
       </div>
 

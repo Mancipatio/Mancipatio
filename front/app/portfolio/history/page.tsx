@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { SkeletonTable } from "@/components/skeleton";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 type Event = {
   id: number;
@@ -95,14 +96,18 @@ export default function PortfolioHistoryPage() {
           </p>
           <p className="mt-1 text-xs text-slate-400">
             If you&apos;ve transacted before, older activity may be outside the
-            scanned window. Buy, sell or claim something to see it here.
+            scanned window.
+            {/* Primary sales paused (KYC-only mode): no buy prompt. */}
+            {navHrefVisible("/marketplace/launchpad") && " Buy, sell or claim something to see it here."}
           </p>
-          <Link
-            href="/marketplace/launchpad"
-            className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
-          >
-            Browse launchpad →
-          </Link>
+          {navHrefVisible("/marketplace/launchpad") && (
+            <Link
+              href="/marketplace/launchpad"
+              className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
+            >
+              Browse launchpad →
+            </Link>
+          )}
         </div>
       ) : (
         <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">

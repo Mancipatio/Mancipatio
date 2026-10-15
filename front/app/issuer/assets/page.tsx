@@ -25,6 +25,8 @@ import {
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
 import { ArchiveDialog } from "@/components/archive-dialog";
 import { useArchivedSet } from "@/lib/archive-client";
+import { scopeEnabled } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 const STATUS_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -174,6 +176,7 @@ export default function MyAssetsPage() {
   }, [myAssets, categoryOf]);
 
   const verified = me?.kybStatus === 1;
+  const issuanceOn = scopeEnabled("issuance");
   const legalId = me ? fromBytes32(me.legalEntityId) : null;
 
   if (!wallet) return <main><WalletRequired /></main>;
@@ -192,7 +195,9 @@ export default function MyAssetsPage() {
             Every asset registered under your issuer authority.
           </p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        {/* KYC-only mode (lib/features.ts): issuance is paused, so no entry
+            buttons; the list and the exits of what exists stay. */}
+        {issuanceOn && <div className="flex flex-wrap items-center justify-end gap-2">
           {verified ? (
             <Link
               href="/issuer/assets/tokenize"
@@ -218,7 +223,7 @@ export default function MyAssetsPage() {
           >
             Other asset types
           </button>
-        </div>
+        </div>}
       </div>
 
       {!verified && me && (
@@ -237,7 +242,7 @@ export default function MyAssetsPage() {
       ) : !myIssuerPda ? (
         <NotIssuer />
       ) : myAssets.length === 0 ? (
-        <Empty onClick={() => setShowCreate(true)} canCreate={verified} />
+        <Empty onClick={() => setShowCreate(true)} canCreate={verified} paused={!issuanceOn} />
       ) : (
         <>
           {/* Category segmented filter */}
@@ -382,7 +387,7 @@ export default function MyAssetsPage() {
         />
       )}
 
-      {showCreate && legalId && (
+      {showCreate && legalId && issuanceOn && (
         <AssetCreateModal
           variant="issuer"
           issuerLegalId={legalId}
@@ -406,12 +411,14 @@ function NotIssuer() {
       <p className="mt-1 text-xs text-amber-900/80">
         Register an issuer first to see your assets here.
       </p>
-      <Link
-        href="/issuer/onboarding"
-        className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
-      >
-        Start onboarding →
-      </Link>
+      {navHrefVisible("/issuer/onboarding") && (
+        <Link
+          href="/issuer/onboarding"
+          className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
+        >
+          Start onboarding →
+        </Link>
+      )}
     </div>
   );
 }
@@ -419,16 +426,19 @@ function NotIssuer() {
 function Empty({
   onClick,
   canCreate,
+  paused,
 }: {
   onClick: () => void;
   canCreate: boolean;
+  /** Issuance is paused (KYC-only mode): the first sentence only. */
+  paused: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         You haven&apos;t created any assets yet.
       </p>
-      {canCreate ? (
+      {paused ? null : canCreate ? (
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Link
             href="/issuer/assets/tokenize"

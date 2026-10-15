@@ -11,6 +11,7 @@ import {
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda } from "@/lib/pdas";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import {
   assetHref,
   resolveAssetParam,
@@ -555,7 +556,7 @@ function ShareClassesBlock({
         )}
       </section>
 
-      {activeSales.length > 0 && (
+      {activeSales.length > 0 && navHrefVisible("/marketplace/launchpad") && (
         <section className="mt-10">
           <h2 className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
             Open sales ({activeSales.length})

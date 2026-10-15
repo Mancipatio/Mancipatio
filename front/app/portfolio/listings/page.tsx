@@ -29,6 +29,7 @@ import {
 } from "@/lib/resell";
 import { createOtcRequest } from "@/lib/otc";
 import { detectNetwork } from "@/lib/network";
+import { moduleEnabled } from "@/lib/features";
 import { resellAskCurrencies, resellAskNote } from "@/lib/payment-price";
 import {
   PaymentMintPicker,
@@ -78,6 +79,10 @@ export default function SellListingsPage() {
   const [listingsError, setListingsError] = useState<string | null>(null);
   const [holdingsError, setHoldingsError] = useState<string | null>(null);
   const [showPost, setShowPost] = useState(false);
+  // Pilot scope (lib/features.ts): with secondary trading off this is a
+  // notice page: no new listing, offer or escrow request; "Mark matched" and
+  // "Withdraw" (exits of a listing that exists) stay.
+  const tradingOn = moduleEnabled("secondaryTrading");
   const [withdrawTarget, setWithdrawTarget] = useState<ResellListing | null>(
     null,
   );
@@ -205,14 +210,16 @@ export default function SellListingsPage() {
             risk.
           </p>
         </div>
-        <button
-          type="button"
-          disabled={!!holdingsError || holdings === null}
-          onClick={() => setShowPost(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          Post tokens for sale
-        </button>
+        {tradingOn && (
+          <button
+            type="button"
+            disabled={!!holdingsError || holdings === null}
+            onClick={() => setShowPost(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Post tokens for sale
+          </button>
+        )}
       </div>
 
       {holdingsError && <p role="alert" className="mt-4 text-sm text-rose-700">{holdingsError}</p>}
@@ -278,14 +285,16 @@ export default function SellListingsPage() {
                     <td className="px-4 py-3 text-right">
                       {l.status === "active" ? (
                         <div className="flex flex-wrap justify-end gap-2 text-[12px]">
-                          <Link
-                            href="/portfolio/offers"
-                            className="font-medium text-brand-700 hover:underline"
-                            title="Settlement goes through the on-chain OTC escrow — create the offer, then share its address with your buyer."
-                          >
-                            Create on-chain offer
-                          </Link>
-                          {l.share_class_pda && (
+                          {tradingOn && (
+                            <Link
+                              href="/portfolio/offers"
+                              className="font-medium text-brand-700 hover:underline"
+                              title="Settlement goes through the on-chain OTC escrow — create the offer, then share its address with your buyer."
+                            >
+                              Create on-chain offer
+                            </Link>
+                          )}
+                          {tradingOn && l.share_class_pda && (
                             <button
                               type="button"
                               onClick={() => setEscrowTarget(l)}
@@ -328,7 +337,7 @@ export default function SellListingsPage() {
         risk) — or transfer directly if you prefer.
       </p>
 
-      {showPost && (
+      {showPost && tradingOn && (
         <PostListingModal
           holdings={holdings}
           onClose={() => setShowPost(false)}
@@ -340,7 +349,7 @@ export default function SellListingsPage() {
         />
       )}
 
-      {escrowTarget && (
+      {escrowTarget && tradingOn && (
         <SellerOtcRequestModal
           listing={escrowTarget}
           sellerWallet={wallet.toString()}

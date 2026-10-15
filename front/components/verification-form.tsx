@@ -13,6 +13,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { signedFetch } from "@/lib/siws-client";
 import { accountFetch, useSignedInAccount } from "@/lib/account-login";
+import { kycOnly } from "@/lib/features";
 
 type Kind = "kyc" | "kyb";
 type Fields = Record<string, string>;
@@ -39,6 +40,9 @@ export function VerificationForm() {
   const [fields, setFields] = useState<Fields>(EMPTY);
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<{ kyc: AccountWalletKycStatus; kyb: AccountWalletKycStatus } | null>(null);
+  // KYC-only mode (lib/features.ts): verification (KYC and KYB) is the one
+  // request the mode takes; only the copy says the services are paused.
+  const paused = kycOnly();
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -119,7 +123,9 @@ export function VerificationForm() {
 
   return <div className="account-page verify-page">
     <header className="account-heading">
-      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes.</p></div>
+      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{paused
+        ? "Identity (KYC) and company (KYB) verification are open. The services that require them are paused for now. It takes a few minutes."
+        : "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."}</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
@@ -136,7 +142,9 @@ export function VerificationForm() {
           {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
             {k === "kyc" ? <IconUsers size={20} /> : <IconBuilding size={20} />}
             <strong>{k === "kyc" ? "Individual (KYC)" : "Company (KYB)"}</strong>
-            <span>{k === "kyc" ? "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder." : "Verify your company to raise capital or issue assets."}</span>
+            <span>{k === "kyb" ? (paused ? "Verify your company." : "Verify your company to raise capital or issue assets.")
+              : paused ? "Verify your identity as an individual."
+              : "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder."}</span>
             {status && <span className={`account-status ${status[k] === "verified" ? "account-status--verified" : ""}`} style={{ marginTop: 10 }}>{VERIFICATION_LABEL[status[k]]}</span>}
           </button>)}
         </div>

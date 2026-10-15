@@ -173,6 +173,17 @@ export function readArchiveRecord(value: unknown): ArchiveRecord | null {
 }
 
 /**
+ * True when unarchiving an asset puts its profile back on the public lists:
+ * it was published when archived, and the archive did not create the row
+ * (unarchive then restores status 'published' with is_published). KYC-only
+ * mode refuses that to an issuer, a publish being an issuance entry as on
+ * /api/profiles/upsert (lib/server/archive-actions.ts, /api/archive/set).
+ */
+export function unarchiveRepublishes(record: ArchiveRecord | null): boolean {
+  return !!record && record.row_created !== true && record.previous_status === "published" && record.previous_is_published === true;
+}
+
+/**
  * `fields.archive` belongs to the archive route alone: a profile patch never
  * sets it, and a patch that writes `fields` whole keeps the stored one.
  */

@@ -10,9 +10,40 @@ import { WalletButton } from "@/app/wallet-button";
 import { IconUsers as IconUser, IconWallet } from "@/components/icons";
 import { clearWalletSession } from "@/lib/siws-client";
 import { signOutAccount, useSignedInAccount } from "@/lib/account-login";
+import { kycOnly } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 function truncate(address: string) {
   return `${address.slice(0, 4)}…${address.slice(-4)}`;
+}
+
+/**
+ * The wallet menu's links. KYC-only mode (lib/features.ts kycOnly) adds
+ * "Verification", the one action it keeps open (the email menu always has
+ * it), and drops the issuer dashboard (lib/pilot-scope.ts navHrefVisible);
+ * with the mode off the list is today's.
+ */
+export function walletMenuLinks({ isIssuer, adminAllowed, pendingRoles }: {
+  isIssuer: boolean;
+  /** adminRouteAllows("/admin", capabilities). */
+  adminAllowed: boolean;
+  pendingRoles: number;
+}): { label: string; href: string }[] {
+  const links: { label: string; href: string }[] = [
+    { label: "Your account", href: "/account" },
+    ...(kycOnly() ? [{ label: "Verification", href: "/verify" }] : []),
+    { label: "Portfolio", href: "/portfolio" },
+  ];
+  if (isIssuer && navHrefVisible("/issuer")) links.push({ label: "Issuer dashboard", href: "/issuer" });
+  // Admins and operator roles (KYC provider, blocklist authority) alike: the
+  // same table the AdminGate enforces decides who sees the link.
+  if (adminAllowed) links.push({ label: "Admin", href: "/admin" });
+  // Platform roles only (platform, blocklist, KYC registry); issuer-key
+  // proposals are never counted here.
+  if (pendingRoles > 0) {
+    links.push({ label: `Pending roles (${pendingRoles})`, href: ACCOUNT_ROLES_PATH });
+  }
+  return links;
 }
 
 export function AccountMenu() {
@@ -81,19 +112,7 @@ export function AccountMenu() {
   const sol =
     balance.lamports != null ? (Number(balance.lamports) / 1e9).toFixed(3) : "…";
 
-  const links: { label: string; href: string }[] = [
-    { label: "Your account", href: "/account" },
-    { label: "Portfolio", href: "/portfolio" },
-  ];
-  if (isIssuer) links.push({ label: "Issuer dashboard", href: "/issuer" });
-  // Admins and operator roles (KYC provider, blocklist authority) alike: the
-  // same table the AdminGate enforces decides who sees the link.
-  if (adminRouteAllows("/admin", capabilities)) links.push({ label: "Admin", href: "/admin" });
-  // Platform roles only (platform, blocklist, KYC registry); issuer-key
-  // proposals are never counted here.
-  if (pending.length > 0) {
-    links.push({ label: `Pending roles (${pending.length})`, href: ACCOUNT_ROLES_PATH });
-  }
+  const links = walletMenuLinks({ isIssuer, adminAllowed: adminRouteAllows("/admin", capabilities), pendingRoles: pending.length });
 
   return (
     <div ref={ref} className="relative">

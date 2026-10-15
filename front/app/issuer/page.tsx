@@ -21,6 +21,8 @@ import { useToast } from "@/lib/toast";
 
 import { Kpi } from "@/components/kpi";
 import { IssuerRecoveryBanner } from "@/components/issuer-recovery-banner";
+import { scopeEnabled } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import type { Address } from "@solana/kit";
 const KYB_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -222,7 +224,9 @@ export default function IssuerOverviewPage() {
         <Kpi label="Jurisdiction" value={String(me.jurisdiction)} />
       </section>
 
-      <section className="mt-10">
+      {/* KYC-only mode (lib/features.ts): issuance is paused, so no entry
+          actions; the read view and the exits of what exists stay. */}
+      {scopeEnabled("issuance") && <section className="mt-10">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Quick actions
         </h2>
@@ -257,7 +261,7 @@ export default function IssuerOverviewPage() {
             disabledHint="Verify KYB to unlock"
           />
         </div>
-      </section>
+      </section>}
 
       <p className="mt-10 text-xs text-slate-400">
         Issuer PDA: <code className="font-mono">{myIssuerPda ?? "…"}</code>
@@ -374,7 +378,8 @@ function CompanyProfileCard({
         <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Company profile
         </h2>
-        {!editing && (
+        {/* KYC-only mode: editing the company profile is an issuance entry. */}
+        {!editing && scopeEnabled("issuance") && (
           <button
             type="button"
             onClick={openEdit}
@@ -503,14 +508,16 @@ function NotRegistered() {
         on Solana. Onboarding takes a single on-chain registration plus an
         off-chain KYB review by the Super Admin.
       </p>
-      <div className="mt-6">
-        <Link
-          href="/issuer/onboarding"
-          className="inline-flex items-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          Start onboarding →
-        </Link>
-      </div>
+      {navHrefVisible("/issuer/onboarding") && (
+        <div className="mt-6">
+          <Link
+            href="/issuer/onboarding"
+            className="inline-flex items-center rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Start onboarding →
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

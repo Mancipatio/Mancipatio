@@ -32,9 +32,12 @@ import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
 import { requireSanctionsClear } from "@/lib/server/sanctions";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { requireArea } from "@/lib/server/feature-gate";
 
 export async function POST(request: Request) {
   try {
+    // KYC-only mode (lib/features.ts): the buyer's own wallet screen (lib/compliance.ts screenOwnWallet, the buy flow) is a primary-sales entry.
+    requireArea("primarySales");
     const { wallet } = await verifySigned(request, "compliance.screenWallet");
     const sb = getSupabaseAdmin();
     await requireSanctionsClear(sb, {

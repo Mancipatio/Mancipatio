@@ -57,6 +57,7 @@ import {
 } from "@/lib/vesting-series";
 import { EMPTY_FORM, SeriesForm, type SeriesFormValues } from "./series-form";
 import { SeriesPanel } from "./series-panel";
+import { scopeEnabled } from "@/lib/features";
 
 const STATUS_LABEL: Record<VestingSeriesRow["status"], string> = {
   submitted: "In review",
@@ -85,6 +86,11 @@ export default function IssuerVestingSeriesPage() {
   const [rows, setRows] = useState<VestingSeriesRow[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  // KYC-only mode (lib/features.ts): issuance is paused, so no new series,
+  // resubmission or on-chain creation (their routes answer 403); resuming a
+  // prepared creation's record and the panels of existing series stay. With
+  // the mode off the page is today's.
+  const entriesOn = scopeEnabled("issuance");
   const [editRow, setEditRow] = useState<VestingSeriesRow | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [creationBusy, setCreationBusy] = useState<string | null>(null);
@@ -419,16 +425,18 @@ export default function IssuerVestingSeriesPage() {
             Manci team about the Rights Token.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setEditRow(null);
-            setShowForm(true);
-          }}
-          className="shrink-0 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + New vesting series
-        </button>
+        {entriesOn && (
+          <button
+            type="button"
+            onClick={() => {
+              setEditRow(null);
+              setShowForm(true);
+            }}
+            className="shrink-0 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + New vesting series
+          </button>
+        )}
       </div>
 
       {counts && (
@@ -515,7 +523,7 @@ export default function IssuerVestingSeriesPage() {
                     >
                       {STATUS_LABEL[row.status]}
                     </span>
-                    {row.status === "needs_changes" && (
+                    {row.status === "needs_changes" && entriesOn && (
                       <button
                         type="button"
                         onClick={() => {
@@ -527,7 +535,7 @@ export default function IssuerVestingSeriesPage() {
                         Fix & resubmit
                       </button>
                     )}
-                    {row.status === "approved" && (
+                    {row.status === "approved" && (entriesOn || !!row.creation_prepared_at) && (
                       <button
                         type="button"
                         disabled={
@@ -589,7 +597,7 @@ export default function IssuerVestingSeriesPage() {
         )}
       </div>
 
-      {showForm && (
+      {showForm && entriesOn && (
         <SeriesForm
           title={
             editRow ? "Fix & resubmit vesting series" : "New vesting series"

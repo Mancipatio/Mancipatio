@@ -73,6 +73,7 @@ describe("/api/verification/submit", () => {
   });
 
   it("provisions a company (issuer) dossier for KYB without a passport request", async () => {
+    // Also in the "kyc-only-on" vitest project: KYC-only mode takes a company's KYB like a person's KYC.
     const { status } = await call(kyb);
     expect(status).toBe(200);
     // KYB always gets an upload link and its own document set, even on a KYC-verified dossier.

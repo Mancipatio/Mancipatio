@@ -8,6 +8,8 @@ import { useSearchParams } from "next/navigation";
 import { useWalletConnection } from "@solana/react-hooks";
 import { SkeletonCard } from "@/components/skeleton";
 import { AppShell } from "@/components/app-shell";
+import { KYC_ONLY_MESSAGE } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import {
   acceptTos,
   getClientForOnboarding,
@@ -253,6 +255,10 @@ function Consumer({ id }: { id: string }) {
   }
 
   const next = NEXT_STEP[client.type];
+  // KYC-only mode (lib/pilot-scope.ts): an issuer invite's next step
+  // (/issuer/onboarding) is paused, so the card says so and links nowhere.
+  // The investor, delegate and officer steps are unchanged.
+  const nextOpen = !!next && navHrefVisible(next.href);
   const alreadyConnected =
     client.onboarding_status !== "invited" && !!client.wallet;
   const sameWallet =
@@ -430,17 +436,19 @@ function Consumer({ id }: { id: string }) {
             </span>
             <div>
               <h2 className="text-lg font-semibold text-slate-900">
-                {next.title}
+                {nextOpen ? next.title : "Registration paused"}
               </h2>
-              <p className="mt-1 text-sm text-slate-600">{next.body}</p>
+              <p className="mt-1 text-sm text-slate-600">{nextOpen ? next.body : KYC_ONLY_MESSAGE}</p>
             </div>
           </div>
-          <Link
-            href={next.href}
-            className="mt-5 inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-          >
-            Continue →
-          </Link>
+          {nextOpen && (
+            <Link
+              href={next.href}
+              className="mt-5 inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              Continue →
+            </Link>
+          )}
         </Card>
       )}
 
