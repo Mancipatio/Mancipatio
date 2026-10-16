@@ -32,7 +32,7 @@ describe("wallet sign-in registration", () => {
     const response = await POST(request());
     expect(response.status).toBe(200);
     expect(mocks.verify).toHaveBeenCalledWith(expect.any(Request), "auth.session");
-    expect(mocks.profile).toHaveBeenCalledExactlyOnceWith(wallet, "mainnet");
+    expect(mocks.profile).toHaveBeenCalledExactlyOnceWith(wallet, "mainnet", expect.any(AbortSignal));
     expect(mocks.verify.mock.invocationCallOrder[0]).toBeLessThan(mocks.profile.mock.invocationCallOrder[0]);
     expect(await response.json()).toMatchObject({ ok: true, data: { wallet, network: "mainnet" } });
     expect(response.headers.get("set-cookie")).toMatch(/^manci_session=/);

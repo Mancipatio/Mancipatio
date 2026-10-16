@@ -33,7 +33,7 @@ export async function POST(request: Request) {
     // Maintenance must still allow read sessions and existing-position exits;
     // a new contact profile can be created after maintenance ends.
     try {
-      await getAccountProfile(wallet, network);
+      await getAccountProfile(wallet, network, AbortSignal.timeout(4_000));
     } catch (error) {
       if (!(error instanceof MaintenanceError)) throw error;
     }
