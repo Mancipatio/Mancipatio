@@ -124,6 +124,7 @@ import {
 import { detectNetwork, type Network } from "@/lib/network";
 import {
   EMERGENCY_PAUSE_BITS,
+  PAUSE_FLAGS_ALL,
   PAUSE_PAYOUT_MODULES,
   PLATFORM_BOOTSTRAP_OPEN,
   describePausedAreas,
@@ -203,13 +204,36 @@ type Entry = {
 const dec = <T extends object>(decoder: { decode: (b: Uint8Array) => T }) => (data: Uint8Array) =>
   decoder.decode(data) as unknown as Record<string, unknown>;
 
-const pauseLabel = (flags: number) => describePausedAreas(flags) || "nothing paused";
+const pauseLabel = (flags: number) => describePausedAreas(flags) || "none";
+
+/**
+ * The areas a set_pause_flags changed, named in the summary: from the
+ * PauseFlagsChanged event when it decoded (the bits actually cleared and
+ * set), else from the masks as a REQUEST, never a result (a mask names bits
+ * the flags may already have held). A conversion window reads "resumed
+ * Custody entry", not the list of what stayed closed.
+ */
+function pauseDelta(setMask: number, clearMask: number, old: number | null, now: number | null): string {
+  const named = (parts: (string | null)[]) => parts.filter((p): p is string => p !== null).join("; ");
+  if (old !== null && now !== null) {
+    const resumed = describePausedAreas(old & ~now & PAUSE_FLAGS_ALL);
+    const paused = describePausedAreas(now & ~old & PAUSE_FLAGS_ALL);
+    const delta = named([resumed ? `resumed ${resumed}` : null, paused ? `paused ${paused}` : null]);
+    return `: ${delta || "no area changed"}`;
+  }
+  const resume = describePausedAreas(clearMask & PAUSE_FLAGS_ALL);
+  const pause = describePausedAreas(setMask & PAUSE_FLAGS_ALL);
+  const requested = named([resume ? `resume requested for ${resume}` : null, pause ? `pause requested for ${pause}` : null]);
+  return requested ? `: ${requested} (event missing)` : "";
+}
 
 function pauseClassify(setMask: number, clearMask: number, ev: Record<string, EventValue> | undefined): Classified {
   const old = typeof ev?.old === "number" ? ev.old : null;
   const now = typeof ev?.new === "number" ? ev.new : null;
   const noop = old !== null && now !== null && old === now;
-  const change = old !== null && now !== null ? ` (${formatPauseFlags(old)} → ${formatPauseFlags(now)}: ${pauseLabel(now)})` : "";
+  const change = old !== null && now !== null
+    ? ` (${formatPauseFlags(old)} → ${formatPauseFlags(now)}; now paused: ${pauseLabel(now)})` : "";
+  const delta = pauseDelta(setMask, clearMask, old, now);
   // v1.0.0-rc: closing the one-way bootstrap window on its own unpauses nothing.
   if (clearMask === PLATFORM_BOOTSTRAP_OPEN) {
     return { source: "onchain:pause", severity: noop ? "low" : "high", summary: `Bootstrap window closed${change}` };
@@ -227,16 +251,16 @@ function pauseClassify(setMask: number, clearMask: number, ev: Record<string, Ev
     return { source: "onchain:pause", severity: "critical", summary: `Payout modules switched off (0x40 set)${change}` };
   }
   if (clearMask !== 0) {
-    return { source: "onchain:pause", severity: noop ? "low" : "critical", summary: `Pause flags cleared (unpause)${change}` };
+    return { source: "onchain:pause", severity: noop ? "low" : "critical", summary: `Pause flags cleared (unpause)${delta}${change}` };
   }
   if (setMask !== 0) {
     // "Full": every emergency area paused (the payout modules bit 0x40 stays
     // set on mainnet anyway, and bit 7 is not a pause).
     const all = (flags: number | null) => flags !== null && (flags & EMERGENCY_PAUSE_BITS) === EMERGENCY_PAUSE_BITS;
     const full = all(setMask) || all(now);
-    return { source: "onchain:pause", severity: noop ? "low" : full ? "critical" : "high", summary: `Pause flags set${change}` };
+    return { source: "onchain:pause", severity: noop ? "low" : full ? "critical" : "high", summary: `Pause flags set${delta}${change}` };
   }
-  return { source: "onchain:pause", severity: "low", summary: `Pause flags unchanged${change}` };
+  return { source: "onchain:pause", severity: "low", summary: `Pause flags unchanged${delta}${change}` };
 }
 
 const disc = (d: Uint8Array | readonly number[]) => new Uint8Array(d);
