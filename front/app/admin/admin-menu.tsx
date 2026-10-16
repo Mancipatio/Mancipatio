@@ -79,6 +79,7 @@ export const ADMIN_MENU: AdminNavGroup[] = withRoles([
   {
     label: "People",
     items: [
+      { href: "/admin/accounts", label: "Accounts", icon: <IconUsers /> },
       { href: "/admin/clients", label: "Clients", icon: <IconUsers /> },
       { href: "/admin/inquiries", label: "Inquiries", icon: <IconFile /> },
       { href: "/admin/kyc", label: "KYC", icon: <IconCheck /> },
