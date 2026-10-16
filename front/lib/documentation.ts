@@ -1,3 +1,5 @@
+import { navHrefVisible } from "@/lib/pilot-scope";
+
 /** Canonical navigation and topic ownership for the public knowledge base. */
 export type DocumentationTopic = {
   href: string;
@@ -50,7 +52,7 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         href: "/markets/types",
         title: "Asset types",
         description:
-          "Compare the eight categories and open their individual fact sheets.",
+          "Review the available asset types and their fact sheets.",
         keywords:
           "equity debt real estate royalty revenue share commodity physical",
       },
@@ -141,7 +143,7 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         href: "/security",
         title: "Security & controls",
         description:
-          "Program authorities, transfer controls, custody mechanisms and when tokens can be clawed back.",
+          "Program authorities, transfer controls and when tokens can be clawed back.",
         keywords:
           "blocklist clawback transfer hook permanent delegate quarantine sanctions seize",
       },
@@ -216,4 +218,15 @@ export function isDocumentationPath(path: string): boolean {
     path === "/solutions" ||
     Boolean(documentationTopic(path))
   );
+}
+
+/** The same current service list powers both documentation navigation surfaces. */
+export function visibleDocumentationGroups(): DocumentationGroup[] {
+  return DOCUMENTATION_GROUPS.map((group) => ({
+    ...group,
+    topics: group.topics.filter((topic) => navHrefVisible(topic.href)).map((topic) =>
+      topic.href === "/solutions/custody" && !navHrefVisible("/portfolio/delivery")
+        ? { ...topic, title: "Token conversion", description: "Convert eligible holdings into company shares and track the request.", keywords: "equity shares conversion custody" }
+        : topic),
+  })).filter((group) => group.topics.length > 0);
 }

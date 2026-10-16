@@ -7,14 +7,13 @@ import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { WalletRequired } from "@/components/wallet-required";
 import { IconArrowUpRight, IconLayers, IconRocket, IconRepeat, IconLock, IconWallet, IconShield, IconFile, IconCoins, IconBox, IconGavel } from "@/components/icons";
 import { ASSET_TYPES } from "@/lib/asset-types";
-import { detectNetwork } from "@/lib/network";
 import { ASSET_STATUS_LABEL, ASSET_TYPE_LABEL } from "@/lib/format";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { withoutArchived } from "@/lib/archive-client";
 import { buildMarketOverview, type MarketAssetRow, type MarketOverview as OverviewData } from "@/lib/market-overview";
 import { loadPositionsForWallet, loadSeriesByPda, positionClaimable, VestingSeriesStatus } from "@/lib/vesting-series";
-import { navHrefVisible } from "@/lib/pilot-scope";
+import { assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
 
 const categoryCopy: Record<string, { label: string; right: string; action: string }> = {
   equity: { label: "Equity", right: "Company & shareholder rights", action: "Explore ownership" },
@@ -128,7 +127,7 @@ export function MarketOverview() {
   const vestingOn = navHrefVisible("/portfolio/vesting");
   // The live mainnet offering is Equity; keep other classes available on test networks.
   // Existing assets retain their category labels even when their class is not offered.
-  const classTypes = ASSET_TYPES.filter((type) => detectNetwork() !== "mainnet" || type.slug === "equity");
+  const classTypes = ASSET_TYPES.filter((type) => assetClassOffered(type.slug));
   const multipleClasses = classTypes.length > 1;
   const guideType = classTypes.find((type) => String(type.enumValue) === category)
     ?? (classTypes.length === 1 ? classTypes[0] : undefined);
@@ -150,7 +149,7 @@ export function MarketOverview() {
     { label: "Funded OTC offers", value: counts?.fundedOffers, detail: "Escrow funded · not expired", icon: IconRepeat, href: "/marketplace/otc" },
     { label: "Verified issuers", value: counts?.verifiedIssuers, detail: counts ? `Of ${counts.issuers} registered issuers` : "Issuer verification status", icon: IconShield, href: "/marketplace" },
   ].filter(({ href }) => navHrefVisible(href));
-  const journeyItems = [{ href: "/portfolio/rights", icon: IconCoins, title: "Income & rights", text: "Review distributions and claim rights attached to your holdings." }, { href: "/portfolio/delivery", icon: IconBox, title: "Redeem & receive", text: "Request physical delivery and follow its escrow status." }, { href: "/portfolio/governance", icon: IconGavel, title: "Have your say", text: "Review proposals and exercise your voting rights." }].filter(({ href }) => navHrefVisible(href));
+  const journeyItems = [{ href: "/portfolio/conversion", icon: IconRepeat, title: "Convert tokens into shares", text: "Request conversion of eligible tokens you own after identity verification." }, { href: "/portfolio/rights", icon: IconCoins, title: "Income & rights", text: "Review distributions and claim rights attached to your holdings." }, { href: "/portfolio/delivery", icon: IconBox, title: "Redeem & receive", text: "Request physical delivery and follow its escrow status." }, { href: "/portfolio/governance", icon: IconGavel, title: "Have your say", text: "Review proposals and exercise your voting rights." }].filter(({ href }) => navHrefVisible(href));
   const filtered = category !== "all" || market !== "all" || !!query;
   return (
     <div className="overview">

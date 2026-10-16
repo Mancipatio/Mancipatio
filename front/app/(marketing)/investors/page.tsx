@@ -29,15 +29,15 @@ const STEPS = [
   },
   {
     title: "02 · Read the documents",
-    body: "Review the selected issuance's rights, terms and disclosures. Use the instrument comparison when you need context for its asset category.",
+    body: "Review the selected issuance's rights, terms and disclosures. Use the asset guide when you need context for its rights.",
     links: [
       { label: "Token documents", href: MX_ROUTES.whitepapers },
-      { label: "Compare instruments", href: MX_ROUTES.instruments },
+      { label: "Asset guides", href: MX_ROUTES.instruments },
     ],
   },
   {
     title: "03 · Connect your wallet",
-    body: "Connect a Solana wallet using the app's wallet control. Buying and trading tokens does not require identity verification. You verify (KYC) later, if you convert tokens into company shares or take delivery of a physical good. A class marked KYC-gated also requires an approved investor passport, shown in Portfolio.",
+    body: `Connect a Solana wallet using the app's wallet control. Buying tokens does not require identity verification unless the class is KYC-gated. A KYC-gated class requires an approved investor passport, shown in Portfolio.${navHrefVisible("/portfolio/conversion") ? " Complete KYC before requesting conversion of tokens you own into company shares." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
     links: [
       { label: "Open Portfolio", href: "/portfolio" },
       { label: "Verification rules", href: MX_ROUTES.security },
@@ -104,9 +104,8 @@ export default function InvestorsPage() {
       <Section>
         <H2>After a purchase</H2>
         <Body className="mt-4">
-          Use Portfolio to review your holdings and transaction history. Its
-          navigation also opens vesting, payouts, governance, conversion and
-          delivery when relevant to your positions. If recording is pending, use
+          Use Portfolio to review your holdings and transaction history.
+          If recording is pending, use
           the saved transaction receipt to retry the record instead of repeating
           the payment.
         </Body>
@@ -120,6 +119,9 @@ export default function InvestorsPage() {
         </Body>}
         <ButtonRow>
           <Button href="/portfolio">Open Portfolio</Button>
+          {navHrefVisible("/portfolio/conversion") && (
+            <Button href="/portfolio/conversion" variant="ghost">Convert tokens into shares</Button>
+          )}
           {navHrefVisible("/portfolio/vesting") && (
             <Button href="/portfolio/vesting" variant="ghost">
               Check vesting

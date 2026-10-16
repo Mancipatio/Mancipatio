@@ -19,16 +19,16 @@ import { ContactForm } from "./contact-form";
 const OPERATOR = operatorFor(detectNetwork());
 
 export const metadata = {
-  title: "Contact · Custom tokenization · Manci",
+  title: "Contact & support · Manci",
   description:
-    "Have an idea that needs tokenization infrastructure? Tell us about it — we evaluate the idea, propose a solution and design a dedicated process together.",
+    "Contact the team about an equity issuance, verification or a step in the app.",
 };
 
 const PROCESS: Array<{ step: string; label: string; body: string }> = [
   {
     step: "01",
     label: "You reach out",
-    body: "Tell us what you want to tokenize — rights, services, platform utility, or one of the main categories.",
+    body: "Tell us about your equity issuance or the step in the app where you need help.",
   },
   {
     step: "02",
@@ -52,7 +52,7 @@ export default function ContactPage() {
       >
         <ButtonRow>
           <Button href={MX_ROUTES.instruments} variant="ghost">
-            Browse the main categories
+            Review available asset types
           </Button>
         </ButtonRow>
       </PageHeader>

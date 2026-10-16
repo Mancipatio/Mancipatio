@@ -26,6 +26,7 @@ import {
   type FeatureName,
   type PilotModule,
 } from "@/lib/features";
+import { ASSET_CLASS_SLUGS, offeredAssetClassesFor, type AssetClassSlug } from "@/lib/asset-classes";
 import { detectNetwork, type Network } from "@/lib/network";
 
 export type ModuleRoute = {
@@ -109,8 +110,9 @@ export const NAV_ROUTES: readonly NavRoute[] = [
  * is ignored ("/markets/resell?type=equity" is the resell board).
  */
 export function navHrefVisible(href: string, network: Network = detectNetwork()): boolean {
-  const path = href.split(/[?#]/, 1)[0];
+  const path = href.split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
   if (moduleRouteState(path, network)?.disabled) return false;
+  if (!assetClassPathVisible(path, network)) return false;
   const nav = NAV_ROUTES.find((r) => matches(path, r.prefix));
   if (!nav) return true;
   const flags = features(network);
@@ -130,3 +132,35 @@ export function moduleNoticeText(state: ModuleRouteState, network: Network = det
 /** The extra line of a notice page: what still works there. */
 export const MODULE_EXITS_OPEN =
   "Existing positions can still be closed here: cancels, withdrawals, claims and refunds keep working.";
+
+// ── Offered asset classes (lib/asset-classes.ts) ──────────────────────────
+
+/** The asset classes offered on `network`, in display order. */
+export function offeredAssetClasses(network: Network = detectNetwork()): readonly AssetClassSlug[] {
+  // Literal process.env.NEXT_PUBLIC_* read so Next inlines it client-side.
+  return offeredAssetClassesFor(network, process.env.NEXT_PUBLIC_ASSET_CLASSES);
+}
+
+/** True when the class `slug` (lib/asset-types.tsx CATEGORY_SLUGS) is offered on `network`. */
+export function assetClassOffered(slug: string, network: Network = detectNetwork()): boolean {
+  return (offeredAssetClasses(network) as readonly string[]).includes(slug);
+}
+
+/** True when every class is offered (public copy that names "every class" stays as it is). */
+export function allAssetClassesOffered(network: Network = detectNetwork()): boolean {
+  return offeredAssetClasses(network).length === ASSET_CLASS_SLUGS.length;
+}
+
+/**
+ * False for the guide of a class that is not offered (/markets/types/<slug>,
+ * /markets/<slug>); every other path, including /markets/types,
+ * /markets/resell and /markets/whitepapers, is not a class page.
+ */
+export function assetClassPathVisible(path: string, network: Network = detectNetwork()): boolean {
+  const slug = /^\/markets\/(?:types\/)?([a-z_]+)$/.exec(path)?.[1];
+  if (!slug || !(ASSET_CLASS_SLUGS as readonly string[]).includes(slug)) return true;
+  return assetClassOffered(slug, network);
+}
+
+/** The page of a class that is not offered (reachable by URL, noindex). */
+export const ASSET_CLASS_NOT_OFFERED = "This asset class is not offered on Manci at the moment.";

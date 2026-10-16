@@ -11,6 +11,8 @@ import {
   Section,
 } from "@/components/mx";
 
+import { navHrefVisible } from "@/lib/pilot-scope";
+
 export const metadata: Metadata = {
   title: "Pricing — Manci",
   description:
@@ -36,7 +38,7 @@ const ENGAGEMENT: Array<{ title: string; body: string }> = [
   },
   {
     title: "Distribution rails",
-    body: "The venues your token trades through, including OTC escrow.",
+    body: navHrefVisible("/marketplace/otc") ? "Primary sales and secondary trading through OTC escrow." : "The approved primary sale and allocation process.",
   },
 ];
 

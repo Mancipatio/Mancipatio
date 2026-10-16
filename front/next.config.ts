@@ -12,6 +12,7 @@ import {
   type MainnetLegalSlots,
 } from "./lib/legal/readiness";
 import { GEOBLOCK_ENV, parseGeoblockList } from "./lib/geoblock";
+import { ASSET_CLASSES_ENV, ASSET_CLASS_SLUGS, parseAssetClassList } from "./lib/asset-classes";
 
 // `next build`'s phase (next/constants PHASE_PRODUCTION_BUILD). Spelled out
 // rather than imported so this file loads no package at config time.
@@ -528,6 +529,20 @@ export function assertBuildGeoblock(phase: string, env: Record<string, string | 
   }
 }
 
+/**
+ * The asset classes Manci offers (lib/asset-classes.ts): any production
+ * build refuses a value that names no class (a typo would silently hide or
+ * show classes). Unset is a decision already made: equity on mainnet, every
+ * class elsewhere.
+ */
+export function assertBuildAssetClasses(phase: string, env: Record<string, string | undefined> = process.env): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const config = parseAssetClassList(env[ASSET_CLASSES_ENV]);
+  if (!config.ok) {
+    throw new Error(`${ASSET_CLASSES_ENV}: ${config.error}. Use "all" or comma-separated classes: ${ASSET_CLASS_SLUGS.join(", ")} (or leave it unset: equity on mainnet, every class elsewhere).`);
+  }
+}
+
 // ── Content-Security-Policy (report-only) ──────────────────────────────────
 
 /** Where browsers send CSP violation reports (app/api/csp-report/route.ts). */
@@ -693,5 +708,6 @@ export default function config(phase: string): NextConfig {
   assertBuildFeatureFlags(phase);
   // 8.5: counsel's geoblock list (or an explicit "none") on mainnet.
   assertBuildGeoblock(phase);
+  assertBuildAssetClasses(phase);
   return nextConfig;
 }

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { FieldError, FieldLabel } from "@/components/field";
 import { TurnstileWidget } from "@/components/turnstile-widget";
 import { combine, maxLength, minLength, required, type Validator } from "@/lib/form-validation";
+import { assetClassOffered } from "@/lib/pilot-scope";
 import { ASSET_TYPES } from "@/lib/asset-types";
 import { createInquiry } from "@/lib/inquiries";
 import { useToast } from "@/lib/toast";
@@ -21,8 +22,8 @@ const VALIDATORS: Record<string, Validator> = {
 };
 
 const ASSET_KIND_OPTIONS = [
-  ...ASSET_TYPES.map((t) => t.title),
-  "Something else",
+  ...ASSET_TYPES.filter((t) => assetClassOffered(t.slug)).map((t) => t.title),
+  "General question",
 ];
 
 const INPUT_CLASS =

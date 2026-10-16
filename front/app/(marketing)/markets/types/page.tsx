@@ -17,18 +17,20 @@ import {
   type TableRow,
 } from "@/components/mx";
 import {
-  COMPARISON_SETS,
   INSTRUMENT_LIST,
   isNotApplicable,
-  settledTermKeys,
+  TERM_FIELDS,
   termLabel,
   type TermValue,
+  type TermKey,
 } from "@/lib/instruments";
 
+import { assetClassOffered } from "@/lib/pilot-scope";
+
 export const metadata = {
-  title: "The eight instruments · Manci",
+  title: "Asset types · Manci",
   description:
-    "Company ownership, debt, real estate, royalty rights, revenue share, fungible and non-fungible assets — compared side by side. One issuance process; what changes is the right the token carries.",
+    "Review the asset types currently available on Manci, their rights and issuance terms.",
 };
 
 /** A settled answer is printed as written; "not applicable" is a dash, which
@@ -44,13 +46,15 @@ function cell(value: TermValue | undefined): TableCell {
 }
 
 export default function InstrumentsIndexPage() {
-  const keys = settledTermKeys();
+  const instruments = INSTRUMENT_LIST.filter((instrument) => assetClassOffered(instrument.slug));
+  const sets = instruments.flatMap((instrument) => instrument.terms);
+  const keys: TermKey[] = TERM_FIELDS.filter((field) => sets.every((set) => set.terms[field.key] !== undefined)).map((field) => field.key);
   const columns = [
     "Instrument",
     "The right it carries",
     ...keys.map(termLabel),
   ];
-  const rows: TableRow[] = COMPARISON_SETS.map((set) => ({
+  const rows: TableRow[] = sets.map((set) => ({
     header: set.title,
     cells: [set.right, ...keys.map((key) => cell(set.terms[key]))],
   }));
@@ -60,7 +64,7 @@ export default function InstrumentsIndexPage() {
       <PageHeader
         eyebrow="Asset types"
         title="Asset types"
-        lede="Compare the rights each instrument carries, then open its fact sheet for the details. The terms of a specific issuance are published with that asset."
+        lede="Review the available asset types and the rights they carry. The terms of a specific issuance are published with that asset."
       />
 
       <Section>
@@ -76,21 +80,21 @@ export default function InstrumentsIndexPage() {
         <FootNote className="mt-3">
           A dash means not applicable to this instrument.
         </FootNote>
-        <FootNote className="mt-2">
+        {assetClassOffered("real_estate") && <FootNote className="mt-2">
           Real estate appears twice because rental income and ownership carry
           different rights. Bespoke structures under Other have no standard
           terms, so they are not listed here.
-        </FootNote>
+        </FootNote>}
       </Section>
 
       <Section>
         <SectionHead
           eyebrow="The instruments"
-          title="Each one in full"
+          title="Available asset types"
           intro="Every page carries what the instrument is, who it is for, its terms at a glance, and what happens if the issuer doesn't perform."
         />
         <Grid cols={4} className="mt-7">
-          {INSTRUMENT_LIST.map((instrument) => (
+          {instruments.map((instrument) => (
             <Card
               key={instrument.slug}
               title={instrument.label}
@@ -104,7 +108,7 @@ export default function InstrumentsIndexPage() {
 
 
       <Section>
-        <H2>Not sure which one fits?</H2>
+        <H2>Discuss your issuance</H2>
         <Body className="mt-4">
           Tell us what you have. A person reads every application and comes back
           either way — including to say that none of these instruments is right

@@ -25,14 +25,14 @@ const QUESTIONS = [
   {
     question: "What does a particular token give me?",
     answer:
-      "Read the documents attached to that issuance. The instrument comparison explains the categories; an issuance's own documents describe its specific terms.",
+      "Read the documents attached to that issuance. The asset guide explains the available instrument; an issuance's own documents describe its specific terms.",
     href: MX_ROUTES.whitepapers,
     link: "Find token documents",
   },
   {
     question: "Do I need to verify my identity to buy tokens?",
     answer:
-      "No. Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class requires an approved investor passport for the receiving wallet.",
+      `Buying tokens does not require identity verification unless the class is KYC-gated. Buying or receiving a KYC-gated class requires an approved investor passport for the receiving wallet.${navHrefVisible("/portfolio/conversion") ? " Converting tokens into company shares requires KYC." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
     href: MX_ROUTES.security,
     link: "Verification and transfer rules",
   },
@@ -42,6 +42,12 @@ const QUESTIONS = [
       "The OTC guide explains creating, funding and filling an offer, with a direct link to the trading screen.",
     href: "/solutions/otc",
     link: "OTC trading guide",
+  },
+  {
+    question: "Can I convert tokens I own into company shares?",
+    answer: "Verified holders can request conversion for eligible holdings. Review the issuance terms and track the request in Portfolio; ownership of a token does not complete the legal conversion by itself.",
+    href: "/portfolio/conversion",
+    link: "Token conversion",
   },
   {
     question: "Where do I check my vesting?",

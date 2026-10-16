@@ -15,33 +15,33 @@ import { navHrefVisible } from "@/lib/pilot-scope";
 export const metadata = {
   title: "Issuing an asset · Manci",
   description:
-    "The shared issuer process: onboarding, application, review, documentation, registration and distribution.",
+    "The issuer process: KYC or KYB, verification review, token issuance request, documentation and primary sale.",
 };
 
 const STEPS = [
   {
-    title: "Complete issuer onboarding",
-    body: "Register the issuing entity, provide the requested verification documents and accept the terms of service.",
+    title: "Complete KYC or KYB",
+    body: "Verify your identity (KYC) as an individual founder or your company (KYB). Submit the requested documents from the issuer workspace.",
   },
   {
-    title: "Describe the proposed issuance",
-    body: "For an equity raise, submit the launchpad application. For other asset types, contact the team to scope the asset, rights, amount and schedule.",
+    title: "Follow the verification review",
+    body: "Check your status while the team reviews the submission. If changes or additional documents are requested, update the same request and resubmit. Continue once verification is approved.",
   },
   {
-    title: "Complete the review",
-    body: "The team reviews the proposal and supporting documents. An application can be approved, returned for changes or declined; requested changes are submitted for another review.",
+    title: "Request token issuance",
+    body: "Submit the equity issuance application with the proposed asset, rights, amount and schedule. Follow its review and respond to any requested changes.",
   },
   {
-    title: "Finalize the structure and documents",
+    title: "Finalize the terms and documents",
     body: "Agree the legal and commercial terms for this issuance. Prepare the required entity structure, rights documentation and disclosures before proceeding.",
   },
   {
-    title: "Register the asset and its share classes",
-    body: "Record the asset and configure the token classes, their rights and supply settings to match the approved terms.",
+    title: "Issue the tokens",
+    body: "Register the approved asset and configure its token classes and supply to match the agreed terms.",
   },
   {
-    title: "Distribute the tokens",
-    body: "Use the agreed sale or allocation process. Investors review the issuance terms; buying and trading need no identity verification unless the class is KYC-gated (set by the platform, for example at your request). Holders verify their identity when they convert tokens into company shares or take delivery of a physical good.",
+    title: "Open the primary sale",
+    body: "Publish the approved sale terms so investors can review the documents and purchase the available tokens. Review holdings and transaction history in Portfolio.",
   },
 ];
 
@@ -58,9 +58,14 @@ const AFTER_ISSUANCE = [
     body: "Scheduled releases, beneficiary positions and Rights-token claims.",
   },
   {
-    href: "/solutions/custody",
-    title: "Custody & delivery",
-    body: "Follow the asset through escrow, delivery or return.",
+    href: "/portfolio/conversion",
+    title: "Convert tokens into company shares",
+    body: "A verified holder can request conversion of eligible tokens they own, subject to the issuance terms and review.",
+  },
+  {
+    href: "/portfolio/delivery",
+    title: "Physical delivery",
+    body: "Follow an eligible physical asset through delivery or return.",
   },
   {
     href: "/solutions/governance",
@@ -78,9 +83,9 @@ export default function HowItWorksPage() {
         lede="The common path from an application to an issued asset. The documents and requirements are specific to each issuance."
       >
         <ButtonRow>
-          <Button href="/apply">Apply for an equity raise</Button>
+          <Button href="/issuer">Start with KYC / KYB</Button>
           <Button href="/contact" variant="ghost">
-            Discuss another asset
+            Contact the team
           </Button>
         </ButtonRow>
       </PageHeader>
