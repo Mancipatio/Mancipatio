@@ -18,6 +18,7 @@ vi.mock("next/link", () => ({
 }));
 vi.mock("@/components/account-menu", () => ({ AccountMenu: () => null }));
 vi.mock("@/components/tos-gate", () => ({ TosGate: () => null }));
+vi.mock("@/lib/use-pause-flags", () => ({ usePauseFlags: () => 0 }));
 vi.mock("@/components/brand-logo", () => ({ BrandLogo: () => createElement("span", null, "Manci") }));
 // Every operator capability, so only the pilot scope hides an admin entry.
 vi.mock("@/lib/auth", () => ({
@@ -116,7 +117,7 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
 
     expect(hrefs(tabs(shell("marketplace", "/marketplace")))).toEqual(["/marketplace", "/marketplace/launchpad"]);
     const issuer = hrefs(tabs(shell("issuer", "/issuer")));
-    expect(issuer).toEqual(expect.arrayContaining(["/issuer", "/issuer/assets", "/issuer/share-classes", "/issuer/launchpad"]));
+    expect(issuer).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets"]);
     for (const href of ["/issuer/payouts", "/issuer/vesting", "/issuer/vesting-series"]) expect(issuer).not.toContain(href);
   });
 
@@ -130,10 +131,10 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
     expect(hrefs(tabs(shell("marketplace", "/marketplace")))).toEqual(expect.arrayContaining(["/marketplace/otc", "/marketplace/governance", "/markets/resell"]));
   });
 
-  it("devnet shows every entry and tab", () => {
+  it("devnet shows enabled portfolio entries and the ordered issuer process", () => {
     const links = [...hrefs(sidebar(shell("portfolio", "/portfolio"))), ...hrefs(tabs(shell("portfolio", "/portfolio")))];
     for (const href of OFF_ON_MAINNET_USER.filter((h) => h.startsWith("/portfolio") || h === "/marketplace/otc")) expect(links, href).toContain(href);
-    expect(hrefs(tabs(shell("issuer", "/issuer")))).toEqual(expect.arrayContaining(["/issuer/payouts", "/issuer/vesting", "/issuer/vesting-series"]));
+    expect(hrefs(tabs(shell("issuer", "/issuer")))).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets"]);
   });
 
   it("an off module's page is still served by URL, with its notice", () => {
