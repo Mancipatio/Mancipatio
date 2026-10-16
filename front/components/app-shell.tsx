@@ -161,7 +161,7 @@ export function AppShell({ children, section = "overview" }: {
         {/* Mobile only: the sidebar toggle needs a home once the sidebar is hidden. */}
         <header className="app-topbar">
           <button ref={menuButton} className="app-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} aria-controls="app-sidebar" onClick={() => setMenuOpen(true)}>☰</button>
-          <div className="app-account"><FollowOnX compact className="app-follow-x-icon" /><AccountMenu /></div>
+          <div className="app-account">{path !== "/" && <FollowOnX compact className="app-follow-x-icon" />}<AccountMenu /></div>
         </header>
         {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
         {path !== "/" && <div className="app-floating-account"><FollowOnX className="overview-button overview-button-x" /><AccountMenu /></div>}
@@ -169,7 +169,7 @@ export function AppShell({ children, section = "overview" }: {
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{page}</div> : page}
         </Content>
-        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link><FollowOnX className="app-footer-x" /></div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
+        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link>{path !== "/" && <FollowOnX className="app-footer-x" />}</div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
       </div>
       {tosGateMounted(section, path) && <TosGate />}
     </div>
