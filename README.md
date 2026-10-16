@@ -17,11 +17,21 @@ the release
 the first conversion of tokens into shares was recorded on 2026-10-10, the
 day the site (<https://www.manci.io>) went public.
 
-- **Verified builds**: the release's `.so` files come from the reproducible
-  build in `.github/workflows/verifiable-build.yml` and can be checked with
-  `solana-verify verify-from-repo` against this repository
-  (`--mount-path program`).
-- **Upgrade authority**: a Squads vault; upgrades follow the runbook (§9).
+| Program | Mainnet address | Executable hash (`solana-verify`) |
+| --- | --- | --- |
+| `asset_registry` | `FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS` | `2cfb162e19605f4613f87988e3443a8d6e0f87db99b49822588649daaca955fa` |
+| `transfer_hook` | `GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy` | `724cb70bd672698e39c28005e5dc99084cb50ec13e5363b2ffe26b33e294fbf6` |
+
+- **Verified builds**: both programs are verified against that release
+  (OtterSec's remote verification; status at
+  `https://verify.osec.io/status/<program address>`). The `.so` files come
+  from the reproducible build in `.github/workflows/verifiable-build.yml`
+  and can be checked with `solana-verify verify-from-repo` against this
+  repository (`--mount-path program`).
+- **Upgrade authority**: a Squads vault
+  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`); upgrades follow the
+  runbook (§9).
+- **Devnet** runs the same program addresses with identical bytecode.
 - **Not audited**: the programs have had internal security reviews and
   automated testing only; no independent external audit has been
   completed.

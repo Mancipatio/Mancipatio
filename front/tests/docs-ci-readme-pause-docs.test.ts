@@ -18,6 +18,8 @@ import {
   PAUSE_SECONDARY,
 } from "@/lib/pause-flags";
 import { KYC_ONLY_ENV } from "@/lib/features";
+import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
+import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 
 const ROOT = join(process.cwd(), "..");
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
@@ -49,6 +51,15 @@ describe("README status (F091)", () => {
     expect(readme).not.toMatch(/devnet only|Nothing here is live on mainnet/i);
     expect(readme).toMatch(/live on Solana mainnet since 2026-10-02/);
     expect(readme).toContain("v1.0.0-rc.1");
+  });
+
+  it("lists the mainnet programs under the addresses the SDK is generated for, each with its executable hash", () => {
+    const row = (name: string, address: string) =>
+      new RegExp(`^\\| \`${name}\` \\| \`${address}\` \\| \`[0-9a-f]{64}\` \\|$`, "m");
+    expect(readme).toMatch(row("asset_registry", ASSET_REGISTRY_PROGRAM_ADDRESS));
+    expect(readme).toMatch(row("transfer_hook", TRANSFER_HOOK_PROGRAM_ADDRESS));
+    expect(readme).toMatch(/\*\*Upgrade authority\*\*: a Squads vault\n\s+\(`[1-9A-HJ-NP-Za-km-z]{32,44}`\)/);
+    expect(readme).toMatch(/\*\*Devnet\*\* runs the same program addresses/);
   });
 
   it("states KYC-only mode and links the env inventory sections it names", () => {
