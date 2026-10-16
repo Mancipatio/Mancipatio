@@ -11,16 +11,23 @@ import {
   getAcceptCustodyAuthorityInstructionAsync,
   getCancelCustodyAuthorityTransferInstructionAsync,
   VaultState,
+  type CustodyVault,
 } from "@/lib/generated/asset_registry";
 import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { findCustodyVaultPda } from "@/lib/pdas";
 import { PROPOSAL_NOT_FINALIZED_HINT } from "@/lib/operational-authority";
-/** Bind the proof to the vault's current operator. The PDA may be absent after
- * revocation: permissionless deadline returns must still be constructible. */
-export async function custodyAuthorityRecord(
+import type { AuditInput } from "@/lib/supabase";
+
+/**
+ * The live vault behind `vaultPda`, read at finalized and identity-checked
+ * (owned by the program, its PDA re-derived from its share class and id).
+ * A caller that needs both the operator proof and the vault's own data (the
+ * realize KYC accounts, the deposit ledger) reads it once through here.
+ */
+export async function fetchVerifiedCustodyVault(
   rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
   vaultPda: Address,
-) {
+): Promise<CustodyVault> {
   const vault = await fetchMaybeLiveCustodyVault(rpc, vaultPda, {
     commitment: "finalized",
     abortSignal: AbortSignal.timeout(8_000),
@@ -32,10 +39,24 @@ export async function custodyAuthorityRecord(
       vaultPda
   )
     throw new Error("Custody vault identity could not be verified");
-  const [record] = await findAdminRecordPda({
-    authority: vault.data.authority,
-  });
+  return vault.data;
+}
+
+/** The AdminRecord PDA of the vault's current operator (see custodyAuthorityRecord). */
+export async function custodyAuthorityRecordFor(
+  vault: Pick<CustodyVault, "authority">,
+): Promise<Address> {
+  const [record] = await findAdminRecordPda({ authority: vault.authority });
   return record;
+}
+
+/** Bind the proof to the vault's current operator. The PDA may be absent after
+ * revocation: permissionless deadline returns must still be constructible. */
+export async function custodyAuthorityRecord(
+  rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
+  vaultPda: Address,
+): Promise<Address> {
+  return custodyAuthorityRecordFor(await fetchVerifiedCustodyVault(rpc, vaultPda));
 }
 
 // ── Custody operator rotation (Talas 3.1 K10) ───────────────────────────────
@@ -248,4 +269,233 @@ export async function buildCustodyAuthorityChange(
         newAdminRecord,
         transfer: state.transferPda,
       });
+}
+
+// ── What the custody operator's handlers report (/admin/custody) ───────────
+//
+// Pure companions of the realize / return handlers of the admin request
+// queues: how far a custody action got before it failed (its audit row), the
+// evidence lines a request row shows, and the vault's attestation hash. No
+// React, no chain reads; tests/admin-custody-*.test.ts pin them.
+
+/**
+ * How far a custody action got: building its instructions, in the wallet /
+ * send path, sent (signature known) and being recorded, or sent and reported
+ * failed by the network.
+ */
+export type CustodySendStage = "build" | "send" | "record" | "chain-failed";
+
+/**
+ * The stage an audit row records for a custody action that did not complete:
+ *   * `pre-send` — nothing reached the wallet: the instructions could not be
+ *     built, or the pause / pilot-scope / maintenance / simulation gate
+ *     refused the transaction before the wallet opened;
+ *   * `wallet` — the wallet path failed: rejected by the user, or the send
+ *     failed before a signature was known;
+ *   * `sent-unrecorded` — the transaction was sent (its signature is kept)
+ *     and its outcome is not recorded yet;
+ *   * `sent-failed` — the transaction was sent and the network reported it
+ *     failed: nothing moved, the signature is kept.
+ */
+export type CustodyFailureStage = "pre-send" | "wallet" | "sent-unrecorded" | "sent-failed";
+
+/** Errors raised before the wallet opened (matched by name: the modules that throw them import nothing from here). */
+const PRE_WALLET_REFUSALS: ReadonlySet<string> = new Set([
+  "PausedFlowError",
+  "ModuleDisabledFlowError",
+  "KycOnlyFlowError",
+  "MaintenanceModeError",
+  "SimulationRefusedError",
+  "SimulationUnavailableError",
+  "GateAccountSetError",
+  "EarlierTransactionUnconfirmedError",
+]);
+
+/** True when `err`, or a cause of it, is a refusal raised before the wallet opened. */
+export function isPreWalletRefusal(err: unknown): boolean {
+  for (let cursor: unknown = err, depth = 0; cursor instanceof Error && depth < 6; cursor = cursor.cause, depth++) {
+    if (PRE_WALLET_REFUSALS.has(cursor.name)) return true;
+  }
+  return false;
+}
+
+/** The failure stage of a custody action that threw `err` at `stage`. */
+export function custodyFailureStage(stage: CustodySendStage, err: unknown, signature?: string): CustodyFailureStage {
+  if (stage === "record" && signature !== undefined) return "sent-unrecorded";
+  if (stage === "chain-failed" && signature !== undefined) return "sent-failed";
+  if (stage === "build" || isPreWalletRefusal(err)) return "pre-send";
+  return "wallet";
+}
+
+export type CustodyFailureAuditInput = {
+  ix_name: string;
+  actor_wallet: string;
+  reason: string;
+  target_label: string;
+  /** What the handler knows: request id, vault PDA, attestation hash. */
+  metadata: Record<string, unknown>;
+  stage: CustodySendStage;
+  /** The signature, once the transaction was sent. */
+  signature?: string;
+  err: unknown;
+  /** The explanation shown to the operator (explainSendError). */
+  message: string;
+};
+
+/**
+ * The audit row of a custody action that did not complete. `failed` only
+ * when nothing was sent; once a signature exists the row is `pending` (sent,
+ * outcome not recorded) and keeps the signature — in tx_signature and in
+ * metadata — so the retry or a reconciler can settle it by signature. The
+ * stage tells a wallet rejection, a pre-wallet refusal and a landed but
+ * unrecorded transaction apart.
+ */
+export function custodyFailureAudit(input: CustodyFailureAuditInput): AuditInput {
+  const stage = custodyFailureStage(input.stage, input.err, input.signature);
+  const sent = stage === "sent-unrecorded";
+  return {
+    ix_name: input.ix_name,
+    category: "custody",
+    actor_wallet: input.actor_wallet,
+    reason: input.reason,
+    target_label: input.target_label,
+    status: sent ? "pending" : "failed",
+    ...(input.signature !== undefined ? { tx_signature: input.signature } : {}),
+    metadata: {
+      ...input.metadata,
+      signature: input.signature ?? null,
+      stage,
+      error: input.message,
+    },
+  };
+}
+
+/** One evidence line of a request row: a transaction and what the server verified about it. */
+export type CustodyEvidenceLine = {
+  kind: "deposit" | "burn" | "return" | "close";
+  signature: string;
+  /** The server verified this transaction against the vault (deposit_evidence / outcome_evidence). */
+  verified: boolean;
+  text: string;
+};
+
+/** The request-row columns the evidence lines read (a ConversionRequest or DeliveryRequest fits). */
+export type CustodyEvidenceRow = {
+  status: string;
+  amount: number | string;
+  deposit_tx: string | null;
+  outcome_tx: string | null;
+  deposit_evidence?: unknown;
+  outcome_evidence?: unknown;
+};
+
+type VerifiedProof = { slot: string; amountAtomic: string; surplusRemaining: string | null };
+
+const DIGITS = /^\d+$/;
+
+/** The proof when it is the server's evidence of exactly `signature`; null otherwise. */
+function verifiedProof(evidence: unknown, signature: string): VerifiedProof | null {
+  if (!evidence || typeof evidence !== "object") return null;
+  const e = evidence as Record<string, unknown>;
+  if (e.signature !== signature) return null;
+  const slot = typeof e.slot === "string" ? e.slot : typeof e.slot === "number" ? String(e.slot) : "";
+  const amountAtomic = typeof e.amountAtomic === "string" ? e.amountAtomic : typeof e.amountAtomic === "number" ? String(e.amountAtomic) : "";
+  if (!DIGITS.test(slot) || !DIGITS.test(amountAtomic)) return null;
+  const surplus = typeof e.surplusRemaining === "string" && DIGITS.test(e.surplusRemaining) ? e.surplusRemaining : null;
+  return { slot, amountAtomic, surplusRemaining: surplus };
+}
+
+/**
+ * The evidence lines of a request row, in order: the holder's deposit, then
+ * the outcome (the burn of a converted / delivered request, the return of a
+ * returned one, the vault close of a cancelled one). A line is verified only
+ * when the stored evidence is the server's proof of that very signature.
+ * Never throws: malformed evidence reads as unverified.
+ */
+export function custodyRequestEvidence(row: CustodyEvidenceRow): CustodyEvidenceLine[] {
+  const lines: CustodyEvidenceLine[] = [];
+  const requested = String(row.amount);
+  if (row.deposit_tx) {
+    const proof = verifiedProof(row.deposit_evidence, row.deposit_tx);
+    lines.push({
+      kind: "deposit",
+      signature: row.deposit_tx,
+      verified: proof !== null,
+      text: proof ? `Deposit verified: ${proof.amountAtomic} units · slot ${proof.slot}` : "Deposit (not verified)",
+    });
+  }
+  if (row.outcome_tx) {
+    const proof = verifiedProof(row.outcome_evidence, row.outcome_tx);
+    if (row.status === "converted" || row.status === "delivered") {
+      const mismatch = proof && proof.amountAtomic !== requested ? ` (request ${requested})` : "";
+      lines.push({
+        kind: "burn",
+        signature: row.outcome_tx,
+        verified: proof !== null,
+        text: proof ? `Burn verified: ${proof.amountAtomic} units · slot ${proof.slot}${mismatch}` : "Burn (not verified)",
+      });
+    } else if (row.status === "returned") {
+      const surplus = proof?.surplusRemaining && proof.surplusRemaining !== "0" ? ` · surplus left in vault: ${proof.surplusRemaining}` : "";
+      lines.push({
+        kind: "return",
+        signature: row.outcome_tx,
+        verified: proof !== null,
+        text: proof ? `Return verified: ${proof.amountAtomic} units · slot ${proof.slot}${surplus}` : "Return (not verified)",
+      });
+    } else {
+      lines.push({ kind: "close", signature: row.outcome_tx, verified: false, text: "Vault close tx (not verified)" });
+    }
+  }
+  return lines;
+}
+
+/** The server-verified settlement of a vault, read from its linked request. */
+export type CustodySettlementProof = {
+  kind: "burn" | "return";
+  signature: string;
+  amountAtomic: string;
+  slot: string;
+};
+
+/**
+ * What settled a terminal vault, from the outcome evidence of its linked
+ * request (lib/reclaim-rent linkedCustodyRequests): the verified burn of a
+ * converted / delivered request, else the verified return of a returned one.
+ * Never the vault's own deposit ledger, which a realize leaves as it was.
+ */
+export function custodySettlementProof(
+  linked: readonly { status: string; outcome_evidence?: unknown }[] | null | undefined,
+): CustodySettlementProof | null {
+  if (!linked) return null;
+  const settlements: readonly [CustodySettlementProof["kind"], readonly string[]][] = [
+    ["burn", ["converted", "delivered"]],
+    ["return", ["returned"]],
+  ];
+  for (const [kind, statuses] of settlements) {
+    for (const request of linked) {
+      if (!statuses.includes(request.status)) continue;
+      const e = request.outcome_evidence;
+      if (!e || typeof e !== "object") continue;
+      const { signature } = e as Record<string, unknown>;
+      if (typeof signature !== "string" || !signature) continue;
+      const proof = verifiedProof(e, signature);
+      if (proof) return { kind, signature, amountAtomic: proof.amountAtomic, slot: proof.slot };
+    }
+  }
+  return null;
+}
+
+/**
+ * The vault's attestation (`metadata_hash`, the sha256 the burn attests) as
+ * lowercase hex, or null for the all-zero hash of a legacy vault opened
+ * without one.
+ */
+export function custodyAttestationHex(hash: Iterable<number>): string | null {
+  let hex = "";
+  let zero = true;
+  for (const byte of hash) {
+    if (byte !== 0) zero = false;
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return zero || hex.length === 0 ? null : hex;
 }

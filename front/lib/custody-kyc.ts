@@ -119,12 +119,15 @@ export function isKycGatedVault(vault: CustodyKycVault): boolean {
 
 /**
  * Reads the beneficiary's entry and the pinned registry, then evaluates them.
- * Fails closed: any RPC / decode failure is `registry_unreadable`.
+ * Fails closed: any RPC / decode failure is `registry_unreadable`. `config`
+ * (an abort signal, a commitment) bounds both reads, so one hung RPC call
+ * cannot keep a queue row "checking" for ever.
  */
 export async function loadBeneficiaryPassport(
   rpc: Parameters<typeof fetchMaybeKycEntry>[0],
   vault: CustodyKycVault,
   nowSec: number = Math.floor(Date.now() / 1000),
+  config?: Parameters<typeof fetchMaybeKycEntry>[2],
 ): Promise<PassportEvaluation> {
   if (vault.kycRegistry.toString() === DEFAULT_PUBKEY) {
     return {
@@ -137,8 +140,8 @@ export async function loadBeneficiaryPassport(
     const registryAddress = vault.kycRegistry as Address;
     const entryAddress = await getEntryPda(registryAddress, vault.beneficiary as Address);
     const [entry, registry] = await Promise.all([
-      fetchMaybeKycEntry(rpc, entryAddress),
-      fetchMaybeKycRegistry(rpc, registryAddress),
+      fetchMaybeKycEntry(rpc, entryAddress, config),
+      fetchMaybeKycRegistry(rpc, registryAddress, config),
     ]);
     return evaluatePassport(
       entry.exists ? entry.data : null,

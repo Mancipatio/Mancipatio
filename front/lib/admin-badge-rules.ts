@@ -171,6 +171,40 @@ export function conversionWaitsForAdmin(status: string): boolean {
   return (CONVERSION_ADMIN_STATUSES as readonly string[]).includes(status);
 }
 
+/**
+ * Where a request sits in its queue on /admin/custody, so the row the badge
+ * counts is at the top: a deposit waiting for the admin's confirmation (or a
+ * delivery underway) first, then a request waiting for approval, then a vault
+ * waiting for the holder's deposit, then history. The server lists newest
+ * first; sortCustodyQueue keeps that order inside each group.
+ */
+export function custodyQueueRank(status: string): number {
+  switch (status) {
+    case "deposited":
+    case "in_delivery":
+      return 0;
+    case "requested":
+      return 1;
+    case "vault_opened":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+/** The queue in custodyQueueRank order, newest first within a rank; stable. */
+export function sortCustodyQueue<T extends { status: string; created_at: string }>(rows: readonly T[]): T[] {
+  return rows
+    .map((row, index) => ({ row, index, at: Date.parse(row.created_at) }))
+    .sort(
+      (a, b) =>
+        custodyQueueRank(a.row.status) - custodyQueueRank(b.row.status) ||
+        (Number.isFinite(a.at) && Number.isFinite(b.at) ? b.at - a.at : 0) ||
+        a.index - b.index,
+    )
+    .map(({ row }) => row);
+}
+
 // ── Assets (/admin/assets) ──────────────────────────────────────────────────
 
 /** Why `activate_asset` would fail for a row (AR/instructions/activate_asset.rs). */

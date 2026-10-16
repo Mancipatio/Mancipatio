@@ -122,6 +122,79 @@ export function toDatetimeLocalValue(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// ── Conversion escrow deadline (/admin/custody Approve dialog) ─────────────
+// The program only bounds a DeliveryEscrow deadline to 24 h..365 d (6148).
+// What the deadline MEANS for a conversion is operational: the escrow waits
+// for the notary and the APR decision before the burn, and after the deadline
+// `return_custody_vault` is permissionless — anyone can hand the escrow back
+// to the holder, even once the shares are registered. The runbook therefore
+// asks for 120–180 days; the dialog proposes 150 and warns below 120. Neither
+// is enforced here: the operator decides, the program bounds.
+
+/** The deadline the Approve dialog proposes for a conversion escrow. */
+export const DEFAULT_CONVERSION_DEADLINE_DAYS = 150;
+/** Below this the dialog warns (the runbook's floor; a recommendation only). */
+export const MIN_CONVERSION_DEADLINE_DAYS = 120;
+
+const DAY_MS = 86_400_000;
+
+/** The `datetime-local` value of now + DEFAULT_CONVERSION_DEADLINE_DAYS. */
+export function conversionDeadlineDefault(nowMs: number = Date.now()): string {
+  return toDatetimeLocalValue(new Date(nowMs + DEFAULT_CONVERSION_DEADLINE_DAYS * DAY_MS));
+}
+
+export const CONVERSION_DEADLINE_SHORT_WARNING =
+  "The runbook recommends 120–180 days: escrow usually waits for the notary and the APR decision; after the deadline anyone can return the tokens to the holder.";
+
+/**
+ * An advisory warning for a conversion deadline the program would accept, or
+ * null: under MIN_CONVERSION_DEADLINE_DAYS, or past the holder's passport
+ * expiry (the burn needs a current passport, so it is refused after that
+ * date until the passport is renewed). Null while deliveryDeadlineError
+ * reports the value (the error shows instead). Never blocks the open.
+ */
+export function conversionDeadlineWarning(
+  value: string,
+  opts: { nowMs?: number; passportExpirySec?: bigint | null } = {},
+): string | null {
+  const nowMs = opts.nowMs ?? Date.now();
+  if (deliveryDeadlineError(value, nowMs) !== null) return null;
+  const t = new Date(value).getTime();
+  if (t < nowMs + MIN_CONVERSION_DEADLINE_DAYS * DAY_MS) return CONVERSION_DEADLINE_SHORT_WARNING;
+  const expiry = opts.passportExpirySec ?? null;
+  if (expiry !== null && expiry > BigInt(0) && Number(expiry) * 1000 < t) {
+    const day = new Date(Number(expiry) * 1000).toISOString().slice(0, 10);
+    return `The holder's passport expires on ${day}, before this deadline: the burn is refused after that date until the passport is renewed.`;
+  }
+  return null;
+}
+
+export type CustodyDeadlineUrgency = {
+  level: "ok" | "soon" | "urgent" | "passed";
+  /** Whole days until the deadline; 0 once it has passed. */
+  daysLeft: number;
+};
+
+/** Within this many days a custody deadline is "soon", and under this "urgent". */
+export const CUSTODY_DEADLINE_SOON_DAYS = 30;
+export const CUSTODY_DEADLINE_URGENT_DAYS = 7;
+
+/**
+ * How close a custody vault's deadline (unix seconds) is: null for a vault
+ * without one (0), "passed" once now is at or past it, "urgent" under 7
+ * days, "soon" under 30, otherwise "ok". After the deadline the escrow is
+ * returnable by anyone, so the queue colours the rows that near it.
+ */
+export function custodyDeadlineUrgency(deadlineSec: bigint, nowSec: number): CustodyDeadlineUrgency | null {
+  if (deadlineSec <= BigInt(0)) return null;
+  const left = Number(deadlineSec) - nowSec;
+  if (left <= 0) return { level: "passed", daysLeft: 0 };
+  const daysLeft = Math.floor(left / 86_400);
+  if (daysLeft < CUSTODY_DEADLINE_URGENT_DAYS) return { level: "urgent", daysLeft };
+  if (daysLeft < CUSTODY_DEADLINE_SOON_DAYS) return { level: "soon", daysLeft };
+  return { level: "ok", daysLeft };
+}
+
 /** The default sale length when the form opens (the issuer can change it). */
 export const DEFAULT_SALE_DAYS = 30;
 
