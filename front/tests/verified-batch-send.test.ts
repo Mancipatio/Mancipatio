@@ -52,6 +52,11 @@ vi.mock("@/lib/network-identity", async (original) => ({
     events.push("network");
   },
 }));
+// The pause flags are forgotten once a previous send was waited for (the decision then reads them again).
+vi.mock("@/lib/pause-gate", async (original) => {
+  const actual = await original<typeof import("@/lib/pause-gate")>();
+  return { ...actual, clearPauseFlagsCache: vi.fn(actual.clearPauseFlagsCache) };
+});
 const sim = vi.hoisted(() => ({ refuseAt: -1, count: 0, units: 120_000 }));
 vi.mock("@/lib/simulation-gate", async (original) => ({
   ...(await original<typeof import("@/lib/simulation-gate")>()),
@@ -109,8 +114,11 @@ import {
   type BatchSignedInfo,
 } from "@/lib/verified-solana-client";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
+import { clearPauseFlagsCache } from "@/lib/pause-gate";
+import { onSendStage } from "@/lib/send-stage";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
 import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
+import { explainSendError } from "@/lib/tx-error";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
 import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import {
@@ -759,6 +767,69 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     const f = fixture();
     expect(getBatchSender(f.guarded)).not.toBeNull();
     expect(getBatchSender(f.client)).toBeNull();
+  });
+
+  // r2g4-10 / r2g4-05 / r2g4-03 on the batch path: what the site-wide notice
+  // is told, when the pause flags are read again, and what a refused
+  // broadcast says.
+  describe("the stages, the pause decision and a refused broadcast", () => {
+    let stop = () => {};
+    beforeEach(() => {
+      stop = onSendStage((stage) => events.push(`stage:${stage.kind}`));
+      vi.mocked(clearPauseFlagsCache).mockClear();
+    });
+    afterEach(() => stop());
+    const stages = () => events.filter((e) => e.startsWith("stage:"));
+
+    it("a batch: checking, testing, account, wallet, sending, done", async () => {
+      await fixture().sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+      expect(stages()).toEqual(["stage:checking", "stage:testing", "stage:account", "stage:wallet", "stage:sending", "stage:done"]);
+      expect(events.indexOf("stage:testing")).toBeLessThan(events.indexOf("simulate"));
+      expect(events.indexOf("stage:account")).toBeLessThan(events.indexOf("authorize"));
+      expect(events.indexOf("stage:wallet")).toBeLessThan(events.indexOf("wallet.batch(2)"));
+      expect(events.indexOf("stage:sending")).toBeGreaterThan(events.indexOf("wallet.batch(2)"));
+      expect(events.indexOf("stage:sending")).toBeLessThan(events.indexOf("send"));
+    });
+
+    it("one by one: the wallet, the send, the wait for it before the next prompt; a refusal ends with failed", async () => {
+      await fixture().sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {} });
+      expect(stages()).toEqual([
+        "stage:checking", "stage:testing", "stage:account",
+        "stage:wallet", "stage:sending", "stage:waiting-previous", "stage:wallet", "stage:sending", "stage:done",
+      ]);
+      events.length = 0;
+      wallet.mode = "reject";
+      await expect(fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {} })).rejects.toMatchObject({ code: 4001 });
+      expect(stages().at(-1)).toBe("stage:failed");
+    });
+
+    it("once a previous send was waited for, the pause flags are forgotten before the decision; not without one", async () => {
+      const f = fixture();
+      await f.sender.prepareAndSendAll(requests(1), { onSigned: () => {} });
+      expect(clearPauseFlagsCache).not.toHaveBeenCalled();
+      events.length = 0;
+      await f.sender.prepareAndSendAll(requests(1), { onSigned: () => {} });
+      expect(clearPauseFlagsCache).toHaveBeenCalledTimes(1);
+      expect(events.indexOf("settle")).toBeLessThan(events.indexOf("stage:testing"));
+    });
+
+    it("a broadcast the RPC refused (HTTP 503) after the wallet signed is never explained as nothing sent, never with kit's decode text", async () => {
+      vi.stubEnv("NODE_ENV", "production");
+      let sends = 0;
+      const f = fixture({
+        onSend: () => {
+          if (sends++ === 1) throw new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode: 503 });
+        },
+      });
+      const result = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false]);
+      expect(result.outcomes[1].signature).not.toBeNull();
+      const text = explainSendError(result.outcomes[1].error);
+      expect(text).toBe(
+        "The Solana RPC refused the request (HTTP 503) after your wallet signed. The transaction may not have been broadcast; check it in the explorer before retrying.",
+      );
+      expect(text).not.toMatch(/npx|Nothing was sent/);
+    });
   });
 });
 
