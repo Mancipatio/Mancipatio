@@ -32,6 +32,7 @@ import { detectNetwork } from "@/lib/network";
 import type { AnonymizeResult } from "@/lib/client-privacy";
 import type { ClientReviewReason } from "@/lib/admin-badge-rules";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
+import { UPLOAD_MIME_ALLOWLIST, uploadContentType } from "@/lib/storage-client";
 
 /** Current Terms-of-Service version (single source: lib/tos-version.ts). */
 export { TOS_VERSION };
@@ -668,6 +669,77 @@ export async function acceptTos(
   }
 }
 
+// ── Onboarding page gates (pure; unit-tested in tests/onboarding-page.test.ts) ──
+
+/** What the onboarding page knows when it decides which step to show. */
+export type OnboardingGateInput = {
+  /** The dossier belongs to a wallet-less (email/Google) account (OnboardingView.account_owned). */
+  accountOwned: boolean;
+  /** A wallet is connected in the browser. */
+  walletConnected: boolean;
+  /** The dossier already carries a wallet (onboarding past `invited`). */
+  alreadyConnected: boolean;
+  /** This session just linked the connected wallet. */
+  linked: boolean;
+  /** The connected wallet is the dossier's wallet. */
+  sameWallet: boolean;
+  /** The dossier has accepted the current Terms. */
+  tosAccepted: boolean;
+};
+
+export type OnboardingGates = {
+  /** Step 1, the connect prompt: a wallet is required before anything else. */
+  showConnect: boolean;
+  /** The Terms card. */
+  showTerms: boolean;
+  /** The standalone Accept button in the Terms card (otherwise acceptance rides on the link step). */
+  showTermsAccept: boolean;
+  /** The link card for the connected wallet. */
+  showLink: boolean;
+  /** The link is optional: the page says so, and nothing waits for it. */
+  linkOptional: boolean;
+  /** A wallet other than the dossier's is connected. */
+  showWrongWallet: boolean;
+  /** The "Next steps" card. */
+  showNext: boolean;
+  /** Document uploads are open (the page still asks each requirement for an open status). */
+  uploadsOpen: boolean;
+};
+
+/**
+ * Which onboarding steps the page shows. A dossier owned by a wallet-less
+ * account needs no wallet: the Terms first, then the documents, and a wallet
+ * may be linked at any time (the server side: accept-tos and upload accept
+ * its token alone). A wallet dossier keeps the wallet path: connect, accept
+ * the Terms, link, then upload.
+ */
+export function onboardingGates(input: OnboardingGateInput): OnboardingGates {
+  const { accountOwned, walletConnected, alreadyConnected, linked, sameWallet, tosAccepted } = input;
+  if (accountOwned) {
+    return {
+      showConnect: false,
+      showTerms: true,
+      showTermsAccept: !tosAccepted,
+      showLink: walletConnected && !linked,
+      linkOptional: true,
+      showWrongWallet: false,
+      showNext: tosAccepted,
+      uploadsOpen: tosAccepted,
+    };
+  }
+  return {
+    showConnect: !walletConnected,
+    showTerms: walletConnected,
+    // Already-linked clients (pre-ToS-gate) accept in place.
+    showTermsAccept: !tosAccepted && alreadyConnected && sameWallet,
+    showLink: walletConnected && !alreadyConnected && !linked,
+    linkOptional: false,
+    showWrongWallet: walletConnected && alreadyConnected && !sameWallet,
+    showNext: (alreadyConnected || linked) && sameWallet,
+    uploadsOpen: walletConnected && (alreadyConnected || linked),
+  };
+}
+
 // ── Pure KYC lifecycle helpers (unit-tested in tests/kyc-pipeline.test.ts) ──
 // Keep in sync with the server mirrors in app/api/clients/_helpers.ts (that
 // module is server-only and cannot be shared with this "use client" module).
@@ -913,19 +985,83 @@ export async function reviewRequirement(
 
 // ── Document uploads (private bucket, server-side) ──────────────────────────
 
-/** `error` is set only for a failure worded for users (maintenance). */
+/**
+ * Size cap for a KYC document sent through /api/clients/upload. The route
+ * allows 15 MiB (MAX_UPLOAD_BYTES in app/api/clients/_helpers.ts), but the
+ * file travels in the request body of a serverless function, and Vercel
+ * answers 413 for bodies over 4.5 MB before the route runs — so 4 MiB is the
+ * limit a user can actually reach. Not storage-client's 25 MB: that flow
+ * uploads straight to Storage.
+ */
+export const KYC_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * `accept` for the KYC file pickers: the route's allowlist (PDF, PNG, JPEG,
+ * DOCX — app/api/clients/upload/route.ts ALLOWED_MIME and migration 0077;
+ * UPLOAD_MIME_ALLOWLIST in lib/storage-client.ts carries the same four).
+ */
+export const KYC_UPLOAD_ACCEPT = `.pdf,.png,.jpg,.jpeg,.docx,${UPLOAD_MIME_ALLOWLIST.join(",")}`;
+
+/** Same wording as the route's refusal. */
+const KYC_UPLOAD_TYPE_MESSAGE = "Unsupported file type — upload a PDF, PNG, JPG or DOCX";
+const KYC_UPLOAD_SIZE_MESSAGE =
+  "The file is larger than 4 MB. Scan or photograph it at a lower resolution, or save it as a smaller PDF.";
+
+/**
+ * Why the upload route would refuse `file`, before it is sent (or, for an
+ * operator, signed): empty, too large for the request body, or a type outside
+ * the allowlist. Null when the file is fine. An empty `File.type` (some
+ * browsers report none for .docx) is resolved from the extension, as
+ * withUploadType declares it.
+ */
+export function kycUploadProblem(file: File): string | null {
+  if (file.size === 0) return "The file is empty.";
+  if (file.size > KYC_UPLOAD_MAX_BYTES) return KYC_UPLOAD_SIZE_MESSAGE;
+  if (!(UPLOAD_MIME_ALLOWLIST as readonly string[]).includes(uploadContentType(file))) {
+    return KYC_UPLOAD_TYPE_MESSAGE;
+  }
+  return null;
+}
+
+/**
+ * `file` with its type declared when the browser reported none: the route
+ * reads an empty type as octet-stream and refuses it. Same bytes, so a signed
+ * sha256 and size still match.
+ */
+export function withUploadType(file: File): File {
+  if (file.type) return file;
+  return new File([file], file.name, { type: uploadContentType(file), lastModified: file.lastModified });
+}
+
+/** The message shown for a failed upload: the server's reason when it gave one. */
+export function uploadFailureMessage(status: number, serverError: unknown): string {
+  // The platform refused the body before the route ran (FUNCTION_PAYLOAD_TOO_LARGE).
+  if (status === 413) return KYC_UPLOAD_SIZE_MESSAGE;
+  if (typeof serverError === "string" && serverError.trim()) return serverError;
+  if (status === 429) return "Too many uploads — wait a minute and try again.";
+  return `Could not upload the document (HTTP ${status}). Please try again.`;
+}
+
+const UPLOAD_NETWORK_ERROR = "Network error — check your connection and try again.";
+
+/**
+ * `error` is the failure worded for users: the server's reason (an expired
+ * link, a refused type, a locked dossier), the maintenance notice, a local
+ * check that spared the request, or the network.
+ */
 type UploadResult = { ok: boolean; recomputed: ClientKycStatus | null; error?: string };
 
 function parseUploadResponse(
   json: { ok?: boolean; error?: string; code?: string; message?: string; data?: { recomputed?: string | null } } | null,
-  resOk: boolean,
+  res: { ok: boolean; status: number },
 ): UploadResult {
   if (json?.code === MAINTENANCE_CODE) {
     return { ok: false, recomputed: null, error: maintenanceRefusal(json.message, detectNetwork()).message };
   }
-  if (!resOk || !json || json.ok !== true) {
-    console.warn("[client_docs] upload failed:", json?.error ?? "request failed");
-    return { ok: false, recomputed: null };
+  if (!res.ok || !json || json.ok !== true) {
+    const error = uploadFailureMessage(res.status, json?.error);
+    console.warn("[client_docs] upload failed:", error);
+    return { ok: false, recomputed: null, error };
   }
   return {
     ok: true,
@@ -937,7 +1073,8 @@ function parseUploadResponse(
  * ADMIN upload of a KYC document into the private `client-documents` bucket.
  * `uploaded_by` is the verified signing wallet (server-side). When
  * `requirementId` is given the requirement flips to `submitted` and the
- * client's kyc_status is recomputed (returned as `recomputed`). Never throws.
+ * client's kyc_status is recomputed (returned as `recomputed`). A file the
+ * route would refuse is reported before the signature prompt. Never throws.
  */
 export async function uploadClientDocument(
   session: WalletSession | null | undefined,
@@ -946,6 +1083,8 @@ export async function uploadClientDocument(
   kind: string,
   requirementId?: number,
 ): Promise<UploadResult> {
+  const problem = kycUploadProblem(file);
+  if (problem) return { ok: false, recomputed: null, error: problem };
   try {
     const sha = await sha256Hex(file);
     const auth = await createSignedRequest(session, "clients.upload", {
@@ -957,20 +1096,22 @@ export async function uploadClientDocument(
     });
     const form = new FormData();
     form.set("auth", JSON.stringify(auth));
-    form.set("file", file);
+    form.set("file", withUploadType(file));
     const res = await fetch("/api/clients/upload", { method: "POST", body: form });
     const json = await res.json().catch(() => null);
-    const result = parseUploadResponse(json, res.ok);
+    const result = parseUploadResponse(json, res);
     if (result.ok) notifyAdminBadges();
     return result;
   } catch (e) {
     console.warn("[client_docs] upload threw:", e);
-    return { ok: false, recomputed: null };
+    return { ok: false, recomputed: null, error: e instanceof Error && e.message ? e.message : UPLOAD_NETWORK_ERROR };
   }
 }
 
 /**
  * MAGIC-LINK upload (onboarding page): the invite token is the credential.
+ * `wallet` is informational only — the route stamps `uploaded_by` from the
+ * validated dossier (its wallet, or "client" for an account-owned dossier).
  * Never throws.
  */
 export async function uploadClientDocumentWithToken(
@@ -981,6 +1122,8 @@ export async function uploadClientDocumentWithToken(
   kind: string,
   requirementId?: number,
 ): Promise<UploadResult> {
+  const problem = kycUploadProblem(file);
+  if (problem) return { ok: false, recomputed: null, error: problem };
   try {
     const form = new FormData();
     form.set("client_id", clientId);
@@ -988,12 +1131,12 @@ export async function uploadClientDocumentWithToken(
     if (wallet) form.set("wallet", wallet);
     form.set("kind", kind);
     if (requirementId != null) form.set("requirement_id", String(requirementId));
-    form.set("file", file);
+    form.set("file", withUploadType(file));
     const res = await fetch("/api/clients/upload", { method: "POST", body: form });
     const json = await res.json().catch(() => null);
-    return parseUploadResponse(json, res.ok);
+    return parseUploadResponse(json, res);
   } catch (e) {
     console.warn("[client_docs] upload threw:", e);
-    return { ok: false, recomputed: null };
+    return { ok: false, recomputed: null, error: UPLOAD_NETWORK_ERROR };
   }
 }
