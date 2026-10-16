@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getBase58Decoder } from "@solana/kit";
 import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
 vi.mock("server-only", () => ({}));
-const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
-vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc }) }));
+const { rpc, from } = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn() }));
+vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc, from }) }));
 import { POST } from "@/app/api/clients/link-wallet/route";
 
 const keys = generateKeyPairSync("ed25519");
@@ -32,6 +32,13 @@ beforeEach(() => {
   vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("NEXT_PUBLIC_SITE_URL", origin); vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
   rpc.mockReset();
   rpc.mockImplementation(async (name) => ({ data: name === "consume_siws_nonce" ? true : { status: "linked", already_linked: false }, error: null }));
+  // The dossier the route reads before binding: this invitation, no account
+  // (an account-owned dossier is tests/link-wallet-route.test.ts).
+  from.mockImplementation(() => {
+    const row = { id, network: "devnet", onboarding_token: token, onboarding_token_expires_at: new Date(Date.now() + 86_400_000).toISOString(), created_at: new Date().toISOString(), wallet: null, account_id: null };
+    const q = { select: () => q, eq: () => q, maybeSingle: async () => ({ data: row, error: null }) };
+    return q;
+  });
 });
 afterEach(() => vi.unstubAllEnvs());
 
