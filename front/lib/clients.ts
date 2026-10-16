@@ -338,16 +338,50 @@ export async function adminAnonymizeClient(
 }
 
 /**
+ * The onboarding page's view of its own dossier (/api/clients/onboarding-view):
+ * a fixed projection — never the onboarding token, nor the dossier's internal
+ * columns (tags, tier, source, provider references, account id, notes).
+ */
+export type OnboardingView = Pick<
+  ClientRow,
+  | "id"
+  | "type"
+  | "display_name"
+  | "kyc_status"
+  | "onboarding_status"
+  | "wallet"
+  | "tos_accepted_at"
+  | "tos_version"
+> & {
+  /**
+   * True for a dossier owned by a wallet-less (email/Google) account: the
+   * Terms and the document uploads need no wallet, and linking one is
+   * optional (server mirror: isAccountOwnedDossier in app/api/clients/_helpers.ts).
+   */
+  account_owned: boolean;
+};
+
+/**
+ * One row of the onboarding checklist (/api/clients/onboarding-requirements):
+ * what the page renders, never who requested the document.
+ */
+export type OnboardingRequirement = Pick<
+  KycRequirement,
+  "id" | "doc_kind" | "label" | "note" | "status" | "requested_at"
+>;
+
+/**
  * Token-authed onboarding read: validates the magic-link token SERVER-SIDE and
- * returns the client row WITHOUT onboarding_token (the browser must never read
- * that bearer secret — W3-RLS revokes the column from the anon role). Used by
- * the onboarding page in place of getClient + a client-side token compare.
+ * returns the dossier's onboarding projection, WITHOUT onboarding_token (the
+ * browser must never read that bearer secret — W3-RLS revokes the column from
+ * the anon role) and without the internal columns. Used by the onboarding
+ * page in place of getClient + a client-side token compare.
  * Returns { client: null, tokenValid: false } for a missing/invalid token.
  */
 export async function getClientForOnboarding(
   clientId: string,
   token: string,
-): Promise<{ client: ClientRow | null; tokenValid: boolean }> {
+): Promise<{ client: OnboardingView | null; tokenValid: boolean }> {
   if (!token) return { client: null, tokenValid: false };
   try {
     const res = await fetch("/api/clients/onboarding-view", {
@@ -356,7 +390,7 @@ export async function getClientForOnboarding(
       body: JSON.stringify({ client_id: clientId, token }),
     });
     const json = (await res.json().catch(() => null)) as
-      | { ok?: boolean; data?: ClientRow; error?: string }
+      | { ok?: boolean; data?: OnboardingView; error?: string }
       | null;
     if (!res.ok || !json || json.ok !== true || !json.data) {
       return { client: null, tokenValid: false };
@@ -786,7 +820,7 @@ async function sha256Hex(file: File): Promise<string> {
 export async function listRequirementsForOnboarding(
   clientId: string,
   token: string,
-): Promise<KycRequirement[]> {
+): Promise<OnboardingRequirement[]> {
   if (!token) return [];
   try {
     const res = await fetch("/api/clients/onboarding-requirements", {
@@ -795,7 +829,7 @@ export async function listRequirementsForOnboarding(
       body: JSON.stringify({ client_id: clientId, token }),
     });
     const json = (await res.json().catch(() => null)) as
-      | { ok?: boolean; data?: { requirements?: KycRequirement[] } }
+      | { ok?: boolean; data?: { requirements?: OnboardingRequirement[] } }
       | null;
     if (!res.ok || !json || json.ok !== true) return [];
     return json.data?.requirements ?? [];

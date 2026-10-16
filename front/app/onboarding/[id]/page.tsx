@@ -17,8 +17,8 @@ import {
   listRequirementsForOnboarding,
   uploadClientDocumentWithToken,
   TOS_VERSION,
-  type ClientRow,
-  type KycRequirement,
+  type OnboardingRequirement,
+  type OnboardingView,
 } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
 
@@ -74,7 +74,7 @@ function Consumer({ id }: { id: string }) {
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  const [client, setClient] = useState<ClientRow | null | undefined>(undefined);
+  const [client, setClient] = useState<OnboardingView | null | undefined>(undefined);
   const [tokenValid, setTokenValid] = useState<boolean | null>(null);
   const [linking, setLinking] = useState(false);
   const [linked, setLinked] = useState(false);
@@ -84,7 +84,7 @@ function Consumer({ id }: { id: string }) {
   const [tosAccepting, setTosAccepting] = useState(false);
 
   // KYC requirements state
-  const [requirements, setRequirements] = useState<KycRequirement[]>([]);
+  const [requirements, setRequirements] = useState<OnboardingRequirement[]>([]);
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   // Per-requirement file selections: requirementId → File
   const [selectedFiles, setSelectedFiles] = useState<Record<number, File>>({});
@@ -183,7 +183,7 @@ function Consumer({ id }: { id: string }) {
     }
   }
 
-  async function handleUpload(req: KycRequirement) {
+  async function handleUpload(req: OnboardingRequirement) {
     const file = selectedFiles[req.id];
     if (!file || !client || !wallet) return;
     const walletStr = wallet.toString();
