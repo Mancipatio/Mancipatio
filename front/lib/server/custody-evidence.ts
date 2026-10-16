@@ -3,8 +3,10 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { SiwsError } from "@/lib/server/siws";
 import {
+  AwaitingFinalizationError,
   ClosedCustodyVaultError,
   closedRequestVault,
+  readFinalizedTransaction,
   requireBeneficiaryPassport,
   requireDepositEvidence,
   requireRequestVault,
@@ -12,8 +14,9 @@ import {
   type CustodyRequestEvidence,
 } from "@/lib/server/chain-evidence";
 import { VaultState } from "@/lib/generated/asset_registry";
-import { signature as toSignature } from "@solana/kit";
+import { address } from "@solana/kit";
 import { getServerRpc } from "@/lib/server/rpc";
+import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import {
   ChainEvidenceError,
   custodyReturnEvidence,
@@ -47,18 +50,9 @@ async function requireReturnedDeposit(
 ) {
   const outcomeTx = transactionSignature(signature);
   try {
-    const tx = await getServerRpc()
-      .getTransaction(toSignature(outcomeTx), {
-        commitment: "finalized",
-        encoding: "json",
-        maxSupportedTransactionVersion: 0,
-      })
-      .send({ abortSignal: AbortSignal.timeout(12_000) });
-    if (!tx)
-      throw new SiwsError(
-        503,
-        "Return is awaiting finalization. Retry recording without sending another transaction",
-      );
+    // Read at finalized, again for a few seconds while the node has nothing;
+    // then AwaitingFinalizationError (the client retries, sending nothing).
+    const tx = await readFinalizedTransaction(outcomeTx);
     const { live, escrow } = await requestVaultOrTombstone(row, tx.slot);
     const proof = custodyReturnEvidence(tx as ChainTransaction, outcomeTx, {
       holder: row.holder_wallet,
@@ -211,18 +205,7 @@ async function recordRealization(
 ) {
   const signature = transactionSignature(outcomeTx);
   try {
-    const tx = await getServerRpc()
-      .getTransaction(toSignature(signature), {
-        commitment: "finalized",
-        encoding: "json",
-        maxSupportedTransactionVersion: 0,
-      })
-      .send({ abortSignal: AbortSignal.timeout(12_000) });
-    if (!tx)
-      throw new SiwsError(
-        503,
-        "Realization is awaiting finalization. Retry recording the existing transaction",
-      );
+    const tx = await readFinalizedTransaction(signature);
     const proof = custodyRealizationEvidence(tx as ChainTransaction, signature, {
       holder: expected.holder_wallet,
       vault: expected.vault_pda!,
@@ -246,6 +229,32 @@ async function recordRealization(
       "Realization verification unavailable. Retry recording the existing transaction",
     );
   }
+}
+
+/**
+ * The vault is not Realized at finalized. A burn that landed moments ago
+ * shows Realized at confirmed first: then the record is only "not yet"
+ * (AwaitingFinalizationError: the client retries without confirming
+ * again), not a refusal. Unreadable at confirmed counts as not realized.
+ */
+async function refuseUnrealized(vaultPda: string): Promise<never> {
+  let realizedAtConfirmed = false;
+  try {
+    const confirmed = await fetchMaybeLiveCustodyVault(
+      getServerRpc(),
+      address(vaultPda),
+      { commitment: "confirmed", abortSignal: AbortSignal.timeout(12_000) },
+    );
+    realizedAtConfirmed =
+      confirmed.exists && confirmed.data.state === VaultState.Realized;
+  } catch {
+    // Worded as not realized.
+  }
+  if (realizedAtConfirmed)
+    throw new AwaitingFinalizationError(
+      "the custody vault's realization is confirmed but not finalized yet (about 13 seconds). Retry recording shortly; do not confirm again",
+    );
+  throw new SiwsError(409, "On-chain realization is not finalized");
 }
 
 /**
@@ -385,7 +394,7 @@ export async function validateCustodyUpdate(
       !row.outcome_evidence
     ) {
       if (vault.state !== VaultState.Realized)
-        throw new SiwsError(409, "On-chain realization is not finalized");
+        await refuseUnrealized(expected.vault_pda!);
       await recordRealization(
         expected,
         patch,
