@@ -25,6 +25,10 @@ import {
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
 import { ArchiveDialog } from "@/components/archive-dialog";
 import { useArchivedSet } from "@/lib/archive-client";
+import { offeredAssetClasses } from "@/lib/pilot-scope";
+
+const OFFERED_CLASSES = offeredAssetClasses();
+const SHOW_OTHER_ASSET_TYPES = OFFERED_CLASSES.some((category) => category !== "equity");
 
 const STATUS_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -209,7 +213,7 @@ export default function MyAssetsPage() {
               Tokenize company shares
             </span>
           )}
-          <button
+          {SHOW_OTHER_ASSET_TYPES && <button
             type="button"
             disabled={!verified}
             onClick={() => setShowCreate(true)}
@@ -217,7 +221,7 @@ export default function MyAssetsPage() {
             title={verified ? undefined : "Verify KYB first to create assets."}
           >
             Other asset types
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -242,7 +246,7 @@ export default function MyAssetsPage() {
         <>
           {/* Category segmented filter */}
           <div className="mt-8 flex flex-wrap gap-1.5">
-            {(["all", ...CATEGORY_SLUGS] as ("all" | CategorySlug)[]).map((c) => {
+            {(["all", ...CATEGORY_SLUGS.filter((category) => OFFERED_CLASSES.includes(category) || (categoryCounts[category] ?? 0) > 0)] as ("all" | CategorySlug)[]).map((c) => {
               const active = categoryFilter === c;
               const label = c === "all" ? "All" : assetTypeBySlug(c)?.title ?? c;
               const count = c === "all" ? undefined : categoryCounts[c] ?? 0;
@@ -404,13 +408,13 @@ function NotIssuer() {
         No issuer found for this wallet
       </p>
       <p className="mt-1 text-xs text-amber-900/80">
-        Register an issuer first to see your assets here.
+        Complete verification and follow your token issuance request to set up the issuer.
       </p>
       <Link
-        href="/issuer/onboarding"
+        href="/issuer"
         className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
       >
-        Start onboarding →
+        View issuer process →
       </Link>
     </div>
   );
@@ -436,13 +440,13 @@ function Empty({
           >
             Tokenize company shares →
           </Link>
-          <button
+          {SHOW_OTHER_ASSET_TYPES && <button
             type="button"
             onClick={onClick}
             className="inline-block rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400"
           >
             Other asset types
-          </button>
+          </button>}
         </div>
       ) : (
         <p className="mt-2 text-xs text-amber-700">

@@ -3,7 +3,6 @@
 import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { createNoopSigner } from "@solana/kit";
 import {
   useSendTransaction,
@@ -43,7 +42,6 @@ export default function IssuerOnboardingPage() {
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const router = useRouter();
 
   const [step, setStep] = useState<Step>(1);
   const [legalId, setLegalId] = useState("");
@@ -160,8 +158,8 @@ export default function IssuerOnboardingPage() {
           Become a Manci issuer
         </h1>
         <p className="mt-2 text-sm text-slate-600">
-          A four-step setup: identify the legal entity, declare its
-          jurisdiction, register on-chain, then wait for KYB verification.
+          Register the issuer wallet and company after completing verification.
+          Follow KYC / KYB, review and the issuance request in your issuer workspace.
         </p>
       </div>
 
@@ -343,8 +341,8 @@ export default function IssuerOnboardingPage() {
               <span>
                 I understand the entity will start as <strong>Pending KYB</strong> and
                 cannot create assets until Super Admin verifies the documents
-                off-chain. KYB upload + AML checks happen outside this onboarding flow
-                in v0.1.
+                off-chain. Submit and track the required documents in{" "}
+                <Link href="/issuer/verification?type=kyb" className="underline">company verification</Link>.
               </span>
             </label>
             <div className="mt-6 flex justify-between">
@@ -390,15 +388,14 @@ export default function IssuerOnboardingPage() {
                 href="/issuer"
                 className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
               >
-                Go to dashboard →
+                View issuer process →
               </Link>
-              <button
-                type="button"
-                onClick={() => router.refresh()}
+              <Link
+                href="/issuer/status"
                 className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
               >
                 Check status
-              </button>
+              </Link>
             </div>
             <p className="mt-6 text-xs text-slate-400">
               Reference legal entity ID: <code className="rounded bg-slate-100 px-1">{fromBytes32(toBytes32(legalId))}</code>
