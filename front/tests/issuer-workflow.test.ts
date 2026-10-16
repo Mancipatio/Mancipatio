@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountVerification } from "@/lib/account";
 import { issuerWorkflowState } from "@/lib/issuer-workflow";
 import { IssuerReviewDetails, IssuerWorkflow, type WorkflowData } from "@/app/issuer/issuer-workflow";
@@ -20,6 +20,7 @@ function workflow(overrides: Partial<WorkflowData> = {}): WorkflowData {
   };
 }
 
+beforeEach(() => vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "false"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("issuer workflow decisions", () => {
@@ -93,6 +94,16 @@ describe("issuer journey rendering", () => {
     expect(html).toContain("Try again");
     expect(html).not.toContain("Identity verification (KYC)");
     expect(html).not.toContain("Verification approved");
+  });
+  it("preserves verification while KYC-only mode hides issuance and trading entries", () => {
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "true");
+    const approved = workflow({ signedIn: true, verification: verification({ kyb: "verified" }) });
+    for (const component of [IssuerWorkflow, IssuerReviewDetails, IssuerRequestContent]) {
+      const html = renderToStaticMarkup(createElement(component, { workflow: approved }));
+      expect(html).toContain('href="/issuer/status"');
+      for (const href of ["/issuer/request", "/apply", "/issuer/assets/tokenize", "/issuer/launchpad", "/marketplace/otc", "/portfolio/conversion"])
+        expect(html).not.toContain(`href="${href}"`);
+    }
   });
   it("keeps trading and holder conversion conditional on their real scope", () => {
     vi.stubEnv("NEXT_PUBLIC_FEATURE_SECONDARY_TRADING", "false");

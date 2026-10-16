@@ -1441,9 +1441,9 @@ describe("surfaces", () => {
     expect(workflow).toContain('href="/issuer/assets/tokenize"');
     const request = src("app/issuer/request/request-content.tsx");
     expect(src("app/issuer/request/page.tsx")).toContain("<IssuerRequestContent workflow={workflow}");
-    expect(request).toContain('{state.approved ? <Link href="/apply"');
-    expect(request).toContain("{state.canManageIssuer && <section");
-    const issuerActions = request.slice(request.indexOf("{state.canManageIssuer && <section"));
+    expect(request).toContain('{state.approved && issuanceOn ? <Link href="/apply"');
+    expect(request).toContain("{state.canManageIssuer && issuanceOn && <section");
+    const issuerActions = request.slice(request.indexOf("{state.canManageIssuer && issuanceOn && <section"));
     expect(issuerActions).toContain('href="/issuer/assets/tokenize"');
     const assets = src("app/issuer/assets/page.tsx");
     expect(assets).toContain('href="/issuer/assets/tokenize"');

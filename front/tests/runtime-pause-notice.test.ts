@@ -87,6 +87,13 @@ describe("runtime pause notices", () => {
     expect(combinedRuntimePauseNotice([], null)).toBeNull();
   });
 
+  it("does not check transaction status when KYC-only mode already pauses every flow", () => {
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "true");
+    state.reads.mockClear();
+    expect(renderToStaticMarkup(createElement(RuntimePauseNotice, { path: "/issuer" }))).toBe("");
+    expect(state.reads).not.toHaveBeenCalled();
+  });
+
   it("omits switched-off modules from the issuer aggregate", () => {
     vi.stubEnv("NEXT_PUBLIC_FEATURE_SECONDARY_TRADING", "false");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION", "false");

@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ query: "type=kyb&next=/apply" }));
 vi.mock("next/navigation", () => ({
@@ -15,6 +15,7 @@ vi.mock("@/components/wallet-required", () => ({ WalletRequired: () => null }));
 
 import { VerificationForm } from "@/components/verification-form";
 
+beforeEach(() => vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "false"));
 afterEach(() => vi.unstubAllEnvs());
 describe("verification entry", () => {
   it("preserves issuer KYB and the application destination across email/Google sign-in", () => {

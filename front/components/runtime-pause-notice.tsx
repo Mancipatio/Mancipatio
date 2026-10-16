@@ -1,14 +1,14 @@
 "use client";
 
 import { usePauseFlags } from "@/lib/use-pause-flags";
-import { moduleEnabled } from "@/lib/features";
+import { moduleEnabled, scopeEnabled } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { combinedRuntimePauseNotice, runtimePauseFlows, type RuntimePauseFlow } from "@/lib/runtime-pause-notice";
 
 /** Informational only: leaves existing positions and their exits visible. */
 export function RuntimePauseNotice({ path }: { path: string }) {
   const network = detectNetwork();
-  const flows = runtimePauseFlows(path).filter((flow) => flow === "primary" ||
+  const flows = runtimePauseFlows(path).filter((flow) => flow === "primary" ? scopeEnabled("primarySales", network) :
     moduleEnabled(flow === "secondary" ? "secondaryTrading" : "custodyConversion", network));
   if (flows.length === 0) return null;
   return <FlowPauseNotice flows={flows} />;

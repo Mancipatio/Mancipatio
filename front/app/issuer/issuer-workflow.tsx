@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { IconArrowUpRight, IconCheck, IconClipboard, IconCoins, IconRepeat, IconShield } from "@/components/icons";
-import { features, moduleEnabled } from "@/lib/features";
+import { features, moduleEnabled, scopeEnabled } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { issuerWorkflowState, ISSUER_VERIFICATION_LABEL } from "@/lib/issuer-workflow";
 import type { useIssuerWorkflow } from "./use-issuer-workflow";
 import styles from "./issuer-workflow.module.css";
@@ -21,10 +22,10 @@ export function IssuerWorkflow({ workflow }: { workflow: WorkflowData }) {
       status: hasIssuedAssets ? "Assets registered" : state.approved ? "Next step" : "After approval", done: hasIssuedAssets, current: state.approved && !hasIssuedAssets },
     { title: "Primary sale", description: "Once issuance and sale terms are approved, publish the token offer on the Manci marketplace.", href: "/issuer/launchpad", action: "Manage sales", icon: IconArrowUpRight,
       status: hasIssuedAssets ? "Manage offers" : "After issuance", done: false, current: hasIssuedAssets },
-  ];
+  ].filter((step) => navHrefVisible(step.href));
   return <section className={styles.workflow} aria-labelledby="issuer-process-heading">
     <p className={styles.eyebrow}>Issuer workspace</p>
-    <h1 id="issuer-process-heading" className={styles.title}>From verification to your token offer.</h1>
+    <h1 id="issuer-process-heading" className={styles.title}>{scopeEnabled("issuance") ? "From verification to your token offer." : "Verification and review."}</h1>
     <p className={styles.intro}>One place to follow the process, respond to review and manage your company&apos;s equity tokens. Start with email, Google or your wallet.</p>
     <ol className={styles.steps} aria-label="Issuer process">
       {steps.map((step, index) => <li key={step.title} className={styles.step} data-state={step.done ? "done" : step.current ? "current" : "upcoming"}>
@@ -69,7 +70,12 @@ export function IssuerVerificationSummary({ workflow }: { workflow: WorkflowData
     body = count > 0 ? `${count} requested document${count === 1 ? "" : "s"} still need to be supplied. Open verification to review the requirements and continue your submission.` : "Open verification to review the requested information and continue your submission.";
     action = "Continue verification";
   } else if (state.approved) {
-    title = "Verification approved"; body = "You can continue to the token issuance request. Issuance and the primary sale have their own review and approval."; action = "Token issuance request"; href = "/issuer/request";
+    title = "Verification approved";
+    if (scopeEnabled("issuance")) {
+      body = "You can continue to the token issuance request. Issuance and the primary sale have their own review and approval."; action = "Token issuance request"; href = "/issuer/request";
+    } else {
+      body = "Your verification is approved. Token issuance is paused for now; you can review your verification status here."; action = "View review status"; href = "/issuer/status";
+    }
   } else if (state.pending) {
     title = "Your verification is under review"; body = "We are reviewing your submission. Return here to see the decision or any request for additional documents."; action = "View review status"; href = "/issuer/status";
   } else if (workflow.verification?.kyb === "rejected" || workflow.verification?.kyc === "rejected") {
@@ -106,7 +112,7 @@ export function IssuerReviewDetails({ workflow }: { workflow: WorkflowData }) {
         : workflow.me ? `The connected issuer wallet is registered. Company approval: ${["Pending", "Verified", "Rejected", "Suspended"][workflow.me.kybStatus] ?? "Unknown"}.`
         : "Issuer registration is separate from your account verification. An approved application leads to issuer and token setup; connecting a wallet does not create or approve an issuer."}</p>
       <div className={styles.actions}>
-        {state.approved && <Link href="/apply" className={`${styles.button} ${styles.secondary}`}>Application status</Link>}
+        {state.approved && navHrefVisible("/apply") && <Link href="/apply" className={`${styles.button} ${styles.secondary}`}>Application status</Link>}
         {workflow.failed && <button type="button" onClick={() => void workflow.refresh()} className={`${styles.button} ${styles.secondary}`}>Retry issuer status</button>}
         <button type="button" onClick={() => { workflow.refreshVerification(); void workflow.refresh(); }} className={`${styles.button} ${styles.secondary}`}>Refresh status</button>
       </div>

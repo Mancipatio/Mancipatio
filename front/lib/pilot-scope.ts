@@ -100,6 +100,7 @@ export const KYC_ONLY_ROUTES: readonly ModuleRoute[] = [
   // Issuance entries only: the raise application, issuer registration,
   // tokenization and share classes (the operator's own tools are on /admin).
   { prefix: "/apply", modules: ["issuance"], mode: "gate" },
+  { prefix: "/issuer/request", modules: ["issuance"], mode: "gate" },
   { prefix: "/issuer/onboarding", modules: ["issuance"], mode: "gate" },
   { prefix: "/issuer/assets/tokenize", modules: ["issuance"], mode: "gate" },
   { prefix: "/issuer/share-classes", modules: ["issuance"], mode: "gate" },

@@ -180,12 +180,10 @@ describe("the asset guides (/markets/types)", () => {
     expect(((await categoryMetadata({ params: Promise.resolve({ slug: "debt" }) })) as { robots?: unknown }).robots).toEqual({ index: false, follow: true });
   });
 
-  it("the index on mainnet: the equity card and rows only, then 'more asset classes coming later'", () => {
+  it("the index on mainnet: the equity card and rows only, with suspended classes hidden", () => {
     const markup = html(createElement(InstrumentsIndexPage));
     expect(hrefs(markup).filter((href) => href.startsWith("/markets/types/"))).toEqual(["/markets/types/equity"]);
-    expect(markup).toContain(MORE_ASSET_CLASSES_LATER);
-    // Not a link, and drawn apart from the instrument cards (dashed, muted).
-    expect(markup).toMatch(new RegExp(`<div class="mx-card border-dashed[^"]*"><h3 class="mx-h3">${MORE_ASSET_CLASSES_LATER}</h3></div>`));
+    expect(markup).not.toContain(MORE_ASSET_CLASSES_LATER);
     // KYC-only mode (mainnet default): applications are paused, the contact form is not.
     expect(markup).not.toContain("reads every application");
     expect(markup).toContain("reads every message");
@@ -211,10 +209,11 @@ describe("the tokenization guide names the offered asset types (/solutions/token
   const guide = async () => visibleText(html(await SolutionPage({ params: Promise.resolve({ slug: "tokenization" }) })));
 
   it("one class: singular; several: joined with 'and' (a set, not a choice); every class: today's sentence", async () => {
+    network("mainnet", "", "off");
     expect(await guide()).toContain("Equity is the asset type Manci offers at the moment.");
-    network("mainnet", "equity,debt");
+    network("mainnet", "equity,debt", "off");
     expect(await guide()).toContain("Equity and debt are the asset types Manci offers at the moment.");
-    network("mainnet", "equity,debt,royalty");
+    network("mainnet", "equity,debt,royalty", "off");
     expect(await guide()).toContain("Equity, royalty and debt are the asset types Manci offers at the moment.");
     network("devnet");
     expect(await guide()).toContain("Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other.");

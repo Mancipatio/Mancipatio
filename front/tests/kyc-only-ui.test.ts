@@ -33,6 +33,7 @@ vi.mock("@/components/account-menu", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/account-menu")>()),
   AccountMenu: () => null,
 }));
+vi.mock("@/lib/use-pause-flags", () => ({ usePauseFlags: () => 0 }));
 vi.mock("@/components/tos-gate", () => ({ TosGate: () => null }));
 vi.mock("@/components/brand-logo", () => ({ BrandLogo: () => createElement("span", null, "Manci") }));
 vi.mock("@/components/wallet-required", () => ({ WalletRequired: () => null }));
@@ -121,11 +122,11 @@ describe("AppShell with the mode on (mainnet default)", () => {
     expect(sidebar(shell("portfolio", "/portfolio"))).toContain("Identity verification is open.");
   });
 
-  it("section tabs: the portfolio overview and activity, the asset directory, and no issuer tabs at all", () => {
+  it("section tabs: the portfolio overview and activity, the asset directory, and only issuer verification tabs", () => {
     network("mainnet", "", { custodyConversion: "true" });
     expect(hrefs(tabs(shell("portfolio", "/portfolio")))).toEqual(["/portfolio", "/portfolio/history"]);
     expect(hrefs(tabs(shell("marketplace", "/marketplace")))).toEqual(["/marketplace"]);
-    expect(shell("issuer", "/issuer")).not.toContain('class="app-section-tabs"');
+    expect(hrefs(tabs(shell("issuer", "/issuer")))).toEqual(["/issuer/verification", "/issuer/status"]);
   });
 
   it("the launchpad list and the raise application are replaced by the notice", () => {
