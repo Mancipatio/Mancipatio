@@ -110,10 +110,12 @@ describe("env-vars.md: conversion prerequisites and pause masks (F093, F089)", (
     expect(kycOnly).toMatch(/Admin → Platform shows 0x7F/);
   });
 
-  it("leaving the mode clears only a row's bits and updates the README", () => {
-    expect(kycOnly).toMatch(/Leaving KYC-only mode later:[\s\S]*Pause\s+mask by mode/);
-    expect(kycOnly).toMatch(/never as a\s+steady state/);
-    expect(kycOnly).toMatch(/6\. Update the Status paragraph of `README\.md`/);
+  it("leaving the mode redeploys first, clears only a row's bits as each window starts, and updates the README", () => {
+    const leaving = kycOnly.slice(kycOnly.indexOf("Leaving KYC-only mode later:"));
+    expect(leaving).toMatch(/3\. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy/);
+    expect(leaving).toMatch(/5\. Only then, as each window starts, clear the pause bits[\s\S]*Pause\s+mask by mode/);
+    expect(leaving).toMatch(/never as a\s+steady state/);
+    expect(leaving).toMatch(/6\. Update the Status paragraph of `README\.md`/);
   });
 });
 
@@ -126,6 +128,9 @@ describe("runbook §8 pause mask by mode (F089)", () => {
     expect(s8).toContain(`| **${mask(PAUSE_FLAGS_ALL)}** |`);
     expect(s8).toContain(`| ${mask(PAUSE_FLAGS_ALL & ~PAUSE_ONBOARDING)} |`);
     expect(s8).toContain(`| ${mask(PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY)} |`);
+    // mint_to_treasury, open_sale and buy are in KYC_ONLY_FLOWS: both 0x7D rows need the mode off.
+    expect(s8).toMatch(/\| Direct mint \(`mint_to_treasury`; KYC-only off\) \| 0x7D \|/);
+    expect(s8).toMatch(/\| Public sale window \(KYC-only off\) \| 0x7D \|/);
     expect(s8).toContain(`| ${mask(PAUSE_FLAGS_ALL & ~PAUSE_ISSUER_PROCEEDS)} |`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_CUSTODY_ENTRY)}`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_SECONDARY)}`);

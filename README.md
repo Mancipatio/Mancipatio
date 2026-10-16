@@ -38,15 +38,17 @@ day the site (<https://www.manci.io>) went public.
   <!-- Change this line only together with SECURITY_AUDIT in
   front/lib/legal/audit.ts. -->
 
-Mainnet is operated in **KYC-only mode** (owner decision of 2026-10-10):
-Manci is open for sign-up and identity verification (KYC for people, KYB
-for companies) only. Sales, trading, issuance, conversion and the other
+The mainnet build runs in **KYC-only mode** by default (owner decision of
+2026-10-10, on `main` since PR #78 and in every release made from it): Manci
+is open for sign-up and identity verification (KYC for people, KYB for
+companies) only. Sales, trading, issuance, conversion and the other
 services are paused; exits of existing positions stay open
 ([`ops/env-vars.md`](ops/env-vars.md), "KYC-only mode and offered asset
 classes"). Outside that mode, the Terms in force, the module switches and
 the program's pause flags decide per network which modules are offered
-(same file, "Pilot scope"). Front releases to mainnet follow
-[`ops/release-checklist.md`](ops/release-checklist.md).
+(same file, "Pilot scope"). The site serves the commit last released to
+`release/mainnet`, which [`ops/release-checklist.md`](ops/release-checklist.md)
+keeps at the tip of `main`.
 
 ## Repository
 

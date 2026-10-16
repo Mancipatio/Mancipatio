@@ -282,18 +282,22 @@ an existing conversion.
 
 Leaving KYC-only mode later:
 1. Confirm that the Terms in force offer what reopens.
-2. Clear only the pause bits the new mode's row allows (runbook §8, "Pause
-   mask by mode"; the Super Admin clears): 0x01 for an issuer or asset
-   set-up and 0x08 for a conversion's open and deposit, each set again
-   right after the step; 0x02 only for a sale window or a direct mint,
-   never as a steady state.
-3. In Vercel Production set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and
-   Redeploy (the value is build-time).
-4. Module switches then apply as their own variables say (unset = off on
-   mainnet), so set `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` (and the
-   others) as decided before step 3.
-5. Verify: "Primary sales" is back in the sidebar and
+2. In Vercel Production set the module switches as decided, before the
+   redeploy: once the mode is off they apply as their own variables say
+   (unset = off on mainnet), `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION`
+   included.
+3. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy (both
+   values are build-time).
+4. Verify: "Primary sales" is back in the sidebar and
    `/marketplace/launchpad` shows no notice.
+5. Only then, as each window starts, clear the pause bits the new mode's
+   row allows (runbook §8, "Pause mask by mode"; the Super Admin clears):
+   0x01 for an issuer or asset set-up and 0x08 for a conversion's open and
+   deposit, each set again right after the step; 0x02 only for a sale
+   window or a direct mint, never as a steady state. A bit cleared before
+   the redeploy leaves its instructions permissionless on-chain while the
+   old build's gate is only a display gate (`register_issuer` with 0x01
+   clear), so no bit is cleared ahead of the build.
 6. Update the Status paragraph of `README.md` (the KYC-only line) in the
    same change.
 

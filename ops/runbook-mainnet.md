@@ -948,8 +948,8 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   |---|---|---|
   | **KYC-only lockdown** (the mainnet default: `ops/env-vars.md` "KYC-only mode", `lib/features.ts` `kycOnly`), and the steady state between windows | **0x7F** | every bit set; any Admin sets 0x01 to reach it. The chain held the pilot's 0x7E on 2026-10-10 (0x01 clear: `register_issuer` permissionless); 0x7F is the target |
   | Issuer or asset set-up (KYC-only off) | 0x7E | the Super Admin clears 0x01 for the set-up; any Admin sets it again right after |
-  | Direct mint (`mint_to_treasury`) | 0x7D | the Super Admin clears 0x02; the mint transaction sets 0x02 again itself (`lib/treasury-mint.ts` `repause`) |
-  | Public sale window | 0x7D | the Super Admin clears 0x02 with "Reopen primary issuance" after the pre-clear check (`/admin/launchpad`); any Admin sets 0x02 again when the window ends (`onchain:primary-open-idle`, §15, fires after an hour with no sale taking buys) |
+  | Direct mint (`mint_to_treasury`; KYC-only off) | 0x7D | the Super Admin clears 0x02; the mint transaction sets 0x02 again itself (`lib/treasury-mint.ts` `repause`) |
+  | Public sale window (KYC-only off) | 0x7D | the Super Admin clears 0x02 with "Reopen primary issuance" after the pre-clear check (`/admin/launchpad`); any Admin sets 0x02 again when the window ends (`onchain:primary-open-idle`, §15, fires after an hour with no sale taking buys) |
   | Collecting proceeds (`close_sale`) | 0x5F | the Super Admin clears 0x20 only for the close; "End and collect" sets 0x20 (and 0x02) again with its `repause` mask |
   | Conversion window | the mode's mask minus 0x08 | only for the vault open and the holder's deposit; any Admin sets 0x08 again right after the deposit. Trigger, realize and return read no pause bit. Needs KYC-only off, `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and Terms that offer conversion (`ops/env-vars.md`, "Pilot scope") |
   | Trading through Manci | the mode's mask minus 0x04 | cleared last, once the Terms offer it and `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true` |
