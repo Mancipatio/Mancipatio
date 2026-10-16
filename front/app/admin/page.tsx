@@ -17,6 +17,7 @@ import { RequireRole } from "@/components/require-role";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { NetworkDashboard } from "./network-dashboard";
 import { OperatorLanding } from "./operator-landing";
+import { AccountsPanel } from "./accounts/accounts-panel";
 
 const SHORTCUTS = [
   {
@@ -90,6 +91,7 @@ export default function AdminOverview() {
       {/* An operator role without an Admin record lands on its own summary.
           Bootstrap (no Platform yet) runs on /issuer/authority. */}
       <RequireRole role="admin" fallback={<OperatorLanding />}>
+        <section className="mt-6"><AccountsPanel compact /></section>
         <div className="mt-6 grid gap-4 lg:grid-cols-2">
           <PlatformStatusCard />
           <AlertsCard />
