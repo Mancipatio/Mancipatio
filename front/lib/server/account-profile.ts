@@ -38,17 +38,17 @@ function accountUnavailable(): SiwsError {
 export type AccountWho = string | { accountId: string };
 
 /** A new wallet gets a contact profile only; never creates or changes KYC/CRM. */
-export async function getAccountProfile(who: AccountWho, network: Network): Promise<AccountProfile> {
+export async function getAccountProfile(who: AccountWho, network: Network, signal?: AbortSignal): Promise<AccountProfile> {
   if (typeof who !== "string") {
-    const { data, error } = await getSupabaseAdmin().rpc("get_account_profile", { p_account_id: who.accountId, p_network: network });
+    const { data, error } = await getSupabaseAdmin(signal).rpc("get_account_profile", { p_account_id: who.accountId, p_network: network });
     if (error || !data || typeof data !== "object" || Array.isArray(data) || data.id !== who.accountId ||
         data.network !== network || !Array.isArray(data.wallets)) throw new SiwsError(401, "Please sign in again.");
     return projectAccountProfile(data as Record<string, unknown>);
   }
   const wallet = who;
   const maintenance = await getMaintenance(network);
-  if (maintenance.enabled) return readWalletProfile(wallet, network, maintenance.message);
-  const { data, error } = await getSupabaseAdmin().rpc("ensure_account_profile", { p_wallet: wallet, p_network: network });
+  if (maintenance.enabled) return readWalletProfile(wallet, network, maintenance.message, signal);
+  const { data, error } = await getSupabaseAdmin(signal).rpc("ensure_account_profile", { p_wallet: wallet, p_network: network });
   if (error || !data || typeof data !== "object" || Array.isArray(data) || data.wallet !== wallet || data.network !== network ||
       !Array.isArray(data.wallets) || !data.wallets.some((member: { wallet?: unknown }) => member?.wallet === wallet)) throw accountUnavailable();
   return projectAccountProfile(data as Record<string, unknown>);
@@ -56,8 +56,8 @@ export async function getAccountProfile(who: AccountWho, network: Network): Prom
 
 /** Maintenance: the wallet's profile without ensure_account_profile's lazy
  * create, so a first visit writes nothing while the site is paused. */
-async function readWalletProfile(wallet: string, network: Network, message: string | null): Promise<AccountProfile> {
-  const sb = getSupabaseAdmin();
+async function readWalletProfile(wallet: string, network: Network, message: string | null, signal?: AbortSignal): Promise<AccountProfile> {
+  const sb = getSupabaseAdmin(signal);
   const { data: member, error: memberError } = await sb.from("account_wallets").select("account_id")
     .eq("network", network).eq("wallet", wallet).maybeSingle();
   if (memberError) throw accountUnavailable();
