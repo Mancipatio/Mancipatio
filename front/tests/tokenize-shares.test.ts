@@ -769,12 +769,50 @@ describe("conversion marker (C2): class 1 capped at 0 that class 0 converts into
         expect(r.metadata).toMatchObject(extra);
       }
     }
-    // The flow writes them after the transaction for the create and every resumed chain step.
+    // The flow writes them after the transaction for the create and every resumed chain step,
+    // from the one signature poll the step itself waits on (never a second poller).
     const flow = src("components/tokenize-shares-flow.tsx");
     expect(flow.match(/void auditTokenizeOutcome\(\{/g)).toHaveLength(2);
     expect(flow).toContain('tokenizeAuditRows(ixs, { actor: wallet.toString(), signature: sig, name: intent.name, step: "create" })');
     expect(flow).toContain("tokenizeAuditRows(sent, { actor: wallet.toString(), signature: sig, name: asset.name, step })");
-    expect(flow.match(/wait: \(\) => waitForSignature\(rpc, sig, \{ timeoutMs: 60_000 \}\)/g)).toHaveLength(2);
+    expect(flow.match(/const confirmation = waitForSignature\(rpc, sig, \{ timeoutMs: 60_000, retryReads: true \}\)/g)).toHaveLength(2);
+    expect(flow.match(/wait: \(\) => confirmation,/g)).toHaveLength(2);
+    expect(flow).not.toMatch(/wait: \(\) => waitForSignature\(/);
+  });
+
+  it("the flow reports a chain step, saves the details and re-reads only after the network confirmed it", () => {
+    // Review: continueResume toasted and re-read right after tx.send (submission). loadResume reads
+    // at `confirmed`, so the same step came back with an enabled button, and a second click failed
+    // the dry run or spent a fee on a transaction the network refuses.
+    const flow = src("components/tokenize-shares-flow.tsx");
+    const resumeFn = flow.slice(flow.indexOf("async function continueResume("), flow.indexOf("// ── Render ──"));
+    const send = resumeFn.indexOf("const sig = await tx.send(");
+    const waiting = resumeFn.indexOf('setWorking("Waiting for the network to confirm it (usually a few seconds)…")');
+    const report = resumeFn.indexOf("await confirmThenReport(() => confirmation");
+    expect(send).toBeGreaterThan(-1);
+    expect(waiting).toBeGreaterThan(send);
+    expect(report).toBeGreaterThan(waiting);
+    expect(resumeFn.indexOf("toast.showTx(sig, { title: what.done })")).toBeGreaterThan(report);
+    expect(resumeFn).toContain('title: "Refused by the network"');
+    expect(resumeFn).toContain('title: "Not confirmed yet"');
+    // Not confirmed: re-read and stop before the details (their `convertible` assumes the link landed).
+    const bail = resumeFn.indexOf('if (outcome !== "confirmed") {');
+    const details = resumeFn.indexOf("if (profileMissing) await saveDetails(");
+    expect(bail).toBeGreaterThan(report);
+    expect(details).toBeGreaterThan(bail);
+    expect(resumeFn.indexOf("await loadResume();", bail)).toBeLessThan(details);
+    expect(resumeFn.lastIndexOf("await loadResume();")).toBeGreaterThan(details);
+
+    const createFn = flow.slice(flow.indexOf("async function create("), flow.indexOf("// ── Continue an unfinished token ──"));
+    const createReport = createFn.indexOf("await confirmThenReport(() => confirmation");
+    expect(createReport).toBeGreaterThan(createFn.indexOf("const sig = await tx.send("));
+    expect(createFn.indexOf('toast.showTx(sig, { title: "Token created" })')).toBeGreaterThan(createReport);
+    // Refused: nothing was created, so no details prompt and no resume link.
+    const refused = createFn.indexOf('if (outcome === "failed") return;');
+    expect(refused).toBeGreaterThan(createReport);
+    expect(createFn.indexOf("await saveDetails(picked.assetPda")).toBeGreaterThan(refused);
+    expect(createFn.lastIndexOf("router.replace(")).toBeGreaterThan(refused);
+    expect(createFn).toContain('title: "Token not created"');
   });
 
   it("the conversion route's requirement is what the marker sets: an on-chain convertible_to", () => {
