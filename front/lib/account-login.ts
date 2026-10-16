@@ -47,6 +47,9 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+/** Read the current actor at an async action boundary, without a stale render closure. */
+export function signedInAccountSnapshot(): State { return state; }
+
 /** The email/Google account signed in on this browser, if any. */
 export function useSignedInAccount(): State {
   return useSyncExternalStore(subscribe, () => state, () => SERVER_STATE);
