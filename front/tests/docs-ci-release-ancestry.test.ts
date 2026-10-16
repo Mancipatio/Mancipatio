@@ -1,8 +1,9 @@
 // The release guard (ops/release-checklist.md step 1): release/mainnet must
 // be a fast-forward of main. scripts/check-release-ancestry.sh runs against
 // throwaway git repositories in the shapes a release can take (equal, behind,
-// ahead, diverged, as on 2026-10-15), and the Release guard workflow is
-// pinned to the script, to a full checkout and to no secret.
+// ahead, diverged as on 2026-10-15, a feature branch that contains main), and
+// the Release guard workflow is pinned to the script, to a full checkout and
+// to no secret.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-type Fixture = { clone: string; env: NodeJS.ProcessEnv; sha: (ref: string) => string };
+type Fixture = { root: string; origin: string; clone: string; env: NodeJS.ProcessEnv; sha: (ref: string) => string };
 
 /** A git identity and a HOME of its own, so the machine's config (signing, hooks) stays out. */
 function gitEnv(home: string): NodeJS.ProcessEnv {
@@ -42,8 +43,9 @@ function git(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]): string {
 
 /**
  * A seed repository whose `main` is A ← B, shaped further by `shape` (which
- * may add commits and must leave a `release/mainnet` branch), published as a
- * bare origin, and a clone of that origin for the script to run in.
+ * may add commits and branches and must leave a `release/mainnet` branch),
+ * published as a bare origin, and a clone of that origin for the script to
+ * run in.
  */
 function fixture(shape: (seed: string, env: NodeJS.ProcessEnv) => void): Fixture {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "manci-release-guard-")));
@@ -58,11 +60,11 @@ function fixture(shape: (seed: string, env: NodeJS.ProcessEnv) => void): Fixture
   git(root, env, "clone", "-q", "--bare", seed, origin);
   const clone = join(root, "clone");
   git(root, env, "clone", "-q", origin, clone);
-  return { clone, env, sha: (ref) => git(clone, env, "rev-parse", ref) };
+  return { root, origin, clone, env, sha: (ref) => git(clone, env, "rev-parse", ref) };
 }
 
-function run(f: Fixture, args: string[] = [], extraEnv: Record<string, string> = {}) {
-  const r = spawnSync("bash", [SCRIPT, ...args], { cwd: f.clone, env: { ...f.env, ...extraEnv }, encoding: "utf8" });
+function run(f: Fixture, args: string[] = [], extraEnv: Record<string, string> = {}, cwd = f.clone) {
+  const r = spawnSync("bash", [SCRIPT, ...args], { cwd, env: { ...f.env, ...extraEnv }, encoding: "utf8" });
   return { status: r.status, out: `${r.stdout}\n${r.stderr}` };
 }
 
@@ -131,7 +133,53 @@ describe("scripts/check-release-ancestry.sh", () => {
     expect(tip.status).toBe(0);
   });
 
-  it("skips the fetch with RELEASE_GUARD_NO_FETCH=1 and exits 2 for a ref it cannot resolve", () => {
+  it("in strict mode (the checklist's pre-push form) refuses a candidate that carries commits main does not, and passes the tip of main", () => {
+    const f = fixture((seed, env) => {
+      git(seed, env, "branch", "release/mainnet", "main");
+      git(seed, env, "checkout", "-q", "-b", "feature", "main");
+      git(seed, env, "commit", "-q", "--allow-empty", "-m", "F: feature branch that contains main's tip");
+      git(seed, env, "checkout", "-q", "main");
+    });
+    const feature = f.sha("origin/feature");
+    // A plain ancestor check lets it through: main's tip is an ancestor of F.
+    expect(git(f.clone, f.env, "merge-base", "--is-ancestor", "origin/main", feature)).toBe("");
+    const strict = run(f, [feature], { RELEASE_GUARD_STRICT: "1" });
+    expect(strict.status).toBe(1);
+    expect(strict.out).toContain(`::error::${feature} carries commits that are not on origin/main`);
+    expect(strict.out).toContain("F: feature branch that contains main's tip");
+    expect(strict.out).not.toContain("ok:");
+    const lenient = run(f, [feature]);
+    expect(lenient.status).toBe(0);
+    expect(lenient.out).toContain("::warning::");
+    const tip = run(f, [f.sha("origin/main")], { RELEASE_GUARD_STRICT: "1" });
+    expect(tip.status).toBe(0);
+    expect(tip.out).not.toContain("::warning::");
+    expect(tip.out).toContain("ok: origin/main is an ancestor");
+  });
+
+  it("fetches main and release/mainnet by explicit refspec, so a single-branch clone sees both", () => {
+    const f = fixture((seed, env) => git(seed, env, "branch", "release/mainnet", "main~1"));
+    const single = join(f.root, "single");
+    git(f.root, f.env, "clone", "-q", "--single-branch", "-b", "release/mainnet", f.origin, single);
+    const before = spawnSync("git", ["rev-parse", "--verify", "--quiet", "origin/main"], { cwd: single, env: f.env });
+    expect(before.status).not.toBe(0);
+    const r = run(f, [], {}, single);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("B: lockdown (#78)");
+  });
+
+  it("with RELEASE_GUARD_NO_FETCH=1 touches no remote: the check runs although origin is gone", () => {
+    const f = fixture((seed, env) => git(seed, env, "branch", "release/mainnet", "main"));
+    git(f.clone, f.env, "remote", "set-url", "origin", join(f.root, "gone.git"));
+    const fetching = run(f);
+    expect(fetching.status).not.toBe(0);
+    expect(fetching.out).not.toContain("ok:");
+    const r = run(f, [], { RELEASE_GUARD_NO_FETCH: "1" });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("ok: origin/main is an ancestor of origin/release/mainnet");
+  });
+
+  it("exits 2 for a ref it cannot resolve", () => {
     const f = fixture((seed, env) => git(seed, env, "branch", "release/mainnet", "main"));
     const r = run(f, ["refs/heads/nope"], { RELEASE_GUARD_NO_FETCH: "1" });
     expect(r.status).toBe(2);
@@ -158,21 +206,44 @@ describe(".github/workflows/release-guard.yml", () => {
     expect(expected).toBeDefined();
     expect(workflow.match(pin)?.[0]).toBe(expected);
   });
+
+  it("says that a push workflow runs only from a commit that carries it", () => {
+    expect(workflow).toMatch(/GitHub reads a push workflow from the pushed commit/);
+  });
 });
 
 describe("the runbook and the release checklist point at the guard", () => {
+  const runbook = readFileSync(join(ROOT, "ops/runbook-mainnet.md"), "utf8");
+  const checklist = readFileSync(join(ROOT, "ops/release-checklist.md"), "utf8");
+
   it("names the script, the workflow and the fast-forward rule", () => {
-    const runbook = readFileSync(join(ROOT, "ops/runbook-mainnet.md"), "utf8");
-    const checklist = readFileSync(join(ROOT, "ops/release-checklist.md"), "utf8");
     for (const doc of [runbook, checklist]) {
       expect(doc).toContain("scripts/check-release-ancestry.sh");
       expect(doc).toContain(".github/workflows/release-guard.yml");
     }
+    expect(runbook).toContain("#### Releasing the front to mainnet");
     expect(runbook).toMatch(/never\s+cherry-picked/);
     expect(checklist).toMatch(/never\s+cherry-picked/);
     expect(checklist.match(/^\d+\. \*\*/gm)).toHaveLength(8);
     expect(checklist).toContain("git push origin <40-hex main sha>:refs/heads/release/mainnet");
     expect(checklist).toContain("/api/health");
     expect(checklist).toContain("0x7F");
+  });
+
+  it("checks the candidate sha in strict mode before the push, and treats a missing guard run as a fault", () => {
+    for (const doc of [runbook, checklist]) {
+      expect(doc).toMatch(/RELEASE_GUARD_STRICT=1 bash\s+scripts\/check-release-ancestry\.sh <sha>/);
+      expect(doc).toMatch(/GitHub reads a push workflow from the\s+pushed commit/);
+    }
+    expect(checklist).toMatch(/1\. \*\*Candidate check, before the push\.\*\*/);
+    expect(checklist).toMatch(/exit 0 with no `::warning::`/);
+    expect(checklist).toMatch(/a missing run is a\s+fault/);
+    expect(checklist).toMatch(/4\. \*\*Push \(owner\), then the Release guard\.\*\*/);
+  });
+
+  it("sends the health token through stdin, never on curl's command line", () => {
+    expect(checklist).toContain("IFS= read -rs");
+    expect(checklist).toContain("| curl -fsS --max-time 10 -K - https://www.manci.io/api/health");
+    expect(checklist).not.toMatch(/-H "Authorization: Bearer \$HEALTH_TOKEN"/);
   });
 });

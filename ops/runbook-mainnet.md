@@ -2630,6 +2630,26 @@ else the most recently observed one, which reservations refuse as
 the rate it was made at with its source (`auto: median of … (ECB <date>: …)`
 or the manual source), and booking never uses a newer one.
 
+#### Releasing the front to mainnet
+
+The mainnet Vercel project (`manci-mainnet`) builds only its production
+branch `release/mainnet` (Ignored Build Step: only production), so a merge
+to `main` deploys devnet and never touches mainnet. Every front release is a
+fast-forward of that branch: `release/mainnet` is pushed from the tip of
+`main` (`ops/release-checklist.md`), never cherry-picked and never from a
+feature branch. Before the push, `RELEASE_GUARD_STRICT=1 bash
+scripts/check-release-ancestry.sh <sha>` checks the candidate: it must
+contain `origin/main` and carry nothing that is not on `main`. After the
+push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
+runs the same script against the pushed commit: red means the live site is
+missing commits of `main`, as on 2026-10-15, when a push from a branch that
+had diverged before #78 left the KYC-only lockdown out of the release
+branch. GitHub reads a push workflow from the pushed commit, so a commit
+from a branch created before the workflow was merged runs no guard at all
+(exactly that shape): a missing run is a fault, and the pre-push check is
+the defence. A migration the new front needs is applied to the mainnet
+project before the push ("Apply migration 0080" below shows the order).
+
 #### Apply migration 0080
 
 Apply 0080 to each network's database BEFORE a front that carries the
@@ -2640,23 +2660,11 @@ the order:
 
 1. **devnet 0080, then merge #53.** `main` deploys the devnet project, so
    the merge itself is the devnet front deploy;
-2. **mainnet 0080, then fast-forward `release/mainnet`** to that `main`.
-   The mainnet Vercel project (`manci-mainnet`) builds only its production
-   branch `release/mainnet` (Ignored Build Step: only production), so the
-   merge to `main` does not touch mainnet, and the fast-forward is the
-   mainnet front deploy;
+2. **mainnet 0080, then fast-forward `release/mainnet`** to that `main`
+   ("Releasing the front to mainnet" above): the merge to `main` does not
+   touch mainnet, and the fast-forward is the mainnet front deploy;
 3. then, at §0A D10, the super admin's fresh manual USDC fallback, and only
    after it the fx scheduler ("Install, prove, enable" below).
-
-Every front release to mainnet is that fast-forward: `release/mainnet` is
-pushed from a commit of `main` (`ops/release-checklist.md`), never
-cherry-picked and never from a feature branch.
-`scripts/check-release-ancestry.sh` checks that `origin/main` is an ancestor
-of the release ref, and the "Release guard" workflow
-(`.github/workflows/release-guard.yml`) runs it on every push to
-`release/mainnet`: red means the live site is missing commits of `main`, as
-on 2026-10-15, when a push from a branch that had diverged before #78 left
-the KYC-only lockdown out of the release branch.
 
 Expand only: without automatic rows every reader behaves as before. The
 file is frozen at sha256
