@@ -36,6 +36,8 @@ import { waitForFinalizedAsset } from "@/lib/tokenize-shares-chain";
 type Variant = "admin" | "issuer";
 
 const PROFILE_ROUTE = "/api/profiles/upsert";
+/** The whole finality wait, inside the signed envelope's 300 s window (lib/siws-client SIWS_MAX_AGE_MS). */
+const FINALITY_WAIT_MS = 240_000;
 
 /** Where the profile can be saved again once the asset exists on chain, per console. */
 const SAVE_AGAIN: Record<Variant, string> = {
@@ -159,7 +161,10 @@ export function AssetCreateModal({
       return false;
     }
     setWorking("Waiting for the network to finalize the asset (usually under a minute)…");
-    const finalized = await waitForFinalizedAsset(client.runtime.rpc, assetPda);
+    // Bounded, so the envelope is posted while the server still accepts it.
+    const finalized = await waitForFinalizedAsset(client.runtime.rpc, assetPda, {
+      signal: AbortSignal.timeout(FINALITY_WAIT_MS),
+    });
     if (!finalized) {
       toast.showError(
         "Profile not saved yet",

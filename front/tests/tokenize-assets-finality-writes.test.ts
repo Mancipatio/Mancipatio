@@ -29,7 +29,7 @@ describe("/issuer/onboarding company profile after register_issuer", () => {
     expect(wait).toBeGreaterThan(sign);
     expect(post).toBeGreaterThan(wait);
     // register() sends first, then hands over to saveProfile (defined above it).
-    expect(page.indexOf("await saveProfile(issuerPda, {")).toBeGreaterThan(send);
+    expect(page.indexOf("await saveProfile(issuerPda, profile);")).toBeGreaterThan(send);
     expect(page).not.toContain("upsertIssuerProfile(");
     expect(page).toContain('commitment: "finalized"');
     expect(page).toContain("abortSignal: AbortSignal.timeout(8_000)");
@@ -62,5 +62,30 @@ describe("/issuer/onboarding company profile after register_issuer", () => {
     expect(page).not.toContain("Issuer registered");
     expect(page).not.toContain("succeeded on-chain");
     expect(page).toContain("Your transaction was sent to {detectNetwork()}.");
+  });
+
+  it("asks for no second signature and runs no wait when no company details were entered", () => {
+    // The Entity step's company name, email and website are optional: with all three blank
+    // there is nothing to save, so the page says so instead of prompting and polling.
+    const registerFn = page.slice(page.indexOf("async function register()"), page.indexOf("if (!wallet) return <main>"));
+    const skip = registerFn.indexOf("if (!profile.company_name && !profile.contact_email && !profile.website) {");
+    expect(skip).toBeGreaterThan(registerFn.indexOf("setStep(4);"));
+    expect(registerFn.indexOf('setProfileState({ kind: "skipped" });', skip)).toBeGreaterThan(skip);
+    expect(registerFn.indexOf("await saveProfile(issuerPda, profile);")).toBeGreaterThan(skip);
+    expect(page).toContain('{profileState.kind === "skipped" && (');
+    expect(page).toContain("No company details were entered. Add them later from your issuer dashboard (Company profile, 1 signature).");
+  });
+});
+
+describe("Create-asset modal ('Other asset types') profile after create_asset", () => {
+  const modal = src("components/asset-create-modal.tsx");
+
+  it("bounds the finality wait inside the signed envelope's window, like the onboarding page", () => {
+    // The envelope is signed before the wait (the second prompt follows the first at once), so the
+    // wait must end while /api/profiles/upsert still accepts it; a wait that gives up is reported
+    // as "not saved yet" with the one-signature retry, never posted to be refused as expired.
+    expect(modal).toContain("const FINALITY_WAIT_MS = 240_000;");
+    expect(modal).toMatch(/waitForFinalizedAsset\(client\.runtime\.rpc, assetPda, \{\s*signal: AbortSignal\.timeout\(FINALITY_WAIT_MS\),\s*\}\)/);
+    expect(240_000).toBeLessThan(SIWS_MAX_AGE_MS);
   });
 });

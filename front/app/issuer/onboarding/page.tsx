@@ -81,6 +81,8 @@ function errorText(err: unknown): string {
 /** The company profile's save, shown on the "Submitted" step. */
 type ProfileState =
   | { kind: "idle" }
+  /** Nothing was entered on the Entity step: no prompt and no wait. */
+  | { kind: "skipped" }
   | { kind: "working"; text: string }
   | { kind: "saved" }
   | { kind: "failed"; message: string };
@@ -238,13 +240,20 @@ export default function IssuerOnboardingPage() {
     // by the Issuer PDA. The route reads the Issuer at `finalized`, so the
     // write waits for it (saveProfile) instead of failing moments after the
     // send; its outcome is reported on its own, never as a registration error.
-    await saveProfile(issuerPda, {
+    const profile: NewIssuerProfile = {
       issuer_pda: issuerPda.toString(),
       legal_entity_id: trimmedId,
       company_name: companyName.trim() || null,
       contact_email: contactEmail.trim() || null,
       website: website.trim() || null,
-    });
+    };
+    if (!profile.company_name && !profile.contact_email && !profile.website) {
+      // Nothing to save: no second wallet prompt and no finality wait. The
+      // dashboard adds the details later; the archive route keeps its own row.
+      setProfileState({ kind: "skipped" });
+      return;
+    }
+    await saveProfile(issuerPda, profile);
   }
 
   if (!wallet) return <main><WalletRequired context="This wallet becomes your issuer authority. Choose the wallet you intend to use to manage the entity." /></main>;
@@ -485,6 +494,11 @@ export default function IssuerOnboardingPage() {
                 {profileState.kind === "working" && (
                   <p className="mt-3 text-sm text-slate-600" aria-live="polite">
                     {profileState.text}
+                  </p>
+                )}
+                {profileState.kind === "skipped" && (
+                  <p className="mt-3 text-sm text-slate-600">
+                    No company details were entered. Add them later from your issuer dashboard (Company profile, 1 signature).
                   </p>
                 )}
                 {profileState.kind === "saved" && (
