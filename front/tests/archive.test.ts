@@ -205,7 +205,15 @@ describe("wiring (read from the sources)", () => {
     for (const path of ["app/marketplace/page.tsx", "app/marketplace/launchpad/page.tsx", "components/market-overview.tsx"]) {
       expect(src(path), path).toContain("withoutArchived");
     }
-    expect(src("app/issuer/page.tsx")).toContain("withoutArchivedAssets(");
+    const issuer = src("app/issuer/page.tsx");
+    expect(issuer).toContain("const workflow = useIssuerWorkflow();");
+    expect(issuer).toContain("const { data, me, refresh } = workflow;");
+    const issuerWorkflow = src("app/issuer/use-issuer-workflow.ts");
+    // The page now reads through the shared workflow hook. The indexer/RPC
+    // snapshot must pass the assets-only archive filter before entering state.
+    expect(issuerWorkflow).toMatch(/loadNetworkPreferIndexer\(\(\) => loadNetwork\(client\.runtime\.rpc\)\)\.then\(withoutArchivedAssets\)\.then\(\(data\) =>/);
+    expect(issuerWorkflow).toContain("setChain({ key: chainKey, data, failed: false })");
+    expect(issuerWorkflow).not.toMatch(/\.then\(withoutArchived\)/);
     expect(src("app/issuer/assets/page.tsx")).toContain("showArchived ? myAssets : myAssets.filter((a) => !isArchived(a))");
     expect(src("app/admin/assets/page.tsx")).toContain("if (archived && !showArchived) return false;");
     expect(src("app/admin/issuers/page.tsx")).toContain("showArchived ||");
