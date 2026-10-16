@@ -2623,6 +2623,16 @@ the order:
 3. then, at §0A D10, the super admin's fresh manual USDC fallback, and only
    after it the fx scheduler ("Install, prove, enable" below).
 
+Every front release to mainnet is that fast-forward: `release/mainnet` is
+pushed from a commit of `main` (`ops/release-checklist.md`), never
+cherry-picked and never from a feature branch.
+`scripts/check-release-ancestry.sh` checks that `origin/main` is an ancestor
+of the release ref, and the "Release guard" workflow
+(`.github/workflows/release-guard.yml`) runs it on every push to
+`release/mainnet`: red means the live site is missing commits of `main`, as
+on 2026-10-15, when a push from a branch that had diverged before #78 left
+the KYC-only lockdown out of the release branch.
+
 Expand only: without automatic rows every reader behaves as before. The
 file is frozen at sha256
 `5e7d01d37c18428df99b8a55eb7b44400a3d676f22dac3f2a01a32763a42943d`
