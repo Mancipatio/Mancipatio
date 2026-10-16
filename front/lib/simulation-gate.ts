@@ -17,9 +17,12 @@ import {
   compileTransaction,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
+  isSolanaError,
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   type Address,
   type Blockhash,
   type GetSignatureStatusesApi,
@@ -75,10 +78,20 @@ export const PROBE_LIFETIME = Object.freeze({
 });
 
 /**
+ * The longest one simulation may take: the RPC transport has no timeout of
+ * its own, and a request that never answers would hold a page's "Working…"
+ * with no end (the busy modals cannot be closed). Cut off, it is a failed
+ * read: the verified client fails closed and says the RPC did not answer in
+ * time.
+ */
+export const SIMULATION_TIMEOUT_MS = 15_000;
+
+/**
  * ONE simulateTransaction of the exact message: signatures are not checked
  * (the wallet has not signed yet) and the node supplies a current blockhash,
- * at `confirmed` like the send's preflight. RPC failures throw; the caller
- * decides (the verified client fails closed).
+ * at `confirmed` like the send's preflight, cut off after
+ * SIMULATION_TIMEOUT_MS. RPC failures throw; the caller decides (the verified
+ * client retries a refusal of the moment and fails closed).
  */
 export async function simulateMessage(rpc: SimulationRpc, message: SimulatableMessage): Promise<SimulationVerdict> {
   const wire = getBase64EncodedWireTransaction(compileTransaction(message));
@@ -89,7 +102,7 @@ export async function simulateMessage(rpc: SimulationRpc, message: SimulatableMe
       replaceRecentBlockhash: true,
       commitment: "confirmed",
     })
-    .send();
+    .send({ abortSignal: AbortSignal.timeout(SIMULATION_TIMEOUT_MS) });
   const units = value.unitsConsumed;
   return {
     err: value.err ?? null,
@@ -224,11 +237,81 @@ export class SimulationRefusedError extends Error {
   }
 }
 
+// ── What kind of RPC failure an error is ─────────────────────────────────────
+
+/** fetch()'s own rejections when no response came back (the list lib/rpc-retry retries on). */
+const NO_ANSWER_RE = /failed to fetch|fetch failed|load failed|networkerror|network request failed/i;
+
+export type RpcFailure =
+  /** The transport answered with this HTTP status (kit 8100002). */
+  | { kind: "http"; status: number }
+  /** No response at all (fetch's TypeError). */
+  | { kind: "no-answer" }
+  /** Cut off by its deadline (an AbortSignal.timeout reason), or aborted. */
+  | { kind: "timeout" }
+  /** The node says it is unhealthy, behind the network (-32005). */
+  | { kind: "unhealthy" };
+
+/**
+ * What kind of RPC failure `value` itself is (its cause chain is not
+ * followed), or null for anything else. Read from codes and names, never
+ * from messages: a production build of @solana/kit shortens them to
+ * "Solana error #8100002; Decode this error by running …", which must never
+ * reach a user.
+ */
+export function rpcFailureAt(value: unknown): RpcFailure | null {
+  if (isSolanaError(value, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR)) return { kind: "http", status: value.context.statusCode };
+  if (isSolanaError(value, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY)) return { kind: "unhealthy" };
+  if (value instanceof TypeError && NO_ANSWER_RE.test(value.message)) return { kind: "no-answer" };
+  const name = value && typeof value === "object" ? (value as { name?: unknown }).name : undefined;
+  if (name === "TimeoutError" || name === "AbortError") return { kind: "timeout" };
+  return null;
+}
+
+/** The RPC failure of `error` or of a cause within a few levels, or null. */
+function rpcFailureIn(error: unknown): RpcFailure | null {
+  let cursor: unknown = error;
+  for (let depth = 0; depth <= 4 && cursor !== null && cursor !== undefined; depth++) {
+    const failure = rpcFailureAt(cursor);
+    if (failure) return failure;
+    cursor = typeof cursor === "object" ? (cursor as { cause?: unknown }).cause : undefined;
+  }
+  return null;
+}
+
+/**
+ * Why the simulation could not be run, for SimulationUnavailableError: the
+ * HTTP status, no answer, the cut-off, or the node's health, by kind; any
+ * other kit error by its code only (never its message, which a production
+ * build turns into a decode instruction); a plain Error by its message. A
+ * 401 / 403 is not a passing moment: the RPC refuses this site, so the
+ * advice is to tell Manci.
+ */
+function unavailableReason(cause: unknown): { reason: string; advice: string } {
+  const failure = rpcFailureIn(cause);
+  const later = "Try again in a moment.";
+  switch (failure?.kind) {
+    case "http":
+      return failure.status === 401 || failure.status === 403
+        ? { reason: ` (the RPC refused access, HTTP ${failure.status})`, advice: "If it happens again, tell Manci." }
+        : { reason: ` (the RPC answered HTTP ${failure.status})`, advice: later };
+    case "no-answer":
+      return { reason: " (no answer from the RPC)", advice: later };
+    case "timeout":
+      return { reason: ` (the RPC did not answer within ${Math.round(SIMULATION_TIMEOUT_MS / 1000)} s)`, advice: later };
+    case "unhealthy":
+      return { reason: " (the RPC node says it is unhealthy)", advice: later };
+    default:
+      if (isSolanaError(cause)) return { reason: ` (Solana error #${cause.context.__code})`, advice: later };
+      return { reason: cause instanceof Error && cause.message ? ` (${cause.message})` : "", advice: later };
+  }
+}
+
 /** The network could not be asked: nothing was sent (the gate fails closed). */
 export class SimulationUnavailableError extends Error {
   constructor(network: string, cause: unknown) {
-    const reason = cause instanceof Error && cause.message ? ` (${cause.message})` : "";
-    super(`Could not test this transaction on ${network} before opening your wallet, so nothing was sent${reason}. Try again in a moment.`, { cause });
+    const { reason, advice } = unavailableReason(cause);
+    super(`Could not test this transaction on ${network} before opening your wallet, so nothing was sent${reason}. ${advice}`, { cause });
     this.name = "SimulationUnavailableError";
   }
 }

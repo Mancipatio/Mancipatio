@@ -1,8 +1,9 @@
-import { isSolanaError } from "@solana/kit";
+import { isSolanaError, SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_TO_EXECUTE_TRANSACTION_PLAN } from "@solana/kit";
 import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
 import { KycOnlyFlowError, ModuleDisabledFlowError, PausedFlowError } from "@/lib/pause-gate";
+import { rpcFailureAt, type RpcFailure } from "@/lib/simulation-gate";
 import { LIGHTHOUSE_PROGRAM_ADDRESS, takeWalletChange } from "@/lib/wallet-changes";
 import {
   REGISTRY_ERROR_HINTS,
@@ -152,6 +153,104 @@ export function explainNetworkRefusal(err: unknown): string | null {
   return null;
 }
 
+// ── An RPC that refused, did not answer or answered too late ─────────────────
+//
+// kit reports a transport refusal as SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR
+// (8100002) with the status in its context; a production build words it
+// "Solana error #8100002; Decode this error by running `npx @solana/errors
+// decode …`", which told users to run a CLI. The verified client marks an
+// error thrown after the wallet signed (markSentAfterSigning), so the wording
+// can say whether anything may have reached the network: a false "nothing was
+// sent" would invite a second deposit while the first is in flight.
+
+const AFTER_SIGNING = new WeakSet<object>();
+
+/**
+ * Marks `err` as thrown after the wallet signed (lib/verified-solana-client):
+ * the transaction may have been broadcast, so its explanation must not say
+ * nothing was sent. Returns `err`.
+ */
+export function markSentAfterSigning<T>(err: T): T {
+  if (err !== null && typeof err === "object") AFTER_SIGNING.add(err);
+  return err;
+}
+
+const CHAIN_KEYS = ["cause", "error", "context", "transactionPlanResult", "plans", "status"] as const;
+
+/** Every object of the cause chain and the SDK's plan tree under `err` (a plan's failure sits under its `status`), breadth first, `err` first. */
+function* chainOf(err: unknown): Generator<object> {
+  const queue: unknown[] = [err];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 200) {
+    const cursor = queue.shift();
+    if (cursor == null || typeof cursor !== "object" || seen.has(cursor)) continue;
+    seen.add(cursor);
+    yield cursor;
+    const obj = cursor as AnyRecord;
+    for (const key of CHAIN_KEYS) {
+      const next = obj[key];
+      if (Array.isArray(next)) queue.push(...next);
+      else if (next && typeof next === "object") queue.push(next);
+    }
+  }
+}
+
+/**
+ * The first RPC failure in the chain (lib/simulation-gate rpcFailureAt), and
+ * whether it came after the wallet signed: the verified client's mark on any
+ * object of the chain, or an RPC answer (a status, no answer, the node's
+ * health) under the SDK executor's own error (7618003), which signs first and
+ * only then calls sendTransaction. An abort under it is not placed by nesting
+ * alone (the caller's signal can cut the signing itself off): only the mark
+ * says it came after.
+ */
+export function sendRpcFailure(err: unknown): { failure: RpcFailure; afterSigning: boolean } | null {
+  let marked = false;
+  let underExecutor = false;
+  for (const cursor of chainOf(err)) {
+    if (AFTER_SIGNING.has(cursor)) marked = true;
+    if (isSolanaError(cursor, SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_TO_EXECUTE_TRANSACTION_PLAN)) underExecutor = true;
+    const failure = rpcFailureAt(cursor);
+    if (failure) return { failure, afterSigning: marked || (underExecutor && failure.kind !== "timeout") };
+  }
+  return null;
+}
+
+/** After the wallet signed: the one advice that is always true. */
+const MAY_HAVE_BEEN_BROADCAST = "The transaction may not have been broadcast; check it in the explorer before retrying.";
+
+/**
+ * The wording for an RPC that refused the request (HTTP status), gave no
+ * answer, answered too late or reports itself unhealthy, anywhere in the
+ * chain; null when the failure is anything else. Before the wallet: nothing
+ * was sent. After it signed: the outcome is not known.
+ */
+export function explainRpcFailure(err: unknown): string | null {
+  const found = sendRpcFailure(err);
+  if (!found) return null;
+  const { failure, afterSigning } = found;
+  switch (failure.kind) {
+    case "http":
+      if (afterSigning) return `The Solana RPC refused the request (HTTP ${failure.status}) after your wallet signed. ${MAY_HAVE_BEEN_BROADCAST}`;
+      if (failure.status === 401 || failure.status === 403) {
+        return `The Solana RPC refused access (HTTP ${failure.status}). Nothing was sent — if it happens again, tell Manci.`;
+      }
+      return `The Solana RPC refused the request (HTTP ${failure.status}). Nothing was sent — try again in a moment.`;
+    case "no-answer":
+      return afterSigning
+        ? `The Solana RPC did not answer after your wallet signed. ${MAY_HAVE_BEEN_BROADCAST}`
+        : "The Solana RPC did not answer. Nothing was sent — check your connection and try again in a moment.";
+    case "timeout":
+      return afterSigning
+        ? "The network did not answer in time after your wallet signed. The transaction may not have been sent — check the explorer before retrying."
+        : "The network did not answer in time; nothing was sent. Try again in a moment.";
+    case "unhealthy":
+      return afterSigning
+        ? `The Solana RPC node says it is unhealthy (behind the network) after your wallet signed. ${MAY_HAVE_BEEN_BROADCAST}`
+        : "The Solana RPC node says it is unhealthy (behind the network). Nothing was sent — try again in a moment.";
+  }
+}
+
 export function explainSendError(err: unknown): string {
   if (err == null) return "Unknown error";
 
@@ -228,6 +327,11 @@ export function explainSendError(err: unknown): string {
   }
   const refusal = explainNetworkRefusal(err);
   if (refusal) return refusal;
+  // An RPC that refused the request, gave no answer or answered too late,
+  // worded by its kind and by whether the wallet had signed (never its raw
+  // message, which a production build turns into a decode instruction).
+  const rpcFailure = explainRpcFailure(err);
+  if (rpcFailure) return rpcFailure;
   const inner = nestedMessages.find((m) => m !== message && !/transaction plan/i.test(m));
   if (inner) return `${message} — ${inner}`;
 
