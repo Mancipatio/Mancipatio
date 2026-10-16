@@ -240,7 +240,7 @@ export default function MyAssetsPage() {
         <p className="mt-8 text-sm text-red-600">Failed to load.</p>
       ) : data === null ? (
         <div className="mt-8">
-          <SkeletonTable rows={3} cols={5} />
+          <SkeletonTable rows={3} cols={4} />
         </div>
       ) : !myIssuerPda ? (
         <NotIssuer />
@@ -294,7 +294,7 @@ export default function MyAssetsPage() {
               </p>
             </div>
           ) : (
-            <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+            <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
               <table className="w-full text-sm">
                 <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
@@ -304,7 +304,6 @@ export default function MyAssetsPage() {
                       Share classes
                     </th>
                     <th className="px-4 py-3 font-medium">Status</th>
-                    <th className="px-4 py-3 text-right font-medium">Manage</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -332,20 +331,9 @@ export default function MyAssetsPage() {
                           <p className="mt-0.5 text-xs text-slate-500">
                             {a.assetId} · {a.symbolPrefix}
                           </p>
-                        </td>
-                        <td className="px-4 py-3">{categoryLabel}</td>
-                        <td className="px-4 py-3 text-right font-mono">
-                          {a.shareClassesCount}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[a.status] ?? STATUS_BADGE[0]}`}
-                          >
-                            {ASSET_STATUS_LABEL[a.status] ?? "?"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="flex items-center justify-end gap-3">
+                          {/* Actions sit under the asset, not in a trailing column, so an
+                              issuer on a phone reaches them without horizontal scrolling. */}
+                          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                             {pda && (archived || issuerMayArchive(a, pda)) && (
                               <button
                                 type="button"
@@ -367,6 +355,17 @@ export default function MyAssetsPage() {
                               <span className="text-xs text-slate-400">…</span>
                             )}
                           </div>
+                        </td>
+                        <td className="px-4 py-3">{categoryLabel}</td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          {a.shareClassesCount}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[a.status] ?? STATUS_BADGE[0]}`}
+                          >
+                            {ASSET_STATUS_LABEL[a.status] ?? "?"}
+                          </span>
                         </td>
                       </tr>
                     );
