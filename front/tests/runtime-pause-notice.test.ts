@@ -81,8 +81,8 @@ describe("runtime pause notices", () => {
     expect(runtimePauseFlows("/issuer/status/")).toEqual(["primary", "secondary", "conversion"]);
     const notice = combinedRuntimePauseNotice(runtimePauseFlows("/issuer"), 126);
     expect(notice?.description).toContain("primary sales");
-    expect(notice?.description).toContain("OTC offers");
-    expect(notice?.description).toContain("conversion vaults");
+    expect(notice?.description).toContain("secondary trading");
+    expect(notice?.description).toContain("conversion deposits");
     expect(combinedRuntimePauseNotice(runtimePauseFlows("/issuer"), null)?.tone).toBe("unknown");
     expect(combinedRuntimePauseNotice([], null)).toBeNull();
   });

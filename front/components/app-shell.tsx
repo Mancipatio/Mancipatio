@@ -14,6 +14,7 @@ import { tosGateMounted } from "@/lib/tos";
 import { moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
+import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
 
 const primary = [
   { href: "/", label: "Overview", icon: IconHome },
@@ -154,6 +155,7 @@ export function AppShell({ children, section = "overview" }: {
         {path !== "/" && <div className="app-floating-account"><FollowOnX className="overview-button overview-button-x" /><AccountMenu /></div>}
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
+          <RuntimePauseNotice path={path} />
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{page}</div> : page}
         </Content>
         <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link>{path !== "/" && <FollowOnX className="app-footer-x" />}</div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
