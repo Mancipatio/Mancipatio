@@ -1,5 +1,5 @@
 /* App workspace: dark navigation, quiet surfaces and green transactional accents. */
-[data-app] { --app-ink:#192b2a; --app-muted:#657267; --app-green:#147d64; --app-line:#e2e9e6; color:var(--app-ink); font-size:14px; }
+[data-app] { --app-ink:#192b2a; --app-muted:#657267; --app-green:#147d64; --app-line:#e2e9e6; --app-menu-bg:#dcefe2; --app-menu-line:#bfdac9; color:var(--app-ink); font-size:14px; }
 .app-shell { min-height:100vh; background:#f6f8f7; }
 .app-shell button,.app-shell a,.app-shell input,.app-shell select { -webkit-tap-highlight-color:transparent; }
 .app-shell button { cursor:pointer; }
@@ -39,13 +39,12 @@
 .app-sidebar-foot>span { color:#87a398; display:flex; align-items:center; gap:7px; font-size:10px; }
 .app-sidebar-foot i { width:5px; height:5px; border-radius:50%; background:#86d3a9; }
 .app-body { position:relative; margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
-.app-topbar { display:none; height:60px; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:#fff; border-bottom:1px solid var(--app-line); }
+.app-topbar { display:none; height:60px; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:var(--app-menu-bg); border-bottom:1px solid var(--app-menu-line); }
 .app-breadcrumb,.app-topbar-actions { display:flex; align-items:center; gap:15px; font-size:12px; }
 .app-breadcrumb-root { color:#657267; }
 .app-breadcrumb-separator { color:#ccd3cf; }
 .app-topbar-actions { gap:18px; }
 .app-account { display:flex; align-items:center; gap:10px; border-left:1px solid var(--app-line); padding-left:18px; }
-.app-follow-x-icon { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:#0f1419; color:#fff; }
 .app-content { padding:31px 32px 24px; flex:1; min-width:0; width:100%; max-width:1660px; margin:0 auto; outline:none; }
 .app-content.app-content--overview { padding-top:22px; }
 .app-floating-account { position:absolute; top:22px; right:32px; z-index:20; display:flex; align-items:center; gap:9px; }
@@ -94,13 +93,13 @@
 @media(max-width:480px) {
   .app-admin-menu nav.is-open { grid-template-columns:minmax(0,1fr); }
 }
-.app-section-tabs { padding:0 250px 0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
-.app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:var(--app-muted); white-space:nowrap; }
-.app-section-tabs>a.is-active { border-color:var(--app-green); color:var(--app-green); }
+.app-section-tabs { padding:0 250px 0 32px; background:var(--app-menu-bg); border-bottom:1px solid var(--app-menu-line); display:flex; gap:23px; overflow-x:auto; }
+.app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:#365748; white-space:nowrap; }
+.app-section-tabs>a:hover { color:#12634b; }
+.app-section-tabs>a.is-active { border-color:#12634b; color:#12634b; font-weight:600; }
 .app-footer { padding:18px 32px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
 .app-footer>div { display:flex; flex-wrap:wrap; gap:8px 21px; }
 .app-footer-dot { margin:0 7px; }
-.app-footer-x { display:inline-flex; align-items:center; gap:6px; }
 .app-footer-operator { flex-basis:100%; margin:0; line-height:1.6; }
 .app-market-content[data-mx] { background:transparent; }
 .app-market-content .mx-wrap { max-width:none; padding:0; }
@@ -121,8 +120,6 @@
 .overview-button { display:inline-flex; align-items:center; justify-content:center; gap:9px; background:#fff; border:1px solid #dfe6e1; border-radius:6px; min-height:37px; padding:9px 13px; font-size:12px; font-weight:500; white-space:nowrap; }
 .overview-button:hover { border-color:#82a590; }
 .overview-button-dark { background:#193e31; color:#fff; border-color:#193e31; }
-.overview-button-x { background:#0f1419; color:#fff; border-color:#0f1419; }
-.overview-button.overview-button-x:hover { background:#272c30; border-color:#272c30; }
 .app-wallet-menu { font-variant-numeric:tabular-nums; }
 .app-wallet-menu:hover { background:#224f3f; border-color:#224f3f; }
 .app-wallet-chevron { opacity:.75; margin-left:-3px; }
