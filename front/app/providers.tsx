@@ -9,6 +9,7 @@ import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { guardWalletConnectors } from "@/lib/guarded-wallet-connectors";
 import { walletConnectorOverrides } from "@/lib/wallet-chain";
 import { WalletSigningNotice } from "@/components/wallet-signing-notice";
+import { SendProgressNotice } from "@/components/send-progress-notice";
 import { RoleProvider } from "@/lib/auth";
 
 // NEXT_PUBLIC_SOLANA_RPC_URL wins; otherwise derived from NEXT_PUBLIC_NETWORK
@@ -37,6 +38,7 @@ export function Providers({ children }: { children: ReactNode }) {
         <ToastProvider>
           {children}
           <WalletSigningNotice />
+          <SendProgressNotice />
         </ToastProvider>
       </RoleProvider>
     </SolanaProvider>
