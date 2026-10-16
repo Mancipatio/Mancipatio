@@ -2,8 +2,8 @@
 // on mainnet the public lists of asset classes show Equity only unless
 // NEXT_PUBLIC_ASSET_CLASSES says otherwise; elsewhere every class. A
 // production build refuses an unknown slug. The overview tiles and filter,
-// /markets/types and the footer list only the offered classes (then a
-// non-interactive "More asset classes coming later"); the guide of a class
+// /markets/types and the footer list only the offered classes. The overview
+// hides category controls when there is only one offered class; the guide of a class
 // that is not offered keeps its URL and shows a notice (noindex). Data of
 // existing assets is never filtered.
 import { createElement, type ReactNode } from "react";
@@ -113,22 +113,31 @@ describe("the overview's asset classes (components/market-overview.tsx)", () => 
     return markup.slice(start, markup.indexOf("</div>", start));
   };
 
-  it("mainnet default (KYC-only on): one Equity tile, then a tile that is not a control; no sales tab or raise link", () => {
+  it("mainnet default: no redundant class controls or future-class promotions; the guide points to Equity", () => {
     const markup = html(createElement(MarketOverview));
-    const buttons = categoryButtons(markup);
-    expect(buttons).toHaveLength(1);
-    expect(buttons[0]).toContain("Equity");
-    const later = markup.slice(markup.indexOf("overview-category--later"));
-    expect(markup.match(/overview-category--later/g)).toHaveLength(1);
-    // Not a control and no ARIA name on a generic div (its text is read).
-    expect(markup).toMatch(/<div class="overview-category overview-category--later" title="More asset classes coming later">/);
-    expect(later).toContain("More asset classes");
-    expect(later).toContain("Coming later");
-    expect(options(markup)).toEqual(["all", "0"]);
+    expect(categoryButtons(markup)).toHaveLength(0);
+    expect(markup).not.toContain("Explore by asset class");
+    expect(markup).not.toContain("Compare rights &amp; structures");
+    expect(markup).not.toContain("More asset classes");
+    expect(markup).not.toContain("Coming later");
+    expect(markup).not.toContain('aria-label="Asset category"');
+    expect(hrefs(markup)).toContain("/markets/types/equity");
+    expect(hrefs(markup)).not.toContain("/markets/types");
     expect(tabs(markup)).not.toContain("Primary sales");
     expect(hrefs(markup)).not.toContain("/marketplace/launchpad");
     expect(hrefs(markup)).not.toContain("/apply");
-    expect(markup).toContain("overview-categories overview-categories--few");
+  });
+
+  it("keeps Primary sales when active without promoting other asset classes or paused modules", () => {
+    network("mainnet", "", "false");
+    const markup = html(createElement(MarketOverview));
+    expect(categoryButtons(markup)).toHaveLength(0);
+    expect(tabs(markup)).toContain("Primary sales");
+    expect(hrefs(markup)).toContain("/marketplace/launchpad");
+    expect(hrefs(markup)).not.toContain("/marketplace/otc");
+    expect(hrefs(markup)).not.toContain("/portfolio/vesting");
+    expect(markup).toContain("Read the equity guide");
+    expect(markup).not.toContain("Coming later");
   });
 
   it("devnet: the eight classes, no 'coming later' tile, and the primary sales tab", () => {
