@@ -107,6 +107,10 @@ beforeEach(async () => {
   const consumed = new Set<string>();
   rpc.mockReset();
   rpc.mockImplementation(async (_name, args) => {
+    if (_name === "ensure_account_profile") return {
+      data: { id: "wallet-account", wallet: args.p_wallet, network: args.p_network,
+        wallets: [{ wallet: args.p_wallet, linked_at: new Date().toISOString() }] }, error: null,
+    };
     const key = `${args.p_wallet}:${args.p_nonce}`;
     const fresh = !consumed.has(key);
     consumed.add(key);

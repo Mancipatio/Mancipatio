@@ -9,11 +9,12 @@ import { FollowOnX } from "@/components/follow-on-x";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { features, kycOnly } from "@/lib/features";
+import { kycOnly } from "@/lib/features";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 import { tosGateMounted } from "@/lib/tos";
 import { moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
+import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 
 const primary = [
   { href: "/", label: "Overview", icon: IconHome },
@@ -24,6 +25,7 @@ const primary = [
 const portfolio = [
   { href: "/account", label: "Your account", icon: IconUsers },
   { href: "/portfolio", label: "My portfolio", icon: IconWallet },
+  { href: "/portfolio/conversion", label: "Convert to shares", icon: IconBuilding },
   { href: "/portfolio/vesting", label: "Vesting", icon: IconLock },
   { href: "/portfolio/rights", label: "Income & claims", icon: IconCoins },
   { href: "/portfolio/governance", label: "Governance", icon: IconGavel },
@@ -34,12 +36,7 @@ const portfolioTabs = [
   ["/portfolio/listings", "Sell listings"], ["/portfolio/vesting", "Vesting"], ["/portfolio/rights", "Rights & claims"],
   ["/portfolio/governance", "Votes"], ["/portfolio/delivery", "Delivery"], ["/portfolio/conversion", "Conversion"], ["/portfolio/history", "Activity"],
 ];
-const issuerTabs = [
-  ["/issuer", "Overview"], ["/issuer/assets", "Assets"], ["/issuer/share-classes", "Share classes"],
-  ["/issuer/launchpad", "Sales"], ["/issuer/payouts", "Payout vaults"], ["/issuer/vesting", "Vesting"], ["/issuer/vesting-series", "Vesting series"],
-  // 2C-2: the issuer key's rotation / recovery page (feature-flagged rollback switch).
-  ...(features().issuerRotation ? [["/issuer/rotation", "Authority key"]] : []),
-];
+const issuerTabs = ISSUER_WORKFLOW_TABS;
 const marketTabs = [
   ["/marketplace", "Assets"], ["/marketplace/launchpad", "Primary sales"],
   ["/marketplace/otc", "OTC offers"], ["/marketplace/governance", "Governance"],
