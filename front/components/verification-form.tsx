@@ -30,7 +30,7 @@ function Field({ id, label, hint, wide, children }: { id: string; label: string;
   return <div className={`verify-field${wide ? " verify-wide" : ""}`}><label htmlFor={id}>{label}{hint && <span>{hint}</span>}</label>{children}</div>;
 }
 
-export function VerificationForm({ context }: { context?: "issuer" } = {}) {
+export function VerificationForm({ context }: { context?: "issuer" }) {
   const conn = useWalletConnection();
   const router = useRouter();
   const search = useSearchParams();

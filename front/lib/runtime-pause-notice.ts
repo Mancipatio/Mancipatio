@@ -70,10 +70,14 @@ export function combinedRuntimePauseNotice(flows: readonly RuntimePauseFlow[], f
   const notices = [...new Set(flows)].map((flow) => runtimePauseNotice(flow, flags)).filter((notice) => notice !== null);
   if (notices.length === 0) return null;
   if (notices.length === 1 || notices[0].tone === "unknown") return notices[0];
+  const labels: Record<RuntimePauseFlow, string> = {
+    primary: "primary sales", secondary: "secondary trading", conversion: "new conversion deposits",
+  };
+  const paused = [...new Set(flows)].filter((flow) => runtimePauseNotice(flow, flags)?.tone === "paused");
   return {
     tone: "paused",
     title: "Some platform transactions are paused",
-    description: notices.map((notice) => notice.description).join(" "),
-    exits: "Existing positions remain accessible. Eligible cancellations, refunds, token returns and completion of deposited conversions are not blocked by these pauses.",
+    description: `Currently paused: ${paused.map((flow) => labels[flow]).join(", ")}. You can browse the platform, prepare verification and follow your review.`,
+    exits: "Existing positions and eligible cancellations, refunds and token returns remain accessible.",
   };
 }
