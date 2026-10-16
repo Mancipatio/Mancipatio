@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountVerification } from "@/lib/account";
 import { issuerWorkflowState } from "@/lib/issuer-workflow";
 import { IssuerReviewDetails, IssuerWorkflow, type WorkflowData } from "@/app/issuer/issuer-workflow";
+import IssuerVerificationPage from "@/app/issuer/verification/page";
+import { IssuerRequestContent } from "@/app/issuer/request/request-content";
 
 function verification(overrides: Partial<AccountVerification> = {}): AccountVerification {
   return { kyc: "none", kyb: "none", documents_requested: 0, ...overrides };
@@ -62,6 +64,26 @@ describe("issuer journey rendering", () => {
     expect(html).toContain("Supply documents / corrections");
     expect(html).toContain("connect a wallet linked to this account");
     expect(html).not.toContain("Verification approved");
+    expect(html).not.toContain('href="/apply"');
+  });
+  it("routes initial issuer KYC to the founder verification purpose", async () => {
+    await expect(IssuerVerificationPage({ searchParams: Promise.resolve({}) })).rejects.toMatchObject({
+      digest: expect.stringContaining("/issuer/verification?type=kyc&next=/apply"),
+    });
+    await expect(IssuerVerificationPage({ searchParams: Promise.resolve({ type: "kyb" }) })).rejects.toMatchObject({
+      digest: expect.stringContaining("/issuer/verification?type=kyb&next=/apply"),
+    });
+  });
+  it("offers the issuance application only after approval and does not mistake individual KYC for issuer approval", () => {
+    for (const status of [null, verification(), verification({ kyb: "pending" }), verification({ kyb: "rejected" })]) {
+      const html = renderToStaticMarkup(createElement(IssuerRequestContent, { workflow: workflow({ verification: status }) }));
+      expect(html).not.toContain('href="/apply"');
+      expect(html).toContain("Available after KYC / KYB approval.");
+    }
+    const approved = renderToStaticMarkup(createElement(IssuerRequestContent, { workflow: workflow({ verification: verification({ kyc: "verified" }) }) }));
+    expect(approved).toContain('href="/apply"');
+    expect(approved).not.toContain("Your registered issuer");
+    expect(approved).not.toContain('href="/issuer/assets/tokenize"');
   });
   it("makes an unavailable read explicit instead of presenting an empty or approved dossier", () => {
     const html = renderToStaticMarkup(createElement(IssuerReviewDetails, { workflow: workflow({

@@ -13,7 +13,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { signedFetch } from "@/lib/siws-client";
 import { accountFetch, useSignedInAccount } from "@/lib/account-login";
-import { kycOnly } from "@/lib/features";
+import { kycOnly, moduleEnabled } from "@/lib/features";
 
 type Kind = "kyc" | "kyb";
 type Fields = Record<string, string>;
@@ -30,12 +30,12 @@ function Field({ id, label, hint, wide, children }: { id: string; label: string;
   return <div className={`verify-field${wide ? " verify-wide" : ""}`}><label htmlFor={id}>{label}{hint && <span>{hint}</span>}</label>{children}</div>;
 }
 
-export function VerificationForm() {
+export function VerificationForm({ context }: { context?: "issuer" } = {}) {
   const conn = useWalletConnection();
   const router = useRouter();
   const search = useSearchParams();
   const next = search.get("next");
-  const safeNext = next && SAFE_NEXT.test(next) ? next : null;
+  const safeNext = context === "issuer" ? "/apply" : next && SAFE_NEXT.test(next) ? next : null;
   const [kind, setKind] = useState<Kind>(search.get("type") === "kyb" ? "kyb" : "kyc");
   const [fields, setFields] = useState<Fields>(EMPTY);
   const [consent, setConsent] = useState(false);
@@ -72,6 +72,12 @@ export function VerificationForm() {
   }, [actorKey]);
 
   const current = status?.[kind] ?? "none";
+  const signInNext = `${context === "issuer" ? "/issuer/verification" : "/verify"}?type=${kind}${safeNext ? `&next=${safeNext}` : ""}`;
+  const verificationUses = [
+    ...(moduleEnabled("custodyConversion") ? ["convert tokens into company shares"] : []),
+    ...(moduleEnabled("custodyDelivery") ? ["take delivery of physical goods"] : []),
+    "get an investor passport for KYC-gated classes", "raise capital or issue assets",
+  ];
   const inProgress = current === "pending" || current === "more_info";
   const showForm = !done && (current === "none" || current === "expired" || editing);
   const set = (key: string) => (event: { target: { value: string } }) => setFields((f) => ({ ...f, [key]: event.target.value }));
@@ -125,7 +131,9 @@ export function VerificationForm() {
     <header className="account-heading">
       <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{paused
         ? "Identity (KYC) and company (KYB) verification are open. The services that require them are paused for now. It takes a few minutes."
-        : "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."}</p></div>
+        : context === "issuer"
+        ? "Verify your identity as an individual founder or verify an existing company. After approval, continue with your token issuance request."
+        : `Buying and trading tokens does not require verification. You need it to ${verificationUses.join(", ")}. It takes a few minutes.`}</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
@@ -133,7 +141,7 @@ export function VerificationForm() {
           <section className="account-card account-unlock">
             <h2>Sign in to get verified.</h2>
             <p>Use your email or Google — no wallet needed. Your verification will cover every wallet you add later.</p>
-            <Link href="/login?next=/verify" className="account-button account-button--primary">Sign in<IconArrowUpRight size={16} /></Link>
+            <Link href={`/login?next=${encodeURIComponent(signInNext)}`} className="account-button account-button--primary">Sign in<IconArrowUpRight size={16} /></Link>
           </section>
           <WalletRequired context="Or connect a wallet that is linked to your account." />
         </div>
@@ -142,9 +150,10 @@ export function VerificationForm() {
           {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
             {k === "kyc" ? <IconUsers size={20} /> : <IconBuilding size={20} />}
             <strong>{k === "kyc" ? "Individual (KYC)" : "Company (KYB)"}</strong>
-            <span>{k === "kyb" ? (paused ? "Verify your company." : "Verify your company to raise capital or issue assets.")
-              : paused ? "Verify your identity as an individual."
-              : "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder."}</span>
+            <span>{paused ? (k === "kyc" ? "Verify your identity as an individual." : "Verify your company.") : k === "kyc"
+              ? context === "issuer" ? "Verify yourself to apply as an individual founder. Company formation and issuance follow the application review."
+                : `Verify yourself to ${verificationUses.join(", ")}.`
+              : "Verify your company to raise capital or issue assets."}</span>
             {status && <span className={`account-status ${status[k] === "verified" ? "account-status--verified" : ""}`} style={{ marginTop: 10 }}>{VERIFICATION_LABEL[status[k]]}</span>}
           </button>)}
         </div>
