@@ -17,6 +17,15 @@
 // EUR value has a floor (0066: at least EUR 1 and the units at the share
 // class's latest price). The retry worker books a mint the browser never
 // booked, expires one that never landed, and rechecks released ones.
+// The reservation also refuses (409) more units than the class has room for,
+// counted from lifetime_minted (lib/distribution-supply: a conversion burn
+// never makes room to re-issue tokens for shares that already left the pool;
+// the program caps circulating supply only). The room is the one Send to
+// wallets and a sale request use (lib/server/sale-requests readSaleRoom):
+// cap − created so far − what Open sales may still mint − treasury mints
+// reserved and not yet booked − what live approvals not yet opened may mint;
+// an unreadable chain refuses (503). Booking never checks it: a mint already
+// on chain is booked whatever the room.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -38,6 +47,7 @@ import {
 } from "@/lib/server/sale-capacity";
 import { subjectSpvId, shareClassChain } from "../_lib";
 import { requireNotArchived } from "@/lib/server/archive";
+import { readSaleRoom } from "@/lib/server/sale-requests";
 
 const SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
 
@@ -83,6 +93,18 @@ export async function POST(request: Request) {
     // No new tokens of an archived asset (or of an archived issuer's): unarchive it first.
     // Booking (above) stays open: it records a mint already on chain.
     await requireNotArchived(sb, chain.asset, chain.issuer);
+    // The room left, counted from lifetime_minted (never from circulating
+    // supply): above it nothing is reserved. Only the reservation message was
+    // signed so far. A mint that landed and is not booked yet counts twice
+    // for a few minutes (reserved and in lifetime_minted), as it does for
+    // Send to wallets; the on-chain cap still bounds the total.
+    const facts = await readSaleRoom(sb, shareClass, chain.asset);
+    if (facts.room !== null && amountUnits > facts.room) {
+      throw new SiwsError(
+        409,
+        `Only ${facts.room.toLocaleString("en-US")} more tokens can be created (the cap minus everything created so far, converted tokens included, and what Open sales, approved sales and reserved mints hold)`,
+      );
+    }
     const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
     const snapshot = {
       v: 1, kind: "treasury_mint", network, share_class: shareClass, asset: chain.asset, issuer: chain.issuer,
