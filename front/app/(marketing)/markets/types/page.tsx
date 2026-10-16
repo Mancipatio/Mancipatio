@@ -25,8 +25,9 @@ import {
   type TermSet,
   type TermValue,
 } from "@/lib/instruments";
-import { allAssetClassesOffered, assetClassOffered, MORE_ASSET_CLASSES_LATER } from "@/lib/pilot-scope";
 import { scopeEnabled } from "@/lib/features";
+
+import { assetClassOffered } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Asset types · Manci",
@@ -73,7 +74,7 @@ export default function InstrumentsIndexPage() {
       <PageHeader
         eyebrow="Asset types"
         title="Asset types"
-        lede="Compare the rights each instrument carries, then open its fact sheet for the details. The terms of a specific issuance are published with that asset."
+        lede="Review the available asset types and the rights they carry. The terms of a specific issuance are published with that asset."
       />
 
       <Section>
@@ -103,7 +104,7 @@ export default function InstrumentsIndexPage() {
       <Section>
         <SectionHead
           eyebrow="The instruments"
-          title="Each one in full"
+          title="Available asset types"
           intro="Every page carries what the instrument is, who it is for, its terms at a glance, and what happens if the issuer doesn't perform."
         />
         <Grid cols={4} className="mt-7">
@@ -115,19 +116,13 @@ export default function InstrumentsIndexPage() {
               href={instrumentHref(instrument.slug)}
             />
           ))}
-          {/* Not a link: the classes that are not offered on this network.
-              Dashed and muted, like the overview's tile, so it does not read
-              as one more instrument card. */}
-          {!allAssetClassesOffered() && (
-            <Card title={MORE_ASSET_CLASSES_LATER} className="border-dashed bg-transparent [&>h3]:text-mx-ink-faint" />
-          )}
         </Grid>
       </Section>
 
 
 
       <Section>
-        <H2>Not sure which one fits?</H2>
+        <H2>Discuss your issuance</H2>
         <Body className="mt-4">
           {/* KYC-only mode (lib/features.ts): applications are paused; the
               contact form stays. */}

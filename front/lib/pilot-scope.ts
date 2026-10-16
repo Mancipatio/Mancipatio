@@ -186,7 +186,7 @@ export const NAV_ROUTES: readonly NavRoute[] = [
  * is ignored ("/markets/resell?type=equity" is the resell board).
  */
 export function navHrefVisible(href: string, network: Network = detectNetwork()): boolean {
-  const path = href.split(/[?#]/, 1)[0];
+  const path = href.split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
   if (moduleRouteState(path, network)?.disabled) return false;
   if (kycOnly(network) && KYC_ONLY_NAV_PREFIXES.some((p) => matches(path, p))) return false;
   if (!assetClassPathVisible(path, network)) return false;

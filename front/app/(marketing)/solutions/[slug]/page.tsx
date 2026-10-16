@@ -14,6 +14,7 @@ import {
   type StepItem,
 } from "@/components/mx";
 import { allAssetClassesOffered, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 import { getSolution, SOLUTIONS } from "@/lib/solutions";
 import { ASSET_TYPE_LABEL } from "@/lib/format";
 import { slugForEnum } from "@/lib/asset-types";
@@ -365,8 +366,9 @@ export async function generateMetadata({
   const { slug } = await params;
   const solution = getSolution(slug);
   return {
-    title: solution ? `${solution.name} — Manci` : "Manci",
-    description: GUIDES[slug]?.intro,
+    title: solution ? `${slug === "custody" && navHrefVisible("/portfolio/conversion") && !navHrefVisible("/portfolio/delivery") ? "Token conversion" : solution.name} — Manci` : "Manci",
+    description: !navHrefVisible(`/solutions/${slug}`) ? "This service is not available at the moment." : slug === "custody" && !navHrefVisible("/portfolio/delivery") ? "Request conversion of eligible tokens you own into company shares and track its progress." : GUIDES[slug]?.intro,
+    ...(!navHrefVisible(`/solutions/${slug}`) && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
 }
 
@@ -380,6 +382,21 @@ export default async function SolutionPage({
   const guide = GUIDES[slug];
   if (!solution || !guide) notFound();
 
+  if (!navHrefVisible(`/solutions/${slug}`)) {
+    return <PageHeader eyebrow="Platform guide" title={solution.name} lede="This service is not available at the moment.">
+      <ButtonRow><Button href="/docs" variant="ghost">View available guides</Button></ButtonRow>
+    </PageHeader>;
+  }
+
+  const conversionOnly = slug === "custody" && !navHrefVisible("/portfolio/delivery");
+  const guideTitle = conversionOnly ? "Token conversion" : solution.name;
+  const guideIntro = conversionOnly ? "Request conversion of eligible tokens you own into company shares, then track review, escrow and completion." : guide.intro;
+  const conversionSteps = [
+    { title: "Verify your identity", body: "Complete KYC and wait for approval before requesting conversion." },
+    { title: "Choose eligible holdings", body: "Review the issuance terms and select tokens you own that support conversion." },
+    { title: "Submit and track the request", body: "Follow the request instructions, escrow deposit and review status. Respond if further documents are requested." },
+    { title: "Completion or return", body: "The operator records the completed conversion into company shares. Cancelled requests follow the available token return process." },
+  ];
   const sourceSteps = solution.howItWorks.map(({ step, note }) => ({
     title: step,
     body: note,
@@ -398,8 +415,8 @@ export default async function SolutionPage({
     <>
       <PageHeader
         eyebrow={`${solution.eyebrow} / Platform guide`}
-        title={solution.name}
-        lede={guide.intro}
+        title={guideTitle}
+        lede={guideIntro}
       >
         <ButtonRow>
           {app && <Button href={app.href}>{app.label}</Button>}
@@ -409,7 +426,7 @@ export default async function SolutionPage({
 
       <Section id="workflow">
         <H2>{isVesting ? "Vesting series workflow" : "Workflow"}</H2>
-        <Steps className="mt-6" items={guide.steps ?? sourceSteps} />
+        <Steps className="mt-6" items={conversionOnly ? conversionSteps : guide.steps ?? sourceSteps} />
       </Section>
 
       {isVesting ? (
@@ -428,7 +445,7 @@ export default async function SolutionPage({
         <H2 className="mb-6">Details to check</H2>
         <Grid cols={2}>
           {details.map((detail) => (
-            <Card key={detail.title} title={detail.title} body={detail.body} />
+            <Card key={detail.title} title={detail.title} body={conversionOnly && detail.title === "Vault types and states" ? "Conversion requests use escrow to hold the recorded token deposit while the request is processed. Review the current request and vault state before taking an action." : detail.body} />
           ))}
         </Grid>
       </Section>

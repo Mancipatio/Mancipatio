@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { SkeletonTable } from "@/components/skeleton";
 import { Kpi } from "@/components/kpi";
+import { assetClassOffered } from "@/lib/pilot-scope";
 import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer, withClosedOffers } from "@/lib/indexer";
@@ -41,7 +42,8 @@ type Row = {
 
 export function ResellBoard() {
   const sp = useSearchParams();
-  const initialType = sp.get("type") ?? "";
+  const requestedType = sp.get("type") ?? "";
+  const initialType = assetClassOffered(requestedType) ? requestedType : "";
 
   const client = useSolanaClient();
   const conn = useWalletConnection();
@@ -243,7 +245,7 @@ export function ResellBoard() {
             className="ml-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[13px] focus:border-slate-400 focus:outline-none"
           >
             <option value="">All</option>
-            {ASSET_TYPES.map((t) => (
+            {ASSET_TYPES.filter((type) => assetClassOffered(type.slug)).map((t) => (
               <option key={t.slug} value={t.slug}>
                 {t.title}
               </option>

@@ -390,9 +390,9 @@ function PassportCard({
           Not verified yet
         </p>
         <p className="mt-1 text-[13px] text-slate-500">
-          Buying and trading tokens does not require verification. Complete
-          KYC before you convert tokens into company shares, take delivery of
-          a physical good, or buy a KYC-gated class.
+          Buying tokens does not require verification unless the class is KYC-gated.
+          {navHrefVisible("/portfolio/conversion") && " Complete KYC before converting tokens into company shares."}
+          {navHrefVisible("/portfolio/delivery") && " Physical delivery also requires KYC."}
         </p>
         {openRequest ? (
           <>
@@ -528,7 +528,7 @@ function PassportCard({
           <p className="text-[12px] text-slate-500">
             {entry.status === KycStatus.Revoked
               ? "Your verification has been revoked. Contact support or verify again."
-              : "Your verification has expired. Renew it before converting tokens into company shares, taking delivery, or buying KYC-gated classes."}
+              : "Your verification has expired. Renew it before using services that require an approved investor passport."}
             {" "}
             {openRequest ? (
               <>

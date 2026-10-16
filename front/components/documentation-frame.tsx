@@ -3,21 +3,16 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { DOCUMENTATION_GROUPS, documentationTopic } from "@/lib/documentation";
-import { IconFile, IconArrowUpRight } from "@/components/icons";
 import { navHrefVisible } from "@/lib/pilot-scope";
+import { visibleDocumentationGroups, documentationTopic } from "@/lib/documentation";
+import { IconFile, IconArrowUpRight } from "@/components/icons";
 
 export function DocumentationFrame({ children }: { children: ReactNode }) {
   const path = usePathname();
   const router = useRouter();
-  const topic = documentationTopic(path);
-  const currentHref = topic?.href ?? "/docs";
-  // Pilot scope (lib/pilot-scope.ts navHrefVisible, as documentation-index.tsx):
-  // no guide of a switched-off module or of what KYC-only mode pauses, except
-  // the page being read; a group left empty goes.
-  const groups = DOCUMENTATION_GROUPS
-    .map((group) => ({ ...group, topics: group.topics.filter((item) => item.href === currentHref || navHrefVisible(item.href)) }))
-    .filter((group) => group.topics.length > 0);
+  const groups = visibleDocumentationGroups();
+  const topic = groups.flatMap((group) => group.topics).find((item) => item.href === path) ?? documentationTopic(path);
+  const currentHref = topic && navHrefVisible(topic.href) ? topic.href : "/docs";
   return <div className="docs-layout">
     <aside className="docs-navigation">
       <Link href="/docs" className="docs-nav-brand"><span><IconFile size={19} /></span><div><strong>Documentation</strong><small>Guides & reference</small></div></Link>

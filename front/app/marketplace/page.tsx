@@ -15,8 +15,8 @@ import { withoutArchived } from "@/lib/archive-client";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
 import { SkeletonTable } from "@/components/skeleton";
-import { allAssetClassesOffered, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
-import { slugForEnum } from "@/lib/asset-types";
+import { assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
+import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
 import { visibleClassCount } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import {
@@ -29,11 +29,10 @@ import {
   SectionHead,
 } from "@/components/mx";
 
-// Derived from ASSET_TYPE_LABEL so the filter always mirrors the on-chain
-// AssetType enum order and covers all 8 categories.
+// Filter choices describe offered products; existing asset records remain readable.
 const TYPE_FILTER = [
   { v: "all", label: "All types" },
-  ...ASSET_TYPE_LABEL.map((label, i) => ({ v: String(i), label })),
+  ...ASSET_TYPES.filter((type) => assetClassOffered(type.slug)).map((type) => ({ v: String(type.enumValue), label: type.title })),
 ];
 
 export default function MarketplacePage() {
@@ -143,9 +142,7 @@ export default function MarketplacePage() {
       <PageHeader
         eyebrow="Marketplace"
         title="Discover tokenized assets"
-        lede={allAssetClassesOffered()
-          ? "Every asset registered on Manci — equity, debt, revenue share, real estate and more — backed by an on-chain custodial flow and a verified issuer."
-          : "Every asset registered on Manci — backed by an on-chain custodial flow and a verified issuer."}
+        lede={`Browse registered assets and review issuer information and documents${salesOn ? ", and find available primary sales" : ""}${navHrefVisible("/marketplace/otc") ? " and secondary offers" : ""}.`}
       />
 
       {/* Live stats */}

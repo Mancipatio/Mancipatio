@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { usePathname } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
 import { AccountMenu } from "@/components/account-menu";
@@ -31,6 +32,7 @@ function isInstrumentPath(path: string) {
  */
 export function PublicHeader() {
   const path = usePathname();
+  const instruments = MX_INSTRUMENTS.filter((item) => navHrefVisible(item.href));
   const [dropOpen, setDropOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -100,7 +102,7 @@ export function PublicHeader() {
             </button>
             {dropOpen && (
               <div className="mx-drop-menu" id={dropId}>
-                {MX_INSTRUMENTS.map((item) => (
+                {instruments.map((item) => (
                   <Link
                     key={item.href}
                     href={item.href}
@@ -115,7 +117,7 @@ export function PublicHeader() {
                   className="mx-drop-all"
                   onClick={() => setDropOpen(false)}
                 >
-                  Compare all eight →
+                  View asset types →
                 </Link>
               </div>
             )}

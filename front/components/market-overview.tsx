@@ -152,7 +152,7 @@ export function MarketOverview() {
     { label: "Funded OTC offers", value: counts?.fundedOffers, detail: "Escrow funded · not expired", icon: IconRepeat, href: "/marketplace/otc" },
     { label: "Verified issuers", value: counts?.verifiedIssuers, detail: counts ? `Of ${counts.issuers} registered issuers` : "Issuer verification status", icon: IconShield, href: "/marketplace" },
   ].filter(({ href }) => navHrefVisible(href));
-  const journeyItems = [{ href: "/portfolio/rights", icon: IconCoins, title: "Income & rights", text: "Review distributions and claim rights attached to your holdings." }, { href: "/portfolio/delivery", icon: IconBox, title: "Redeem & receive", text: "Request physical delivery and follow its escrow status." }, { href: "/portfolio/governance", icon: IconGavel, title: "Have your say", text: "Review proposals and exercise your voting rights." }].filter(({ href }) => navHrefVisible(href));
+  const journeyItems = [{ href: "/portfolio/conversion", icon: IconRepeat, title: "Convert tokens into shares", text: "Request conversion of eligible tokens you own after identity verification." }, { href: "/portfolio/rights", icon: IconCoins, title: "Income & rights", text: "Review distributions and claim rights attached to your holdings." }, { href: "/portfolio/delivery", icon: IconBox, title: "Redeem & receive", text: "Request physical delivery and follow its escrow status." }, { href: "/portfolio/governance", icon: IconGavel, title: "Have your say", text: "Review proposals and exercise your voting rights." }].filter(({ href }) => navHrefVisible(href));
   const filtered = category !== "all" || market !== "all" || !!query;
   return (
     <div className="overview">

@@ -102,10 +102,9 @@ export default function AboutPage() {
 
         <H2 className="mt-10">The mission</H2>
         <Body className="mt-4">
-          Bring the whole lifecycle of asset ownership on-chain — not just the
-          easy last mile. Issuance, compliance, custody, primary and secondary
-          markets, governance and vesting, on one platform, enforced by code
-          rather than entrusted to an operator.
+          Bring asset issuance, verification, document review and ownership
+          records into one workspace. Each available service follows the
+          approved terms of the issuance.
         </Body>
 
         <H2 className="mt-10">Why the structure comes first</H2>
