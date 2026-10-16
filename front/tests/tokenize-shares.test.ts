@@ -1464,4 +1464,29 @@ describe("surfaces", () => {
     expect(flow).toContain("waitForFinalizedAsset(");
     expect(flow).toContain("pickTokenizeAssetId(");
   });
+
+  it("the Create-asset modal ('Other asset types') signs, waits for finality, then posts the profile — never right after the send", () => {
+    // Review: upsertAssetProfile ran as soon as tx.send returned (submission),
+    // while /api/profiles/upsert reads the asset at `finalized` → "Profile
+    // access denied", and the typed name, summary and facts were lost.
+    const m = src("components/asset-create-modal.tsx");
+    const send = m.indexOf("await tx.send(");
+    const sign = m.indexOf("createSignedRequest(");
+    const wait = m.indexOf("waitForFinalizedAsset(");
+    const post = m.indexOf("postSignedRequest(");
+    expect(sign).toBeGreaterThan(-1);
+    expect(sign).toBeLessThan(wait);
+    expect(wait).toBeLessThan(post);
+    // saveProfile is defined above create(); create() calls it after the send.
+    expect(m.indexOf("await saveProfile(assetPda, row,")).toBeGreaterThan(send);
+    expect(m).not.toContain("upsertAssetProfile(");
+    expect(m).not.toContain("admin console");
+    expect(m).toMatch(/const busy = tx\.isSending \|\| working !== null/);
+    // A refused or failed save keeps the modal open with the typed values and offers the save alone.
+    expect(m).toContain("setPendingProfile({ assetPda, row })");
+    expect(m).toContain('<fieldset disabled={pendingProfile !== null}');
+    expect(m).toContain('{pendingProfile ? "Save profile" : "Create asset"}');
+    expect(m).toContain("Waiting for the network to finalize the asset");
+    for (const variant of ["issuer", "admin"]) expect(m).toMatch(new RegExp(`${variant}:\\s*\\n?\\s*"The asset exists on chain\\.`));
+  });
 });
