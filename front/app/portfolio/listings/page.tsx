@@ -234,7 +234,7 @@ export default function SellListingsPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
             <table className="w-full text-sm">
               <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                 <tr>
@@ -243,7 +243,6 @@ export default function SellListingsPage() {
                   <th className="px-4 py-3 text-right font-medium">Ask</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Posted</th>
-                  <th className="px-4 py-3 text-right font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -263,6 +262,47 @@ export default function SellListingsPage() {
                           {l.linked_offer_pda.slice(-4)}
                         </p>
                       )}
+                      {/* Actions sit under the asset, not in a trailing column, so a
+                          holder on a phone reaches them without horizontal scrolling. */}
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
+                        {l.status === "active" && (
+                          <>
+                            {tradingOn && (
+                              <Link
+                                href="/portfolio/offers"
+                                className="font-medium text-brand-700 hover:underline"
+                                title="Settlement goes through the on-chain OTC escrow — create the offer, then share its address with your buyer."
+                              >
+                                Create on-chain offer
+                              </Link>
+                            )}
+                            {tradingOn && l.share_class_pda && (
+                              <button
+                                type="button"
+                                onClick={() => setEscrowTarget(l)}
+                                title="Found an interested buyer? Ask the platform to open the OTC escrow contract for this listing."
+                                className="text-brand-700 underline-offset-2 hover:underline"
+                              >
+                                Request escrow
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setMatchTarget(l)}
+                              className="text-slate-600 underline-offset-2 hover:underline"
+                            >
+                              Mark matched
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setWithdrawTarget(l)}
+                              className="text-red-600 underline-offset-2 hover:underline"
+                            >
+                              Withdraw
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums">
                       {String(l.amount)}
@@ -281,47 +321,6 @@ export default function SellListingsPage() {
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
                       {new Date(l.created_at).toISOString().slice(0, 10)}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {l.status === "active" ? (
-                        <div className="flex flex-wrap justify-end gap-2 text-[12px]">
-                          {tradingOn && (
-                            <Link
-                              href="/portfolio/offers"
-                              className="font-medium text-brand-700 hover:underline"
-                              title="Settlement goes through the on-chain OTC escrow — create the offer, then share its address with your buyer."
-                            >
-                              Create on-chain offer
-                            </Link>
-                          )}
-                          {tradingOn && l.share_class_pda && (
-                            <button
-                              type="button"
-                              onClick={() => setEscrowTarget(l)}
-                              title="Found an interested buyer? Ask the platform to open the OTC escrow contract for this listing."
-                              className="text-brand-700 underline-offset-2 hover:underline"
-                            >
-                              Request escrow
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => setMatchTarget(l)}
-                            className="text-slate-600 underline-offset-2 hover:underline"
-                          >
-                            Mark matched
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setWithdrawTarget(l)}
-                            className="text-red-600 underline-offset-2 hover:underline"
-                          >
-                            Withdraw
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-slate-400">—</span>
-                      )}
                     </td>
                   </tr>
                 ))}
