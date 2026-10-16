@@ -87,6 +87,7 @@ export function IssuerVerificationSummary({ workflow }: { workflow: WorkflowData
 
 export function IssuerReviewDetails({ workflow }: { workflow: WorkflowData }) {
   const verification = workflow.verification;
+  const state = issuerWorkflowState(verification, workflow.me?.kybStatus ?? null);
   return <>
     <IssuerVerificationSummary workflow={workflow} />
     {verification && <div className={styles.details}>
@@ -105,7 +106,7 @@ export function IssuerReviewDetails({ workflow }: { workflow: WorkflowData }) {
         : workflow.me ? `The connected issuer wallet is registered. Company approval: ${["Pending", "Verified", "Rejected", "Suspended"][workflow.me.kybStatus] ?? "Unknown"}.`
         : "Issuer registration is separate from your account verification. An approved application leads to issuer and token setup; connecting a wallet does not create or approve an issuer."}</p>
       <div className={styles.actions}>
-        <Link href="/apply" className={`${styles.button} ${styles.secondary}`}>Application status</Link>
+        {state.approved && <Link href="/apply" className={`${styles.button} ${styles.secondary}`}>Application status</Link>}
         {workflow.failed && <button type="button" onClick={() => void workflow.refresh()} className={`${styles.button} ${styles.secondary}`}>Retry issuer status</button>}
         <button type="button" onClick={() => { workflow.refreshVerification(); void workflow.refresh(); }} className={`${styles.button} ${styles.secondary}`}>Refresh status</button>
       </div>
