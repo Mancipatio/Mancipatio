@@ -1431,14 +1431,28 @@ describe("surfaces", () => {
     expect(src("components/treasury-mint-panel.tsx")).toContain("reasonMinLength={TREASURY_MINT_REASON_MIN}");
   });
 
-  it("issuer entry points lead to the one-screen flow; the generic modal stays as 'Other asset types'", () => {
+  it("issuer workflow keeps approved applications and token setup connected to the one-screen flow", () => {
     const home = src("app/issuer/page.tsx");
-    expect(home).toContain('href="/issuer/assets/tokenize"');
-    expect(home).toContain("Tokenize company shares");
-    expect(home).toContain("Other asset types");
+    expect(home).toContain("<IssuerWorkflow workflow={workflow}");
+    expect(home).toContain("<IssuerCompanyTools");
+    expect(home).not.toContain("Other asset types");
+    const workflow = src("app/issuer/issuer-workflow.tsx");
+    expect(workflow).toContain('href: "/issuer/request"');
+    expect(workflow).toContain('href="/issuer/assets/tokenize"');
+    const request = src("app/issuer/request/request-content.tsx");
+    expect(src("app/issuer/request/page.tsx")).toContain("<IssuerRequestContent workflow={workflow}");
+    expect(request).toContain('{state.approved ? <Link href="/apply"');
+    expect(request).toContain("{state.canManageIssuer && <section");
+    const issuerActions = request.slice(request.indexOf("{state.canManageIssuer && <section"));
+    expect(issuerActions).toContain('href="/issuer/assets/tokenize"');
     const assets = src("app/issuer/assets/page.tsx");
     expect(assets).toContain('href="/issuer/assets/tokenize"');
     expect(assets).toContain("<AssetCreateModal");
+    // Broader asset creation remains implemented but is not advertised when
+    // this deployment offers only Equity.
+    expect(assets).toContain('OFFERED_CLASSES.some((category) => category !== "equity")');
+    expect(assets).toContain("{SHOW_OTHER_ASSET_TYPES && <button");
+    expect(assets).toContain("Other asset types");
     expect(src("app/issuer/assets/tokenize/page.tsx")).toContain("<TokenizeSharesFlow");
   });
 
