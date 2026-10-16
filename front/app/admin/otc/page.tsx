@@ -12,7 +12,7 @@ import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   findAssetPda,
   findDealPda,
@@ -21,6 +21,7 @@ import {
   OtcDealStatus,
   type Asset,
   type Offer,
+  type OtcDeal,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { Kpi } from "@/components/kpi";
@@ -44,7 +45,12 @@ import {
 import { checkReceiverEligibility } from "@/lib/passport";
 import { detectNetwork } from "@/lib/network";
 import { formatPaymentForDisplay } from "@/lib/payment-price";
-import { createOtcDealInstruction, newDealId, resolveDealExpiry } from "@/lib/otc-deal";
+import {
+  createOtcDealInstruction,
+  newDealId,
+  resolveDealExpiry,
+  type OtcDealRequestFields,
+} from "@/lib/otc-deal";
 import { dealExpiryError } from "@/lib/deadline-bounds";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
@@ -465,6 +471,56 @@ function shortAddr(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+// Pure helpers of the escrow admin, module-private because a page module
+// exports only its page (their natural home is a sibling such as
+// ./unsynced-deals.ts). Exercised as source in
+// tests/otc-mobile-state-page-helpers.test.ts.
+
+/**
+ * Whether an on-chain deal carries exactly a request's terms: share class,
+ * mint, parties, amount, price and payment mint — the server's rule
+ * (otcDealMismatch, lib/server/otc-deal-check.ts) on the client, used right
+ * before signing so the same request is never escrowed twice.
+ */
+function dealMatchesRequest(
+  deal: Pick<OtcDeal, "shareClass" | "mint" | "seller" | "buyer" | "amount" | "price" | "paymentMint">,
+  req: OtcDealRequestFields,
+): boolean {
+  return (
+    deal.shareClass.toString() === req.share_class_pda &&
+    deal.mint.toString() === req.mint &&
+    deal.seller.toString() === req.seller_wallet &&
+    deal.buyer.toString() === req.buyer_wallet &&
+    deal.amount === BigInt(Math.trunc(req.amount)) &&
+    deal.price === BigInt(Math.trunc(req.price)) &&
+    deal.paymentMint.toString() === req.payment_mint
+  );
+}
+
+type CancelBookkeeping = "flipped" | "no-request" | "failed";
+
+/**
+ * After an admin cancel landed on-chain: flip the `created` request row that
+ * records this deal to `cancelled`, best effort. Never throws — the deal is
+ * cancelled and both legs refunded whatever happens here; the caller reports
+ * "failed" separately from the cancel itself (which succeeded).
+ */
+async function flipCancelledDealRequest(
+  dealPda: string,
+  io: {
+    listCreated: () => Promise<Pick<OtcRequest, "id" | "deal_pda">[]>;
+    update: (requestId: string) => Promise<boolean>;
+  },
+): Promise<CancelBookkeeping> {
+  try {
+    const match = (await io.listCreated()).find((r) => r.deal_pda === dealPda);
+    if (!match) return "no-request";
+    return (await io.update(match.id)) ? "flipped" : "failed";
+  } catch {
+    return "failed";
+  }
+}
+
 // Escrows opened on-chain whose request flip did not land (./unsynced-
 // deals.ts: keyed by request id, dropped when stale). Per network, and kept
 // in localStorage so a reload does not offer "Create contract" again for a
@@ -533,6 +589,12 @@ function OtcEscrowAdmin() {
   );
   const [rejectReq, setRejectReq] = useState<OtcRequest | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [declining, setDeclining] = useState(false);
+  // One "Create contract" at a time (the custody lock-ref + busy pattern):
+  // the ref refuses a second call synchronously, the state disables the
+  // buttons and labels the row being created.
+  const createLock = useRef(false);
+  const [creatingId, setCreatingId] = useState<string | null>(null);
   const unsyncedSnapshot = useSyncExternalStore(
     subscribeUnsyncedDeals,
     readUnsyncedDealsSnapshot,
@@ -618,7 +680,14 @@ function OtcEscrowAdmin() {
    * base units (share units / payment-token units — see lib/otc.ts).
    */
   async function createContract(req: OtcRequest) {
-    if (!wallet || !conn.wallet) return;
+    // One escrow per request, one at a time: the lock is taken before the
+    // first await (a second click during the mint, screening and eligibility
+    // reads must not open a SECOND deal) and held through the finality wait,
+    // the flip and the refresh, so the row never offers "Create contract"
+    // again before it leaves the queue.
+    if (createLock.current || !wallet || !conn.wallet) return;
+    createLock.current = true;
+    setCreatingId(req.id);
     let pendingId = toast.showPending(
       `Creating escrow for ${req.asset_label || "share class"}…`,
     );
@@ -626,6 +695,14 @@ function OtcEscrowAdmin() {
       const rpc = client.runtime.rpc;
       const signer = walletSigner(conn.wallet);
       const dealId = newDealId();
+      if (pendingFlip(req)) {
+        toast.dismiss(pendingId);
+        toast.showError(
+          "This request already has an on-chain deal",
+          'Use "Retry flip" on this request; do not create another contract.',
+        );
+        return;
+      }
       // Entry path: the payment mint must pass the plain-payment rule (and,
       // on mainnet, the allowlist) before an escrow names it. Throws with the
       // reason (missing mint, hook, not allowed…); nothing is opened.
@@ -683,6 +760,45 @@ function OtcEscrowAdmin() {
       if (expiryError) {
         toast.dismiss(pendingId);
         toast.showError("Cannot open this deal", expiryError);
+        return;
+      }
+      // Right before signing, fresh reads (not the queue as rendered): the
+      // request must still be waiting without a deal — another admin may have
+      // decided it — and no Open deal with exactly its terms may exist
+      // on-chain unrecorded on any request — another admin may have opened
+      // it and not flipped the row yet. The scan is the finalized one the
+      // deals table is built from.
+      const [waiting, created] = await Promise.all([
+        listOtcRequests(conn.wallet, "requested"),
+        listOtcRequests(conn.wallet, "created"),
+      ]);
+      const fresh = waiting.find((r) => r.id === req.id);
+      if (!fresh || fresh.deal_pda) {
+        toast.dismiss(pendingId);
+        toast.showError(
+          "This request is no longer waiting",
+          fresh
+            ? "It already records an on-chain deal. Reload the queue; do not create another contract."
+            : "It was created, declined or expired in the meantime. Reload the queue; no escrow was opened here.",
+        );
+        await refresh();
+        return;
+      }
+      const recorded = new Set(
+        created.map((r) => r.deal_pda).filter((p): p is string => !!p),
+      );
+      const unrecorded = (await loadOtcDeals(rpc)).find(
+        (d) =>
+          d.deal.status === OtcDealStatus.Open &&
+          !recorded.has(d.pda.toString()) &&
+          dealMatchesRequest(d.deal, req),
+      );
+      if (unrecorded) {
+        toast.dismiss(pendingId);
+        toast.showError(
+          "This request already has an on-chain deal",
+          `Deal ${shortAddr(unrecorded.pda.toString())} is Open with exactly these terms and is not recorded on any request: it was opened from another session. Retry its flip from that session, or cancel it below; do not create another contract.`,
+        );
         return;
       }
       // The shared builder (lib/otc-deal.ts): the simulator's owner actor
@@ -744,11 +860,15 @@ function OtcEscrowAdmin() {
       });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Escrow deal created" });
-      void refresh();
+      // Awaited: the row leaves the queue before the lock is released.
+      await refresh();
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to create deal", explainSendError(err));
       console.error("[create_otc_deal]", err);
+    } finally {
+      createLock.current = false;
+      setCreatingId(null);
     }
   }
 
@@ -797,33 +917,41 @@ function OtcEscrowAdmin() {
 
   /**
    * Decline a pending request without creating an on-chain deal (off-chain
-   * only). Flips the request row to 'cancelled' with the operator's reason and
-   * notifies the parties (server-side). Clears it from the pending queue.
+   * only). Flips the request row to 'cancelled' with the operator's reason;
+   * the server sends both parties a generic decline notice (an email when one
+   * is on file, plus the in-app row) that never carries the reason, and the
+   * party view (/portfolio/deals) lists the request as declined. Clears it
+   * from the pending queue.
    */
   async function rejectRequest(req: OtcRequest, reason: string) {
     if (!wallet || !conn.wallet) return;
+    setDeclining(true);
     const pendingId = toast.showPending("Declining OTC request…", reason);
-    const ok = await adminUpdateOtcRequest(conn.wallet, req.id, {
-      status: "cancelled",
-      admin_note: reason || null,
-      decide: true,
-    });
-    toast.dismiss(pendingId);
-    if (!ok) {
-      toast.showError("Decline failed", "Could not update the request.");
-      return;
+    try {
+      const ok = await adminUpdateOtcRequest(conn.wallet, req.id, {
+        status: "cancelled",
+        admin_note: reason || null,
+        decide: true,
+      });
+      toast.dismiss(pendingId);
+      if (!ok) {
+        toast.showError("Decline failed", "Could not update the request.");
+        return;
+      }
+      toast.show({ kind: "success", title: "Request declined" });
+      void recordAudit({
+        ix_name: "otc_request_reject",
+        category: "otc",
+        actor_wallet: wallet.toString(),
+        reason: reason || "Declined",
+        target_label: req.asset_label || req.mint.slice(0, 8),
+        metadata: { request_id: req.id },
+      });
+      setRejectReq(null);
+      void refresh();
+    } finally {
+      setDeclining(false);
     }
-    toast.show({ kind: "success", title: "Request declined" });
-    void recordAudit({
-      ix_name: "otc_request_reject",
-      category: "otc",
-      actor_wallet: wallet.toString(),
-      reason: reason || "Declined",
-      target_label: req.asset_label || req.mint.slice(0, 8),
-      metadata: { request_id: req.id },
-    });
-    setRejectReq(null);
-    void refresh();
   }
 
   /**
@@ -839,6 +967,10 @@ function OtcEscrowAdmin() {
       `Cancelling deal #${String(deal.dealId)}…`,
       reason,
     );
+    // Only the instruction build and the send can fail the cancel; the
+    // bookkeeping after the send reports separately, so a successful cancel
+    // is never shown as "Failed to cancel deal".
+    let sig: string;
     try {
       const rpc = client.runtime.rpc;
       const signer = walletSigner(conn.wallet);
@@ -894,39 +1026,53 @@ function OtcEscrowAdmin() {
           })),
         ],
       };
-      const sig = await tx.send({
+      sig = await tx.send({
         instructions: [createSellerShareAtaIx, createBuyerPaymentAtaIx, cancelIx],
         feePayer: signer,
       });
-      // Best-effort: flip the matching request row, if one exists.
-      const all = await listOtcRequests(conn.wallet);
-      const match = all.find(
-        (r) => r.deal_pda === pda.toString() && r.status === "created",
-      );
-      if (match) {
-        await adminUpdateOtcRequest(conn.wallet, match.id, {
-          status: "cancelled",
-          decide: true,
-        });
-      }
-      void recordAudit({
-        ix_name: "cancel_otc_deal",
-        category: "otc",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: `deal #${String(deal.dealId)}`,
-        tx_signature: sig,
-        metadata: { deal_pda: pda.toString(), deal_id: String(deal.dealId) },
-      });
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Deal cancelled & refunded" });
-      setConfirmCancel(null);
-      void refresh();
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to cancel deal", explainSendError(err));
       console.error("[cancel_otc_deal]", err);
+      return;
     }
+    // The deal is cancelled and both legs refunded from here on, whatever the
+    // bookkeeping below does: close the dialog before any other await (a
+    // second click would re-send), record the audit, tell the admin.
+    setConfirmCancel(null);
+    void recordAudit({
+      ix_name: "cancel_otc_deal",
+      category: "otc",
+      actor_wallet: wallet.toString(),
+      reason,
+      target_label: `deal #${String(deal.dealId)}`,
+      tx_signature: sig,
+      metadata: { deal_pda: pda.toString(), deal_id: String(deal.dealId) },
+    });
+    toast.dismiss(pendingId);
+    toast.showTx(sig, { title: "Deal cancelled & refunded" });
+    // Best effort: the request row that records this deal says "created"
+    // until it is flipped (the status filter keeps the read to one page);
+    // the reason is kept on the row (admin_note, capped by the route).
+    const bookkeeping = await flipCancelledDealRequest(pda.toString(), {
+      listCreated: () => listOtcRequests(conn.wallet, "created"),
+      update: (requestId) =>
+        adminUpdateOtcRequest(conn.wallet, requestId, {
+          status: "cancelled",
+          admin_note: reason.slice(0, 2000) || null,
+          decide: true,
+        }),
+    });
+    if (bookkeeping === "failed") {
+      toast.show({
+        kind: "error",
+        title: "Deal cancelled, but its request wasn't updated",
+        description: `Deal #${String(deal.dealId)} is cancelled on-chain and the deposits were refunded; only its OTC request row still says "created". Do not cancel again — the row is closed when the deal's admin archives it (Close & reclaim).`,
+        signature: sig,
+        duration: 0,
+      });
+    }
+    void refresh();
   }
 
   /**
@@ -1057,7 +1203,7 @@ function OtcEscrowAdmin() {
                         {pendingFlip(r) ? (
                           <button
                             type="button"
-                            disabled={retrying === r.id || !wallet}
+                            disabled={retrying === r.id || creatingId === r.id || !wallet}
                             onClick={() => void retryFlip(r)}
                             title={`The deal ${pendingFlip(r)!.dealPda} is already on-chain; this resends the request's flip to created.`}
                             className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
@@ -1067,11 +1213,11 @@ function OtcEscrowAdmin() {
                         ) : (
                           <button
                             type="button"
-                            disabled={tx.isSending || !wallet}
+                            disabled={creatingId !== null || tx.isSending || !wallet}
                             onClick={() => void createContract(r)}
                             className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
                           >
-                            Create contract
+                            {creatingId === r.id ? "Creating…" : "Create contract"}
                           </button>
                         )}
                         <button
@@ -1079,7 +1225,7 @@ function OtcEscrowAdmin() {
                           // Declining a request whose escrow is already
                           // on-chain would leave that deal unexplained:
                           // cancel the deal below first, or retry the flip.
-                          disabled={tx.isSending || !wallet || pendingFlip(r) !== null}
+                          disabled={tx.isSending || !wallet || creatingId === r.id || pendingFlip(r) !== null}
                           onClick={() => setRejectReq(r)}
                           className="rounded-md border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                         >
@@ -1273,10 +1419,14 @@ function OtcEscrowAdmin() {
           confirmLabel="Decline request"
           description={
             <p>
-              Declines the request without creating an on-chain deal. The
-              parties are notified and the request leaves the pending queue.
+              Declines the request without creating an on-chain deal. Both
+              parties get a short decline notice by email when one is on file,
+              and see the request as declined in Portfolio → Deals. Your reason
+              stays on the request row and in the audit log; it is not shown
+              to them.
             </p>
           }
+          busy={declining}
         />
       )}
     </div>

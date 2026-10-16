@@ -2,11 +2,15 @@
 // (created / cancelled / completed / expired) and records the on-chain deal
 // coordinates. Signed (SIWS) + on-chain admin gate.
 //
-// Deal-created hook (item 6): when the status transitions TO 'created' (the
-// admin just opened the on-chain escrow), both parties are notified — an
-// email IF a clients row with an email is known for their wallet (silently
-// skipped otherwise), and ALWAYS a notifications row per wallet as the
-// in-app trace. Notification failures never fail the route.
+// Party notifications (item 6), best effort, never failing the route: when
+// the status transitions TO 'created' (the admin just opened the on-chain
+// escrow) both parties get the deal notice; when a waiting request is
+// declined (requested → cancelled) both get a generic decline notice that
+// never carries the admin's reason (admin_note). Nothing is sent when a
+// created request is cancelled (the deal cancel) or on a repeat. Each notice
+// is an email IF a clients row with an email is known for the wallet
+// (silently skipped otherwise), and ALWAYS a notifications row per wallet as
+// the in-app trace.
 //
 // Archive (2D): `{ archive: true, deal_pda }` stores a terminal deal's bytes
 // in indexer_closed_rows before the admin reclaims its rent.
@@ -161,6 +165,11 @@ export async function POST(request: Request) {
         }
         throw new SiwsError(409, "This OTC request already has an on-chain deal");
       }
+      // Whatever its status, a request that records a deal never gets a
+      // second one: one escrow per request.
+      if (row.deal_pda && patch.deal_pda !== row.deal_pda) {
+        throw new SiwsError(409, "This OTC request already has an on-chain deal");
+      }
       if (typeof patch.deal_pda !== "string") {
         throw new SiwsError(400, "deal_pda is required to mark a request created");
       }
@@ -189,7 +198,7 @@ export async function POST(request: Request) {
       throw new SiwsError(409, "The OTC request changed while updating — reload and retry");
     }
 
-    // Deal-created notification hook — best-effort, never fails the route.
+    // Party notifications — best-effort, never fail the route.
     let notified = false;
     if (patch.status === "created" && row.status !== "created") {
       try {
@@ -202,6 +211,15 @@ export async function POST(request: Request) {
         notified = true;
       } catch (err) {
         console.warn("[api/otc/admin-update] notify failed:", err);
+      }
+    } else if (patch.status === "cancelled" && row.status === "requested") {
+      // A decline. Not on created → cancelled (the deal cancel: the parties
+      // see the deal Cancelled and refunded) and not on a repeat.
+      try {
+        await notifyRequestDeclined(sb, row, wallet);
+        notified = true;
+      } catch (err) {
+        console.warn("[api/otc/admin-update] decline notice failed:", err);
       }
     }
 
@@ -217,19 +235,60 @@ async function notifyDealCreated(
   dealPda: string | null,
   adminWallet: string,
 ): Promise<void> {
-  const label =
-    row.asset_label || `${row.mint.slice(0, 6)}…${row.mint.slice(-4)}`;
   const subject = "Your OTC escrow deal is ready";
-  // The price in the payment token's own units ("12.5 USDC", lansiranje-16),
-  // never raw base units ("12500000 payment units" read as 12.5 million).
-  const price = formatPaymentForDisplay(BigInt(row.price), row.payment_mint, detectNetwork());
   const body =
-    `The escrow contract for ${label} (${row.amount} ${row.amount === 1 ? "unit" : "units"} for ${price} in total) ` +
+    `The escrow contract for ${labelOf(row)} (${termsOf(row)}) ` +
     `is live on-chain` +
     (dealPda ? ` at ${dealPda}` : "") +
     `. Open Portfolio → Deals on Manci to deposit your leg — the swap ` +
     `settles automatically once both legs are funded.`;
+  await notifyParties(sb, row, subject, body, adminWallet);
+}
 
+/**
+ * Decline notice (requested → cancelled), generic on purpose: the admin's
+ * reason (admin_note) is never sent, and the party view (/portfolio/deals)
+ * lists the request as declined by the platform.
+ */
+async function notifyRequestDeclined(
+  sb: SupabaseClient,
+  row: OtcRow,
+  adminWallet: string,
+): Promise<void> {
+  const subject = "Your OTC escrow request was declined";
+  const body =
+    `The platform declined the OTC escrow request for ${labelOf(row)} (${termsOf(row)}). ` +
+    `No escrow was opened and nothing was deposited. ` +
+    `Open Portfolio → Deals on Manci to see it.`;
+  await notifyParties(sb, row, subject, body, adminWallet);
+}
+
+function labelOf(row: OtcRow): string {
+  return row.asset_label || `${row.mint.slice(0, 6)}…${row.mint.slice(-4)}`;
+}
+
+/**
+ * "10 units for 25 USDC in total": the price in the payment token's own
+ * units ("12.5 USDC", lansiranje-16), never raw base units ("12500000
+ * payment units" read as 12.5 million).
+ */
+function termsOf(row: OtcRow): string {
+  const price = formatPaymentForDisplay(BigInt(row.price), row.payment_mint, detectNetwork());
+  return `${row.amount} ${row.amount === 1 ? "unit" : "units"} for ${price} in total`;
+}
+
+/**
+ * Each party: an email IF a clients row with an email is known for the
+ * wallet (skipped silently otherwise, per spec), and ALWAYS the in-app
+ * notifications trace row.
+ */
+async function notifyParties(
+  sb: SupabaseClient,
+  row: OtcRow,
+  subject: string,
+  body: string,
+  adminWallet: string,
+): Promise<void> {
   for (const partyWallet of [row.seller_wallet, row.buyer_wallet]) {
     // Email if a client with an email is known for this wallet; skip silently
     // otherwise (per spec).
