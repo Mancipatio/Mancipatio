@@ -46,7 +46,7 @@ import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { kycOnly, moduleEnabled } from "@/lib/features";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
-import { loadHoldings } from "@/lib/holdings";
+import { latestConversionRead, loadConversionBalances, validConversionAmount } from "@/lib/conversion-holder";
 import {
   cancelConversionRequest,
   createConversionRequest,
@@ -115,11 +115,37 @@ type ConvertibleHolding = {
 
 export default function ConversionPage() {
   const conn = useWalletConnection();
+  const wallet = conn.wallet?.account.address;
+  if (!conn.isReady || !wallet) {
+    return <main className="min-w-0 flex-1"><WalletRequired /></main>;
+  }
+  // Private requests, verification, balances and open forms belong to this
+  // wallet/network. A switch mounts a fresh workspace before any new read.
+  return <ConversionWorkspace key={`${detectNetwork()}:${wallet}`} />;
+}
+
+function ConversionWorkspace() {
+  const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
   const network = detectNetwork();
+  const mounted = useRef(false);
+  const [requestsRead] = useState(latestConversionRead);
+  const [holdingsRead] = useState(latestConversionRead);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestsRead.invalidate();
+      holdingsRead.invalidate();
+    };
+  }, [requestsRead, holdingsRead]);
+  const isCurrent = useCallback(() => {
+    const current = client.store.getState().wallet;
+    return mounted.current && detectNetwork() === network && current.status === "connected" && current.session === conn.wallet;
+  }, [client, conn.wallet, network]);
   const nowSec = useChainClock();
   const recovery = useChainRecordRecovery(
     "conversion",
@@ -136,7 +162,7 @@ export default function ConversionPage() {
   const depositBusy = useRef(false);
   const [depositActionBusy, setDepositActionBusy] = useState(false);
   const [data, setData] = useState<NetworkData | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const [requests, setRequests] = useState<ConversionRequest[]>([]);
   const [requestsLoaded, setRequestsLoaded] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -203,28 +229,39 @@ export default function ConversionPage() {
   // Signed list — separate from the chain refresh so a data reload never
   // silently re-prompts for a signature; call sites decide when to re-list.
   const loadRequests = useCallback(async () => {
-    if (!conn.wallet) return;
+    if (!conn.wallet || !isCurrent()) return;
+    const current = requestsRead.begin(isCurrent);
+    setRequestsLoaded(false);
+    setKycStatus(undefined);
+    setListError(null);
     try {
       const { requests: rows, kycStatus: ks } = await listMyConversionRequests(
         conn.wallet,
       );
-      setRequests(rows);
+      if (!current()) return;
+      setRequests(rows.filter((row) => row.holder_wallet === wallet?.toString() && row.network === network));
       setKycStatus(ks);
       setRequestsLoaded(true);
       setListError(null);
     } catch (err) {
+      if (!current()) return;
+      setRequests([]);
       setListError(
         err instanceof Error ? err.message : "Could not load your requests",
       );
     }
-  }, [conn.wallet]);
+  }, [conn.wallet, isCurrent, requestsRead, wallet, network]);
 
   const refresh = useCallback(async () => {
+    if (!wallet || !isCurrent()) return;
+    const current = holdingsRead.begin(isCurrent);
+    setData(null);
+    setConvertible([]);
+    setFailed(null);
     try {
       const network = await loadNetworkPreferIndexer(() =>
         loadNetwork(client.runtime.rpc),
       );
-      setData(network);
 
       // Resolve asset PDA → Asset.
       const am = new Map<string, Asset>();
@@ -237,8 +274,7 @@ export default function ConversionPage() {
       }
 
       if (wallet) {
-        const holdings = await loadHoldings(client.runtime.rpc, wallet);
-        const balanceByMint = new Map(holdings.map((h) => [h.mint, h.balance]));
+        const balanceByMint = await loadConversionBalances(client.runtime.rpc, wallet);
 
         // Share classes the wallet holds that have an on-chain conversion
         // target (`convertible_to`, set jointly by platform + issuer).
@@ -247,7 +283,7 @@ export default function ConversionPage() {
           if (!sc.mintInitialized) continue;
           if (sc.convertibleTo.__option === "None") continue;
           const balance = balanceByMint.get(sc.mint.toString());
-          if (balance === undefined) continue;
+          if (balance === undefined || balance <= BigInt(0)) continue;
           const asset = am.get(sc.asset.toString());
           if (!asset) continue;
           const assetPda = sc.asset.toString();
@@ -260,12 +296,14 @@ export default function ConversionPage() {
             balance,
           });
         }
+        if (!current()) return;
         setConvertible(refs);
+        setData(network);
       }
     } catch {
-      setFailed(true);
+      if (current()) setFailed("Could not verify your token holdings. Refresh to try again.");
     }
-  }, [client, wallet]);
+  }, [client, wallet, isCurrent, holdingsRead]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -275,7 +313,7 @@ export default function ConversionPage() {
 
   // Only onboarded (KYC-verified) clients may request conversion.
   const eligible = kycStatus === "verified";
-  const canRequest = eligible && convertible.length > 0;
+  const canRequest = requestsLoaded && !listError && data !== null && !failed && eligible && convertible.length > 0;
   // Pilot scope (lib/features.ts): with the module off (and in KYC-only mode)
   // this is a notice page: no new request; cancels, reclaims and recovery
   // stay. A deposit into an approved escrow is refused while KYC-only mode is
@@ -286,6 +324,7 @@ export default function ConversionPage() {
   async function finishDepositRecord(receipt: PendingChainRecord) {
     if (
       !conn.wallet ||
+      !isCurrent() ||
       receipt.wallet !== wallet?.toString() ||
       receipt.network !== network
     ) {
@@ -341,7 +380,7 @@ export default function ConversionPage() {
   }
 
   async function deposit(req: ConversionRequest) {
-    if (!wallet || !conn.wallet || !req.vault_pda || depositBusy.current)
+    if (!wallet || !conn.wallet || !isCurrent() || !req.vault_pda || depositBusy.current)
       return;
     if (req.network !== network || req.holder_wallet !== wallet.toString()) {
       toast.showError(
@@ -451,6 +490,7 @@ export default function ConversionPage() {
       };
       // The returned signature identifies the submitted transaction; the
       // evidence endpoint waits for finalization before advancing the request.
+      if (!isCurrent()) throw new Error("Your connected wallet changed. Reload before continuing.");
       const sig = await tx.send({
         instructions: [depositIx],
         feePayer: signer,
@@ -493,6 +533,7 @@ export default function ConversionPage() {
   async function finishReturnRecord(receipt: PendingChainRecord) {
     if (
       !conn.wallet ||
+      !isCurrent() ||
       receipt.wallet !== wallet?.toString() ||
       receipt.network !== network ||
       receipt.kind !== "conversion_return"
@@ -534,7 +575,7 @@ export default function ConversionPage() {
   // deadline passes, the holder can send `return_custody_vault` themselves —
   // no dependency on the platform — then flip the row to returned.
   async function reclaim(req: ConversionRequest) {
-    if (!wallet || !conn.wallet || !req.vault_pda || returnBusy.current) return;
+    if (!wallet || !conn.wallet || !isCurrent() || !req.vault_pda || returnBusy.current) return;
     const scope = {
       kind: "conversion_return" as const,
       network,
@@ -615,6 +656,7 @@ export default function ConversionPage() {
           })),
         ],
       };
+      if (!isCurrent()) throw new Error("Your connected wallet changed. Reload before continuing.");
       const sig = await tx.send({
         instructions: [createAtaIx, returnIx],
         feePayer: signer,
@@ -655,7 +697,7 @@ export default function ConversionPage() {
   }
 
   async function cancelRequest(req: ConversionRequest) {
-    if (!wallet) return;
+    if (!wallet || !isCurrent() || req.holder_wallet !== wallet.toString() || req.network !== network) return;
     const pendingId = toast.showPending("Cancelling conversion request…");
     const ok = await cancelConversionRequest(conn.wallet, req.id);
     toast.dismiss(pendingId);
@@ -709,7 +751,9 @@ export default function ConversionPage() {
           disabled={!canRequest}
           onClick={() => setShowRequest(true)}
           title={
-            kycStatus !== undefined && !eligible
+            !requestsLoaded || data === null
+              ? "Wait until your verification and token holdings have been checked."
+              : kycStatus !== undefined && !eligible
               ? "Conversion is available to onboarded, KYC-verified clients only."
               : convertible.length === 0
                 ? "You don't hold any convertible tokens."
@@ -744,23 +788,27 @@ export default function ConversionPage() {
 
       {listError && (
         <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          <span>
-            Your requests are private — a wallet signature is needed to load
-            them.
-          </span>
+          <span role="alert">Could not load your private requests or verification status: {listError}</span>
           <button
             type="button"
             onClick={() => void loadRequests()}
             className="shrink-0 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400"
           >
-            Sign to load
+            Retry loading
           </button>
         </div>
       )}
 
-      {failed ? (
-        <p className="mt-8 text-sm text-red-600">Failed to load.</p>
-      ) : data === null || (!requestsLoaded && !listError) ? (
+      {data === null && !failed && <p className="mt-6 text-sm text-slate-500" role="status">Checking your convertible token holdings…</p>}
+
+      {failed && (
+        <div className="mt-8 flex flex-wrap items-center gap-3 text-sm text-red-600" role="alert">
+          <p>{failed}</p>
+          <button type="button" onClick={() => void refresh()} className="underline">Refresh holdings</button>
+        </div>
+      )}
+
+      {!requestsLoaded && !listError ? (
         <div className="mt-8">
           <SkeletonTable rows={3} cols={5} />
         </div>
@@ -770,6 +818,7 @@ export default function ConversionPage() {
           canRequest={canRequest}
           eligible={eligible}
           paused={!requestsOpen}
+          holdingsReady={data !== null}
         />
       ) : (
         <div className="mt-8 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
@@ -895,9 +944,10 @@ export default function ConversionPage() {
         </div>
       )}
 
-      {showRequest && eligible && requestsOpen && (
+      {showRequest && canRequest && requestsOpen && (
         <RequestConversionModal
           holdings={convertible}
+          isCurrent={isCurrent}
           onClose={() => setShowRequest(false)}
           onSuccess={() => {
             void loadRequests();
@@ -949,10 +999,12 @@ function TxLink({ sig, label }: { sig: string; label: string }) {
 
 function RequestConversionModal({
   holdings,
+  isCurrent,
   onClose,
   onSuccess,
 }: {
   holdings: ConvertibleHolding[];
+  isCurrent: () => boolean;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -969,15 +1021,10 @@ function RequestConversionModal({
   const [busy, setBusy] = useState(false);
 
   const selected = holdings.find((h) => h.shareClassPda === selectedPda);
-  const amountOk =
-    amount.trim() !== "" &&
-    /^\d+$/.test(amount.trim()) &&
-    selected !== undefined &&
-    BigInt(amount.trim()) > BigInt(0) &&
-    BigInt(amount.trim()) <= selected.balance;
+  const amountOk = selected !== undefined && validConversionAmount(amount, selected.balance);
 
   async function submit() {
-    if (!wallet || !selected || !amountOk) return;
+    if (!wallet || !isCurrent() || !selected || !amountOk || busy) return;
     setBusy(true);
     try {
       // Signed route — the server re-checks the KYC gate and derives the
@@ -1058,6 +1105,7 @@ function RequestConversionModal({
             <input
               value={amount}
               inputMode="numeric"
+              maxLength={16}
               onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
             />
@@ -1068,7 +1116,7 @@ function RequestConversionModal({
             )}
             {amount.trim() !== "" && !amountOk && (
               <span className="mt-1 block text-[11px] text-amber-700">
-                Amount must be between 1 and your balance.
+                Amount must be between 1 and your balance, up to {Number.MAX_SAFE_INTEGER.toLocaleString()} units per request.
               </span>
             )}
           </label>
@@ -1132,12 +1180,14 @@ function Empty({
   canRequest,
   eligible,
   paused,
+  holdingsReady,
 }: {
   onClick: () => void;
   canRequest: boolean;
   eligible: boolean;
   /** The module is off: no request prompt or eligibility hint. */
   paused: boolean;
+  holdingsReady: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
@@ -1154,7 +1204,9 @@ function Empty({
         </button>
       ) : (
         <p className="mt-2 text-xs text-slate-400">
-          {eligible
+          {!holdingsReady
+            ? "Your token holdings must be checked before requesting conversion."
+            : eligible
             ? "You need to hold tokens of a share class with a conversion target first."
             : "Onboard as a client and hold convertible tokens to request conversion."}
         </p>
