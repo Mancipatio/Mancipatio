@@ -69,6 +69,9 @@ describe("README status (F091)", () => {
     expect(envVars).toContain("### KYC-only mode and offered asset classes");
     expect(readme).toContain("[`ops/release-checklist.md`](ops/release-checklist.md)");
     expect(() => read("ops/release-checklist.md")).not.toThrow();
+    // The release rule, not a claim about which commit the live site serves.
+    expect(readme).toMatch(/requires that commit to be the tip of `main` and checks it before the push/);
+    expect(readme).not.toMatch(/keeps at the tip of `main`/);
   });
 
   it("claims no external audit until one is recorded (SECURITY_AUDIT)", () => {
@@ -159,6 +162,8 @@ describe("runbook §8 pause mask by mode (F089)", () => {
     // mint_to_treasury, open_sale and buy are in KYC_ONLY_FLOWS: both 0x7D rows need the mode off.
     expect(s8).toMatch(/\| Direct mint \(`mint_to_treasury`; KYC-only off\) \| 0x7D \|/);
     expect(s8).toMatch(/\| Public sale window \(KYC-only off\) \| 0x7D \|/);
+    // secondaryTrading is a pilot module: moduleEnabled() is false while the mode is on.
+    expect(s8).toMatch(/\| Trading through Manci \(KYC-only off\) \| the mode's mask minus 0x04 \|/);
     expect(s8).toContain(`| ${mask(PAUSE_FLAGS_ALL & ~PAUSE_ISSUER_PROCEEDS)} |`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_CUSTODY_ENTRY)}`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_SECONDARY)}`);
