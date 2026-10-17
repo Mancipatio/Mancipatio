@@ -60,27 +60,97 @@ function evidenceSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(12_000);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
-async function finalizedTransaction(signature: string, signal?: AbortSignal) {
-  let tx;
-  try {
-    tx = await getServerRpc()
+
+/**
+ * The machine-readable code of AwaitingFinalizationError. The client reads
+ * the message's opening words (lib/chain-record-recovery
+ * isAwaitingFinalizationError) until siwsErrorResponse forwards `code`.
+ */
+export const AWAITING_FINALIZATION_CODE = "awaiting_finalization";
+export const AWAITING_FINALIZATION_MESSAGE = "Awaiting finalization";
+/**
+ * 409, and not a refusal for good: the server's node does not show the
+ * transaction — or the vault state it produced — as finalized yet. The
+ * client keeps its receipt and records again later, without sending
+ * anything again. Every "not yet" of the evidence routes is one of these.
+ */
+export class AwaitingFinalizationError extends SiwsError {
+  readonly code = AWAITING_FINALIZATION_CODE;
+  constructor(detail: string) {
+    super(409, `${AWAITING_FINALIZATION_MESSAGE}: ${detail}`);
+    this.name = "AwaitingFinalizationError";
+  }
+}
+/**
+ * A finalized read that comes back empty is repeated this often, this far
+ * apart (~6 s in all, well inside the routes' maxDuration of 60 s): the
+ * client records once its own node shows finalized, and the server's node
+ * may be a few seconds behind. Only an empty answer is retried; a read
+ * that fails is reported at once.
+ */
+export const FINALIZED_READ_RETRIES = 3;
+export const FINALIZED_READ_RETRY_DELAY_MS = 2_000;
+async function readUntilPresent<T>(
+  read: () => Promise<T>,
+  present: (value: T) => boolean,
+): Promise<T> {
+  let value = await read();
+  for (
+    let retry = 0;
+    !present(value) && retry < FINALIZED_READ_RETRIES;
+    retry++
+  ) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, FINALIZED_READ_RETRY_DELAY_MS),
+    );
+    value = await read();
+  }
+  return value;
+}
+/**
+ * The transaction at finalized, read again (FINALIZED_READ_RETRIES) while
+ * the node has nothing; then AwaitingFinalizationError, worded with whether
+ * the node already shows it as confirmed. 503 when the node cannot be read.
+ */
+export async function readFinalizedTransaction(
+  signature: string,
+  signal?: AbortSignal,
+) {
+  const read = (commitment: "finalized" | "confirmed") =>
+    getServerRpc()
       .getTransaction(toSignature(signature), {
-        commitment: "finalized",
+        commitment,
         encoding: "json",
         maxSupportedTransactionVersion: 0,
       })
       .send({ abortSignal: evidenceSignal(signal) });
+  let tx;
+  try {
+    tx = await readUntilPresent(
+      () => read("finalized"),
+      (value) => value !== null,
+    );
   } catch {
     throw new SiwsError(
       503,
       "Transaction verification unavailable; retry recording without sending funds again",
     );
   }
-  if (!tx)
-    throw new SiwsError(
-      503,
-      "Transaction is not finalized or not yet available; retry recording without sending funds again",
-    );
+  if (tx) return tx;
+  let confirmed = false;
+  try {
+    confirmed = (await read("confirmed")) !== null;
+  } catch {
+    // Worded as not seen yet.
+  }
+  throw new AwaitingFinalizationError(
+    confirmed
+      ? "the transaction is confirmed but not finalized yet (about 13 seconds). Retry recording shortly; do not send it again"
+      : "the network does not show this transaction as finalized yet. Retry recording in about 30 seconds; do not send it again",
+  );
+}
+async function finalizedTransaction(signature: string, signal?: AbortSignal) {
+  const tx = await readFinalizedTransaction(signature, signal);
   if (!tx.meta || tx.meta.err !== null)
     throw new SiwsError(400, "Transaction did not complete successfully");
   return tx as ChainTransaction;
@@ -222,18 +292,41 @@ export async function requireRequestVault(
         !/^\d+$/.test(String(row.vault_id)))
     )
       throw new SiwsError(400, "Custody vault ID must be an exact integer");
-    const vault = await fetchMaybeLiveCustodyVault(
-      getServerRpc(),
-      address(row.vault_pda),
-      {
-        commitment: "finalized",
-        minContextSlot,
+    const vaultPda = address(row.vault_pda);
+    const readVault = (commitment: "finalized" | "confirmed") =>
+      fetchMaybeLiveCustodyVault(getServerRpc(), vaultPda, {
+        commitment,
+        minContextSlot: commitment === "finalized" ? minContextSlot : undefined,
         abortSignal: AbortSignal.timeout(12_000),
-      },
-    );
+      });
+    // A vault opened moments ago reaches this node's finalized view a few
+    // seconds after the client's: an absent vault is read again before it
+    // counts as absent (a read bound to a context slot is already decided).
+    const vault =
+      minContextSlot === undefined
+        ? await readUntilPresent(
+            () => readVault("finalized"),
+            (value) => value.exists || value.closed,
+          )
+        : await readVault("finalized");
     if (vault.closed) throw new ClosedCustodyVaultError();
+    if (!vault.exists) {
+      // Not a terms mismatch: the vault is not finalized here yet (or not
+      // visible at all). The client records again later; it must not open
+      // another vault.
+      let confirmed = false;
+      try {
+        confirmed = (await readVault("confirmed")).exists;
+      } catch {
+        // Worded as not seen yet.
+      }
+      throw new AwaitingFinalizationError(
+        confirmed
+          ? "the custody vault is confirmed but not finalized yet (about 13 seconds). Retry recording shortly; do not open another vault"
+          : "the custody vault is not on the network yet. If it was just opened, retry recording in about 30 seconds; do not open another vault",
+      );
+    }
     if (
-      !vault.exists ||
       vault.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
       vault.data.shareClass !== row.share_class_pda ||
       vault.data.mint !== row.mint ||
