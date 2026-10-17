@@ -1,0 +1,41 @@
+# Release guard — release/mainnet must be a fast-forward of main.
+#
+# The mainnet Vercel project builds only release/mainnet, and a release is a
+# push of the tip of main to it (ops/release-checklist.md). On a push to
+# release/mainnet, and on demand, this runs scripts/check-release-ancestry.sh
+# against the pushed commit: red, with the list of main commits missing on
+# the release, when it does not contain origin/main (as on 2026-10-15, when a
+# push from a diverged branch left the KYC-only lockdown, #78, out of
+# mainnet). It cannot stop the Vercel build, which starts on the same push,
+# and GitHub reads a push workflow from the pushed commit, so a commit from a
+# branch created before this file was merged runs no guard at all: the
+# checklist's pre-push check (step 1) is the defence; this run makes a
+# mistake visible. No secret: the checkout's own token fetches main. Every
+# action is pinned to a commit SHA (the comment names its tag), as in
+# front-ci.yml; Dependabot moves the SHA and the comment together.
+name: Release guard
+
+on:
+  push:
+    branches: [release/mainnet]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ancestry:
+    name: release/mainnet contains main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The whole history of every branch: the ancestry check needs main.
+          fetch-depth: 0
+
+      - name: Check that the release is a fast-forward of main
+        env:
+          # The pushed commit; a manual run checks the branch tip.
+          RELEASE_REF: ${{ github.event_name == 'push' && github.sha || 'origin/release/mainnet' }}
+        run: bash scripts/check-release-ancestry.sh "$RELEASE_REF"
