@@ -45,7 +45,7 @@ export function parseCustodyOutcome(value: string) {
 }
 
 export const OUTCOME_FAILED_MESSAGE =
-  "The transaction failed on the network, so nothing moved. Its receipt was discarded; the request can be confirmed again.";
+  "The transaction failed on the network, so nothing moved. Its receipt was discarded; the same action can be tried again.";
 export const OUTCOME_NOT_FINALIZED_MESSAGE =
   "The transaction is not finalized on the network yet. Nothing more was sent; use Retry recording in a minute.";
 const HORIZON_HOURS = Math.round(RECEIPT_EXPIRY_HORIZON_MS / 3_600_000);
@@ -135,6 +135,8 @@ export function useCustodyOutcomeRecovery(
         "This request already has a submitted transaction. Use Retry recording instead of signing again",
       );
     assertChainRecordStorageAvailable();
+    // A new attempt: nothing of it has been sent (sent / signature start over).
+    recovery.resetAttempt();
     lock.current = true;
     setBusy(true);
   }
@@ -153,6 +155,7 @@ export function useCustodyOutcomeRecovery(
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
+    recovery.resetAttempt();
     try {
       const state = await recovery.check(receipt);
       if (state === "failed" || state === "did_not_land") {
@@ -162,8 +165,11 @@ export function useCustodyOutcomeRecovery(
         );
         return;
       }
-      // Landed: record now. Unreadable here: one signed attempt, the server decides.
-      if (state === "landed" || state === "unknown") await finish(receipt);
+      // Unreadable here: one signed attempt, the server decides. Otherwise
+      // through the wait — "landed" covers confirmed, and a record before
+      // finalized would spend a wallet prompt on a 409; already finalized,
+      // the wait returns at once.
+      if (state === "unknown") await finish(receipt);
       else await settle(receipt);
       toast.show({ kind: "success", title: "Custody outcome recorded" });
     } catch (error) {
@@ -189,7 +195,7 @@ export function useCustodyOutcomeRecovery(
         toast.showError(
           "Receipt kept",
           discardableChainRecordState(state)
-            ? DEAD_RECEIPT_MESSAGE[state]
+            ? "The saved receipt changed in another tab. Reload and check it again."
             : KEPT_MESSAGE[state],
         );
     } catch (error) {
@@ -207,6 +213,10 @@ export function useCustodyOutcomeRecovery(
       ? [{ receipt, state }]
       : [];
   });
+  // A dead receipt is listed once, with its discard — not among those awaiting recording.
+  const awaiting = receipts.filter(
+    (receipt) => !dead.some((d) => d.receipt === receipt),
+  );
   return {
     prepare,
     release,
@@ -217,10 +227,16 @@ export function useCustodyOutcomeRecovery(
     ready: recovery.ready,
     /** Where the record attempt in flight is (null outside one). */
     stage: recovery.stage,
-    /** The signature of the attempt in flight or the last one (null before any). */
+    /**
+     * The signature of the attempt in flight, or of the last one that was
+     * not recorded (null before any, and after prepare() starts a new
+     * attempt). Rendered state: an async catch block reads latestAttempt().
+     */
     signature: recovery.signature,
-    /** A transaction of this session was sent: its signature is known. */
+    /** The current attempt's transaction was sent: its signature is known. */
     sent: recovery.signature !== null,
+    /** The attempt as it is NOW — for a catch block — with its signature when something was sent. */
+    latestAttempt: recovery.latestAttempt,
     states: recovery.states,
     panel: (
       <>
@@ -230,7 +246,7 @@ export function useCustodyOutcomeRecovery(
           </p>
         )}
         <ChainRecordRecoveryPanel
-          receipts={receipts}
+          receipts={awaiting}
           busy={busy}
           onRetry={retry}
         />
@@ -258,8 +274,9 @@ export function useCustodyOutcomeRecovery(
                     onClick={() => void discard(receipt)}
                     className="mt-2 rounded-lg border border-amber-700 bg-white px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
                   >
-                    Discard receipt (transaction never landed)
+                    Discard receipt
                   </button>
+
                 </div>
               ))}
             </div>

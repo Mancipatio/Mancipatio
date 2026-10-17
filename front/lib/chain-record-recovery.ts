@@ -182,16 +182,20 @@ export function listPendingChainRecords(
  * finalized, with the transaction history searched) can no longer land. A
  * receipt is saved right after the send resolved, with a blockhash fetched
  * moments before, so the transaction's own lifetime (~60-90 s) is long over
- * by then; receipts record no lastValidBlockHeight, so this is the bound.
- * The server's analogue, for its own rows, is
- * lib/server/distribution-audits.ts EXPIRY_HORIZON_MS (6 h).
+ * by then; receipts record no lastValidBlockHeight, so this is the bound —
+ * and a dropped transaction blocks a new one for its request until then.
+ * The same 6 h the server gives its own rows
+ * (lib/server/distribution-audits.ts EXPIRY_HORIZON_MS); a signature still
+ * unknown then is looked up as a transaction at finalized before it counts
+ * as dead.
  */
-export const RECEIPT_EXPIRY_HORIZON_MS = 24 * 60 * 60_000;
+export const RECEIPT_EXPIRY_HORIZON_MS = 6 * 60 * 60_000;
 
 /**
  * - landed: confirmed or finalized without an error (the record can be made).
- * - failed: the network ran it and it failed (confirmed or finalized with an
- *   error): nothing moved, the receipt may be discarded.
+ * - failed: the network ran it and it failed, at finalized (an error seen at
+ *   confirmed waits for finalized): nothing moved, the receipt may be
+ *   discarded.
  * - pending: processed, or unknown to the network before the horizon.
  * - did_not_land: unknown to the network after the horizon, and no
  *   transaction at finalized: it can no longer land, nothing moved.
@@ -238,7 +242,8 @@ export function receiptChainState(
   now: number = Date.now(),
 ): ChainRecordState {
   if (status) {
-    if (status.err) return settled(status) ? "failed" : "pending";
+    if (status.err)
+      return status.confirmationStatus === "finalized" ? "failed" : "pending";
     return settled(status) ? "landed" : "pending";
   }
   if (!pastReceiptHorizon(createdAt, now) || landedTx === undefined)
@@ -322,6 +327,14 @@ export const FINALIZATION_WAIT_MS = 60_000;
 export const FINALIZATION_RECHECK_MS = 10_000;
 export const FINALIZATION_POLL_MS = 2_000;
 export const RECORD_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 30_000];
+/**
+ * How many times the signed record is sent AGAIN after the server answered
+ * "awaiting finalization" although this node showed the transaction
+ * finalized (its node lags): once, after the next backoff and a fresh
+ * status read, then the manual "Retry recording" — each signed record is a
+ * wallet prompt. The backoffs of a WAIT that runs out cost no prompt.
+ */
+export const RECORD_MAX_RETRIES = 1;
 
 /**
  * The server's "sent, not finalized yet" refusal (lib/server/chain-evidence.ts
@@ -371,8 +384,9 @@ export type FinalizedWaitOptions = {
 
 /**
  * Polls one signature (the transaction history searched) until it is
- * finalized without an error, failed (an error at confirmed or finalized),
- * the timeout passes, or the status cannot be read. Like
+ * finalized — without an error, or with one ("failed"; an error seen at
+ * confirmed keeps polling, since a receipt is discarded on it) — the
+ * timeout passes, or the status cannot be read. Like
  * lib/simulation-gate waitForSignature, but "confirmed" keeps polling: the
  * evidence routes read at finalized.
  */
@@ -412,7 +426,8 @@ export async function waitForFinalizedSignature(
       } catch {
         return stop?.signal.aborted ? "timeout" : "unknown";
       }
-      if (status?.err && settled(status)) return "failed";
+      if (status?.err && status.confirmationStatus === "finalized")
+        return "failed";
       if (status?.confirmationStatus === "finalized" && !status.err)
         return "finalized";
       if (options.isCancelled?.()) return "unknown";
@@ -455,28 +470,34 @@ export type RecordOnceFinalizedInput = {
   recheckMs?: number;
   /** The backoffs (default RECORD_RETRY_DELAYS_MS); their count bounds the retries. */
   delaysMs?: readonly number[];
+  /** Signed records sent again after a server "awaiting finalization" (default RECORD_MAX_RETRIES). */
+  maxRecordRetries?: number;
   sleep?: (ms: number) => Promise<void>;
 };
 
 /**
  * The shared record path of a sent transaction: wait for it to finalize
  * (the evidence routes verify at finalized), then record it ONCE. A wait
- * that runs out, and a server that answers "awaiting finalization" (its
- * node lags), are retried after RECORD_RETRY_DELAYS_MS — each retry reads
+ * that runs out is retried after RECORD_RETRY_DELAYS_MS — each retry reads
  * the status again first, so a signed request is only sent while the
- * network here shows the transaction finalized — before the manual "Retry
- * recording" takes over ("not_finalized"; the receipt is kept). A
- * transaction the network ran and failed ends it at once ("failed":
- * nothing moved, the receipt may be discarded). Any other error of
- * `record` is thrown as it is. Node-safe: the hooks pass in the rpc reads.
+ * network here shows the transaction finalized. A server that still
+ * answers "awaiting finalization" (its node lags) gets the signed record
+ * once more (RECORD_MAX_RETRIES), after the next backoff and read. Then the
+ * manual "Retry recording" takes over ("not_finalized"; the receipt is
+ * kept). A transaction the network ran and failed ends it at once
+ * ("failed": nothing moved, the receipt may be discarded). Any other error
+ * of `record` is thrown as it is. Node-safe: the hooks pass in the rpc
+ * reads.
  */
 export async function recordOnceFinalized(
   input: RecordOnceFinalizedInput,
 ): Promise<RecordingOutcome> {
   const delays = input.delaysMs ?? RECORD_RETRY_DELAYS_MS;
+  const maxRecordRetries = input.maxRecordRetries ?? RECORD_MAX_RETRIES;
   const sleep =
     input.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let records = 0;
   input.onStage?.("awaiting_finalization", 0);
   let outcome = await input.waitForFinalized(
     input.waitMs ?? FINALIZATION_WAIT_MS,
@@ -485,14 +506,18 @@ export async function recordOnceFinalized(
     if (outcome === "failed") return "failed";
     if (outcome === "finalized") {
       input.onStage?.("recording", attempt);
+      records++;
       try {
         await input.record();
         return "recorded";
       } catch (error) {
         if (!isAwaitingFinalizationError(error)) throw error;
+        // Each signed record is a wallet prompt: one more, then the manual retry.
+        if (records > maxRecordRetries) return "not_finalized";
       }
     }
     if (attempt >= delays.length) return "not_finalized";
+
     input.onStage?.("retry_wait", attempt + 1);
     await sleep(delays[attempt]);
     input.onStage?.("awaiting_finalization", attempt + 1);
