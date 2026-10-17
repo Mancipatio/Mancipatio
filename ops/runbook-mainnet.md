@@ -2648,7 +2648,9 @@ branch. GitHub reads a push workflow from the pushed commit, so a commit
 from a branch created before the workflow was merged runs no guard at all
 (exactly that shape): a missing run is a fault, and the pre-push check is
 the defence. A migration the new front needs is applied to the mainnet
-project before the push ("Apply migration 0080" below shows the order).
+project before the push ("Apply migration 0080" below shows the order); a
+migration that needs the new front FIRST goes the other way round ("Apply
+migration 0082" below).
 
 #### Apply migration 0080
 
@@ -2806,6 +2808,79 @@ from about 5 minutes after the off switch):
 `fx-expiring` and `fx-stale` judge the rate that counts: while the automatic
 rate is fresh a stale manual row raises neither (`fx-fallback` reports it
 instead), and `fx-expiring` is about a manual rate only.
+
+#### Apply migration 0082
+
+The other order. 0082 (`resell_listings`: the browser roles read ACTIVE
+listings only, so a matched, withdrawn or removed post and its seller
+contact are private) goes to each network's database only AFTER the front
+that reads the seller's own history (`/portfolio/listings`) and the admin
+board (`/admin/resell`) through the signed `/api/resell/list` (service
+role, which RLS does not touch) is live on that network. Applied before
+it, the seller loses their matched, withdrawn and removed rows and
+`/admin/resell` loses every non-active row and with it the Restore button;
+applied after, nothing is lost at any moment. The public board and every
+write are the same before and after. Which push builds which front decides
+the order:
+
+1. **merge the front to `main`, then devnet 0082.** `main` deploys the
+   devnet project, so the merge is the devnet front deploy: apply once the
+   devnet deployment is READY on a commit that carries
+   `front/app/api/resell/list/route.ts`;
+2. **fast-forward `release/mainnet` to that `main`, then mainnet 0082**
+   ("Releasing the front to mainnet" above): apply once the production
+   deployment is READY on the release commit.
+
+Idempotent and no data change: every policy on the table is dropped, the
+one read policy recreated and the grants restated (contacts and notes stay
+for Restore and as evidence). The file is frozen at sha256
+`f5045cb8a1d85e1cb52946ee5ca0a63ae5b30bb19a2fff496494178558e837a2`
+(`shasum -a 256 supabase/migrations/0082_resell_listings_public_scope.sql`
+first). Devnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0082
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0082_resell_listings_public_scope.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0082','resell_listings_public_scope') on conflict (version) do nothing"
+MANCI_TARGET=devnet bash scripts/db.sh -c "select (select string_agg(policyname||'|'||cmd||'|'||roles::text||'|'||qual, ' ; ' order by policyname) from pg_policies where schemaname='public' and tablename='resell_listings') as policies, (select relrowsecurity from pg_class where oid='public.resell_listings'::regclass) as rls, has_table_privilege('anon','public.resell_listings','SELECT') as anon_reads, has_table_privilege('service_role','public.resell_listings','UPDATE') as service_writes, (select version from supabase_migrations.schema_migrations where version='0082') as recorded"
+MANCI_TARGET=devnet bash scripts/db.sh -c "set role anon; select count(*) filter (where status <> 'active') as hidden_rows_visible, count(*) as board_rows from public.resell_listings"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Mainnet: the same with `MANCI_ALLOW_MAINNET=1` (`backup.sh` needs it too;
+its mainnet dump is schema-only, PITR is the restore point):
+
+```
+export MANCI_ALLOW_MAINNET=1
+bash scripts/ops/backup.sh mainnet pre-0082
+MANCI_TARGET=mainnet bash scripts/db.sh -f supabase/migrations/0082_resell_listings_public_scope.sql
+MANCI_TARGET=mainnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0082','resell_listings_public_scope') on conflict (version) do nothing"
+MANCI_TARGET=mainnet bash scripts/db.sh -c "select (select string_agg(policyname||'|'||cmd||'|'||roles::text||'|'||qual, ' ; ' order by policyname) from pg_policies where schemaname='public' and tablename='resell_listings') as policies, (select relrowsecurity from pg_class where oid='public.resell_listings'::regclass) as rls, has_table_privilege('anon','public.resell_listings','SELECT') as anon_reads, has_table_privilege('service_role','public.resell_listings','UPDATE') as service_writes, (select version from supabase_migrations.schema_migrations where version='0082') as recorded"
+MANCI_TARGET=mainnet bash scripts/db.sh -c "set role anon; select count(*) filter (where status <> 'active') as hidden_rows_visible, count(*) as board_rows from public.resell_listings"
+MANCI_TARGET=mainnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+unset MANCI_ALLOW_MAINNET
+```
+
+Pass: `resell_listings_active_read|SELECT|{anon,authenticated}|(status = 'active'::text) | t | t | t | 0082`,
+then `0 | <the public board's size>` (the anon role sees no non-active
+row), and the identity preflight still shows `tables_without_guard` `[]`
+and `defaults_not_dynamic` `{}`. Then, signed in as a seller with a
+withdrawn post, `/portfolio/listings` still lists it; on `/admin/resell`
+the removed rows and their Restore button are still there; the public board
+`/markets/resell` is unchanged. The insert is `on conflict (version) do
+nothing` and 0082 itself is re-runnable, so re-running the block is
+harmless.
+
+Rollback: an Instant Rollback of the front to a deployment before
+`/api/resell/list` while 0082 is applied brings the loss above back (the
+old pages read through the anon client). Reopen the read FIRST, then roll
+back, and re-apply 0082 once the new front is back:
+
+```
+MANCI_TARGET=<t> bash scripts/db.sh -c "drop policy if exists resell_listings_active_read on public.resell_listings; create policy \"resell_listings anon read\" on public.resell_listings for select using (true)"
+```
+
+(0025's policy; mainnet with `MANCI_ALLOW_MAINNET=1`.)
 
 
 ### Responses
