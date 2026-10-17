@@ -3,7 +3,7 @@
 import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
-import { createNoopSigner } from "@solana/kit";
+import { createNoopSigner, type Address } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -20,9 +20,72 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
-import { upsertIssuerProfile } from "@/lib/issuer-profiles";
+import { startFinalityPoll } from "@/lib/finality-poll";
+import type { NewIssuerProfile } from "@/lib/issuer-profiles";
+import {
+  createSignedRequest,
+  postSignedRequest,
+  type SiwsRequestBody,
+} from "@/lib/siws-client";
 
 void createNoopSigner; // tree-shake guard while we keep noop available for future flows
+
+const ISSUER_PROFILE_ROUTE = "/api/issuer-profiles/upsert";
+const ADD_LATER = "Add it from your issuer dashboard (Company profile, 1 signature).";
+/** The whole finality wait, inside the signed envelope's 300 s window (lib/siws-client SIWS_MAX_AGE_MS). */
+const FINALITY_WAIT_MS = 240_000;
+
+/**
+ * Resolves true once the Issuer account is visible at `finalized` — what
+ * /api/issuer-profiles/upsert checks ownership at (lib/server/profile-read
+ * requireProfileOwner) — false after `attempts` polls or when `signal`
+ * aborts. `tx.send` returns on submission, so a profile write right after
+ * it was refused ("Profile access denied") moments after register_issuer.
+ * The same poll as lib/tokenize-shares-chain waitForFinalizedAsset, with an
+ * 8 s cap per read so a hanging RPC never holds the wait open.
+ */
+function waitForFinalizedIssuer(
+  rpc: Parameters<typeof fetchMaybeIssuer>[0],
+  issuerPda: Address,
+  opts: { intervalMs?: number; attempts?: number; signal?: AbortSignal } = {},
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const stop = startFinalityPoll(
+      async () => {
+        const issuer = await fetchMaybeIssuer(rpc, issuerPda, {
+          commitment: "finalized",
+          abortSignal: AbortSignal.timeout(8_000),
+        });
+        if (issuer.exists) finish(true);
+        return issuer.exists;
+      },
+      { intervalMs: opts.intervalMs ?? 4_000, attempts: opts.attempts ?? 45, onGiveUp: () => finish(false) },
+    );
+    opts.signal?.addEventListener("abort", () => {
+      stop();
+      finish(false);
+    });
+  });
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The company profile's save, shown on the "Submitted" step. */
+type ProfileState =
+  | { kind: "idle" }
+  /** Nothing was entered on the Entity step: no prompt and no wait. */
+  | { kind: "skipped" }
+  | { kind: "working"; text: string }
+  | { kind: "saved" }
+  | { kind: "failed"; message: string };
 
 const JURISDICTIONS = [
   { code: "688", label: "Serbia (688)" },
@@ -52,6 +115,9 @@ export default function IssuerOnboardingPage() {
   const [acknowledgedKyb, setAcknowledgedKyb] = useState(false);
   const [existing, setExisting] = useState<null | "pending" | "verified" | "rejected">(null);
   const [checking, setChecking] = useState(true);
+  const [profileState, setProfileState] = useState<ProfileState>({ kind: "idle" });
+  // A registration whose company profile is not saved yet: the save alone is offered again.
+  const [pendingProfile, setPendingProfile] = useState<{ issuerPda: Address; profile: NewIssuerProfile } | null>(null);
 
   const wallet = conn.wallet?.account.address;
 
@@ -89,53 +155,76 @@ export default function IssuerOnboardingPage() {
     };
   }, [legalId, conn.isReady, client]);
 
+  /**
+   * Signs the company profile (one prompt), waits until the Issuer is visible
+   * at `finalized`, then posts it. Reports its own outcome on the "Submitted"
+   * step and in a toast, and never throws: a profile that is not saved is
+   * never "Failed to register issuer" — the registration is on chain.
+   */
+  async function saveProfile(issuerPda: Address, profile: NewIssuerProfile): Promise<void> {
+    if (!conn.wallet) return;
+    const fail = (title: string, message: string) => {
+      setProfileState({ kind: "failed", message });
+      setPendingProfile({ issuerPda, profile });
+      toast.showError(title, `${message} ${ADD_LATER}`);
+    };
+    setProfileState({ kind: "working", text: "Confirm in your wallet: save the company profile" });
+    let envelope: SiwsRequestBody;
+    try {
+      // created_by / network are stamped server-side from the signed wallet.
+      envelope = await createSignedRequest(conn.wallet, "issuer-profiles.upsert", { profile });
+    } catch (err) {
+      fail("Company profile not saved", errorText(err));
+      return;
+    }
+    setProfileState({
+      kind: "working",
+      text: "Waiting for the network to finalize the registration (usually under a minute)…",
+    });
+    const finalized = await waitForFinalizedIssuer(client.runtime.rpc, issuerPda, {
+      signal: AbortSignal.timeout(FINALITY_WAIT_MS),
+    });
+    if (!finalized) {
+      // Nothing was posted, so no nonce is spent: the same details can be saved again.
+      fail(
+        "Company profile not saved yet",
+        "The registration is not final on the network yet. Save it again in a minute (1 signature).",
+      );
+      return;
+    }
+    setProfileState({ kind: "working", text: "Saving the company profile…" });
+    try {
+      await postSignedRequest(ISSUER_PROFILE_ROUTE, envelope);
+      setProfileState({ kind: "saved" });
+      setPendingProfile(null);
+      toast.show({ kind: "success", title: "Company profile saved" });
+    } catch (err) {
+      fail("Company profile not saved", errorText(err));
+    }
+  }
+
   async function register() {
     if (!wallet || !conn.wallet || !legalId.trim()) return;
+    const trimmedId = legalId.trim();
     const pendingId = toast.showPending(
-      `Registering ${legalId.trim()}…`,
+      `Registering ${trimmedId}…`,
       `Jurisdiction ${jurisdiction}`,
     );
+    let issuerPda: Address;
     try {
+      [issuerPda] = await findIssuerPda({ legalEntityId: toBytes32(trimmedId) });
       const signer = walletSigner(conn.wallet);
       const ix = await getRegisterIssuerInstructionAsync({
         authority: signer,
-        legalEntityId: toBytes32(legalId.trim()),
+        legalEntityId: toBytes32(trimmedId),
         jurisdiction: Number(jurisdiction) || 0,
         kybDocHash: new Uint8Array(32),
       });
+      // Returns once the transaction is submitted (not confirmed): the step
+      // below says "sent", and the profile waits for finality.
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Issuer registered" });
-      setStep(4);
-
-      // Persist the off-chain onboarding profile (company / contact / website),
-      // keyed by the Issuer PDA. Best-effort — the on-chain registration already
-      // succeeded, so a Supabase failure must never surface as an error here.
-      try {
-        const [pda] = await findIssuerPda({
-          legalEntityId: toBytes32(legalId.trim()),
-        });
-        // created_by / network are stamped server-side from the signed wallet.
-        const ok = await upsertIssuerProfile(conn.wallet, {
-          issuer_pda: pda.toString(),
-          legal_entity_id: legalId.trim(),
-          company_name: companyName.trim() || null,
-          contact_email: contactEmail.trim() || null,
-          website: website.trim() || null,
-        });
-        if (!ok) {
-          toast.showError(
-            "Profile not saved",
-            "Registration succeeded on-chain, but the company profile could not be saved off-chain.",
-          );
-        }
-      } catch (profileErr) {
-        console.warn("[issuer profile] upsert failed:", profileErr);
-        toast.showError(
-          "Profile not saved",
-          "Registration succeeded on-chain, but the company profile could not be saved off-chain.",
-        );
-      }
+      toast.showTx(sig, { title: "Registration sent" });
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError(
@@ -143,7 +232,28 @@ export default function IssuerOnboardingPage() {
         explainSendError(err),
       );
       console.error("[register_issuer]", err);
+      return;
     }
+    setStep(4);
+
+    // The off-chain onboarding profile (company / contact / website), keyed
+    // by the Issuer PDA. The route reads the Issuer at `finalized`, so the
+    // write waits for it (saveProfile) instead of failing moments after the
+    // send; its outcome is reported on its own, never as a registration error.
+    const profile: NewIssuerProfile = {
+      issuer_pda: issuerPda.toString(),
+      legal_entity_id: trimmedId,
+      company_name: companyName.trim() || null,
+      contact_email: contactEmail.trim() || null,
+      website: website.trim() || null,
+    };
+    if (!profile.company_name && !profile.contact_email && !profile.website) {
+      // Nothing to save: no second wallet prompt and no finality wait. The
+      // dashboard adds the details later; the archive route keeps its own row.
+      setProfileState({ kind: "skipped" });
+      return;
+    }
+    await saveProfile(issuerPda, profile);
   }
 
   if (!wallet) return <main><WalletRequired context="This wallet becomes your issuer authority. Choose the wallet you intend to use to manage the entity." /></main>;
@@ -377,10 +487,40 @@ export default function IssuerOnboardingPage() {
                   Registration submitted
                 </h2>
                 <p className="mt-1 text-sm text-slate-600">
-                  Your transaction is on {detectNetwork()}. The platform&apos;s Super Admin will
+                  Your transaction was sent to {detectNetwork()}. The platform&apos;s Super Admin will
                   review KYB documents and approve the entity. KYB status:{" "}
                   <strong>{KYB_LABEL[0]}</strong>.
                 </p>
+                {profileState.kind === "working" && (
+                  <p className="mt-3 text-sm text-slate-600" aria-live="polite">
+                    {profileState.text}
+                  </p>
+                )}
+                {profileState.kind === "skipped" && (
+                  <p className="mt-3 text-sm text-slate-600">
+                    No company details were entered. Add them later from your issuer dashboard (Company profile, 1 signature).
+                  </p>
+                )}
+                {profileState.kind === "saved" && (
+                  <p className="mt-3 text-sm text-emerald-700">Company profile saved.</p>
+                )}
+                {profileState.kind === "failed" && (
+                  <div role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <p className="font-medium">Company profile not saved</p>
+                    <p className="mt-1 text-[13px]">
+                      {profileState.message} {ADD_LATER}
+                    </p>
+                    {pendingProfile && (
+                      <button
+                        type="button"
+                        onClick={() => void saveProfile(pendingProfile.issuerPda, pendingProfile.profile)}
+                        className="mt-2 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:border-amber-400"
+                      >
+                        Save company profile — 1 signature
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-3">

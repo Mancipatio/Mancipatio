@@ -20,12 +20,17 @@
 // continued from /issuer/assets/tokenize?asset=<pda> (or the "Continue" list)
 // instead of creating a second asset.
 //
-// Every chain transaction is audited once the network decided: one
-// audit_events row per registry instruction it carried (create_asset, the
-// classes, the mint, set_convertible_to; lib/tokenize-shares-chain
-// tokenizeAuditRows). The profile's `convertible` follows the conversion
-// target (class 0's convertible_to, or the marker link the step sets); a
-// later link corrects saved details with one more signature.
+// Every chain transaction is waited for before the flow goes on (lib/send-
+// outcome confirmThenReport): `tx.send` returns on submission, so the toast,
+// the details prompt and the re-read of the chain come after the network's
+// answer, with the button disabled meanwhile — re-read at `confirmed` before
+// the answer, the same step came back with an enabled button. It is audited
+// once the network decided, from the same poll: one audit_events row per
+// registry instruction it carried (create_asset, the classes, the mint,
+// set_convertible_to; lib/tokenize-shares-chain tokenizeAuditRows). The
+// profile's `convertible` follows the conversion target (class 0's
+// convertible_to, or the marker link the step sets); a later link corrects
+// saved details with one more signature.
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -69,6 +74,7 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
+import { confirmThenReport } from "@/lib/send-outcome";
 import { waitForSignature } from "@/lib/simulation-gate";
 import { WalletRequired } from "@/components/wallet-required";
 import { SkeletonCard } from "@/components/skeleton";
@@ -673,14 +679,42 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       });
       setWorking("Confirm in your wallet (1 of 2): create the token");
       const sig = await tx.send({ instructions: ixs, feePayer: signer });
-      toast.showTx(sig, { title: "Token created" });
+      // One poll of the signature, for the audit rows and the step itself (the send returns on submission).
+      const confirmation = waitForSignature(rpc, sig, { timeoutMs: 60_000, retryReads: true });
       // One audit row per instruction (create_asset, the classes, the mint, set_convertible_to),
-      // written once the network decided; in the background, the details prompt does not wait.
+      // written once the network decided, in the background: the details prompt waits for the
+      // confirmation (a second or two), never for the audit writes.
       void auditTokenizeOutcome({
         rows: tokenizeAuditRows(ixs, { actor: wallet.toString(), signature: sig, name: intent.name, step: "create" }),
-        wait: () => waitForSignature(rpc, sig, { timeoutMs: 60_000 }),
+        wait: () => confirmation,
         record: recordAudit,
       });
+      setWorking("Waiting for the network to confirm it (usually a few seconds)…");
+      const outcome = await confirmThenReport(() => confirmation, {
+        confirmed: () => {
+          toast.showTx(sig, { title: "Token created" });
+        },
+        failed: () => {
+          // Nothing exists under this ID: no details prompt and no resume link; the draft goes with it.
+          removeDraft(picked.assetPda);
+          toast.show({
+            kind: "error",
+            title: "Token not created",
+            description: "Your wallet sent it, but the network refused it. Nothing was created; open the explorer link for details.",
+            signature: sig,
+          });
+        },
+        unconfirmed: () => {
+          // It may still land: the details wait for finality (saveDetails) before they are posted.
+          toast.show({
+            kind: "error",
+            title: "Not confirmed yet",
+            description: "The network has not confirmed it yet. The details are saved once it is final; check the explorer link if this takes long.",
+            signature: sig,
+          });
+        },
+      });
+      if (outcome === "failed") return;
       await saveDetails(picked.assetPda, row, "2 of 2");
       router.replace(`/issuer/assets/tokenize?asset=${picked.assetPda}`);
     } catch (err) {
@@ -808,15 +842,44 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       const patch = profileMissing || !markerLinks(marker) ? null : convertiblePatch(resume.assetPda, resume.profile, convertible);
       const total = (chainTx ? 1 : 0) + (profileMissing || patch ? 1 : 0);
       if (chainTx) {
-        const { ixs: sent, step } = chainTx;
-        setWorking(`Confirm in your wallet (1 of ${total}): ${chainTx.what.doing}`);
+        const { ixs: sent, step, what } = chainTx;
+        setWorking(`Confirm in your wallet (1 of ${total}): ${what.doing}`);
         const sig = await tx.send({ instructions: sent, feePayer: chainTx.signer });
-        toast.showTx(sig, { title: chainTx.what.done });
+        // One poll of the signature, for the audit rows and the step itself (the send returns on submission).
+        const confirmation = waitForSignature(rpc, sig, { timeoutMs: 60_000, retryReads: true });
         void auditTokenizeOutcome({
           rows: tokenizeAuditRows(sent, { actor: wallet.toString(), signature: sig, name: asset.name, step }),
-          wait: () => waitForSignature(rpc, sig, { timeoutMs: 60_000 }),
+          wait: () => confirmation,
           record: recordAudit,
         });
+        setWorking("Waiting for the network to confirm it (usually a few seconds)…");
+        const outcome = await confirmThenReport(() => confirmation, {
+          confirmed: () => {
+            toast.showTx(sig, { title: what.done });
+          },
+          failed: () => {
+            toast.show({
+              kind: "error",
+              title: "Refused by the network",
+              description: "Your wallet sent it, but the network refused it. Nothing changed on chain; open the explorer link for details.",
+              signature: sig,
+            });
+          },
+          unconfirmed: () => {
+            toast.show({
+              kind: "error",
+              title: "Not confirmed yet",
+              description: "The network has not confirmed it yet. Check the explorer link and reload this page before you sign again.",
+              signature: sig,
+            });
+          },
+        });
+        if (outcome !== "confirmed") {
+          // The details below assume the step landed (`convertible` follows the marker link): re-read instead.
+          setRefreshKey((k) => k + 1);
+          await loadResume();
+          return;
+        }
       }
       if (profileMissing) await saveDetails(resume.assetPda, row, `${total} of ${total}`);
       else if (patch) await saveDetails(resume.assetPda, patch, `${total} of ${total}`);
