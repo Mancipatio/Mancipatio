@@ -53,9 +53,10 @@ export function validConversionAmount(amount: string, balance: bigint): boolean 
 
 /**
  * Requests that still hold the holder's units: waiting for Manci, waiting for
- * the deposit, or deposited and waiting for the conversion. The server (the
- * create route) counts these against the on-chain balance; the page polls
- * while one exists.
+ * the deposit, or deposited and waiting for the conversion. The page polls
+ * while one exists and shows the first as the next step. (The create route
+ * counts only requested / vault_opened rows against the wallet balance: a
+ * deposit already moved the units out of the wallet.)
  */
 export const OPEN_CONVERSION_STATUSES: readonly ConversionStatus[] = ["requested", "vault_opened", "deposited"];
 

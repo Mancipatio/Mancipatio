@@ -108,8 +108,14 @@ describe("/portfolio/conversion request toolbar and next step", () => {
     expect(code).toContain("!requestsLoaded && !listError ?");
   });
 
-  it("re-lists in the background without ever raising a wallet prompt, and tells a lost session from other errors", () => {
-    expect(code).toContain('interactive: mode === "interactive" ? "session-only" : false');
+  it("re-lists in the background without ever raising a wallet prompt, signs the read itself only for a click, and tells a lost session from other errors", () => {
+    // first load: session-only (one prompt at most); click / own action: may sign the read; timer: never prompts
+    expect(code).toContain('interactive: mode === "manual" ? true : mode === "interactive" ? "session-only" : false');
+    expect(code).toContain('type ListMode = "interactive" | "manual" | "background";');
+    expect(code).toContain('onClick={() => void loadRequests("manual")}');
+    expect(code).not.toContain('onClick={() => void loadRequests("interactive")}');
+    // the automatic first load is the only bare call
+    expect(code.match(/void loadRequests\(\);/g) ?? []).toHaveLength(1);
     expect(code).toContain("shouldPollConversions({");
     expect(code).toContain('addEventListener("visibilitychange"');
     expect(code).toContain("HOLDER_CONVERSION_POLL_MS");
@@ -139,6 +145,6 @@ describe("/portfolio/conversion request toolbar and next step", () => {
     expect(code).toContain('aria-required="true"');
     expect(code).toContain("Add a contact so Manci can reach you.");
     expect(code).toContain("await onSuccess(created)");
-    expect(code).toContain('await loadRequests("interactive");');
+    expect(code).toContain('await loadRequests("manual");');
   });
 });

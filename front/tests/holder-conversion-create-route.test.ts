@@ -130,10 +130,10 @@ describe("POST /api/conversion/create: open requests against the balance, and th
     expect(written()).toHaveLength(1);
   });
 
-  it("refuses (409) when the wallet's open requests of the class plus this one exceed the balance; a fitting one goes through", async () => {
+  it("refuses (409) when the wallet's undeposited requests of the class plus this one exceed the balance; a fitting one goes through", async () => {
     existing({ amount: 600, status: "requested" });
-    existing({ amount: 300, status: "vault_opened" });
-    existing({ amount: 95, status: "deposited" });
+    existing({ amount: 395, status: "vault_opened" });
+    existing({ amount: 95, status: "deposited" }); // already in the escrow: not in the wallet, not counted
     const refused = await post(CLEAN, { amount: 10 }); // 995 + 10 > 1_000
     expect(refused).toEqual({ status: 409, body: { ok: false, error: OVER_BALANCE } });
     expect(written()).toEqual([]);
@@ -142,7 +142,19 @@ describe("POST /api/conversion/create: open requests against the balance, and th
     expect(written()).toHaveLength(1);
   });
 
-  it("counts only open rows of this wallet, this network and this share class", async () => {
+  it("does not count a deposited request: its units already left the wallet for the escrow", async () => {
+    // 100 units held, 60 converted so far (deposited, awaiting the burn): the wallet now holds 40.
+    chain.getToken2022Balance.mockResolvedValue(BigInt(40));
+    existing({ amount: 60, status: "deposited" });
+    const fits = await post(CLEAN, { amount: 40 });
+    expect(fits.status).toBe(200);
+    expect(written()).toHaveLength(1);
+    const over = await post(CLEAN, { amount: 1 }); // 40 (the new open request) + 1 > 40
+    expect(over.status).toBe(409);
+    expect(over.body.error).toContain("open conversion requests for 40 units");
+  });
+
+  it("counts only undeposited open rows of this wallet, this network and this share class", async () => {
     existing({ amount: 995, status: "converted" });
     existing({ amount: 995, status: "cancelled" });
     existing({ amount: 995, status: "returned" });

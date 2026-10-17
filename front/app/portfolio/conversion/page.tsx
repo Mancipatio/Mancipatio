@@ -143,7 +143,12 @@ type ConvertibleHolding = {
   balance: bigint;
 };
 
-type ListMode = "interactive" | "background";
+// "interactive": the automatic first load (may start the wallet session once,
+// never signs the read itself); "manual": a click or a re-list after the
+// holder's own action (may also sign the read itself when no session can be
+// started, so the list always loads); "background": timers and the tab
+// coming back (never prompts).
+type ListMode = "interactive" | "manual" | "background";
 
 function formatDeadline(deadline: bigint | undefined): string | null {
   if (deadline === undefined || deadline <= BigInt(0)) return null;
@@ -288,8 +293,12 @@ function ConversionWorkspace() {
 
   // Signed list — separate from the chain refresh so a data reload never
   // silently re-prompts for a signature; call sites decide when to re-list.
-  // "interactive" (a click, the first load) may start the wallet session —
-  // one prompt at most; "background" (a timer, the tab coming back) never
+  // "interactive" (the first load) may start the wallet session — one prompt
+  // at most, never a per-read signature, so a declined sign-in shows the
+  // Sign in state; "manual" (a click, a re-list after the holder's own
+  // action) also falls back to signing the read itself when no session can
+  // be started (sessions off, or /api/auth/session failing), so an explicit
+  // click always loads; "background" (a timer, the tab coming back) never
   // prompts and keeps the last rows when it cannot read.
   const loadRequests = useCallback(async (mode: ListMode = "interactive") => {
     if (!conn.wallet || !isCurrent()) return;
@@ -298,13 +307,13 @@ function ConversionWorkspace() {
     if (mode === "background" && listInFlight.current > 0) return;
     listInFlight.current += 1;
     const current = requestsRead.begin(isCurrent);
-    if (mode === "interactive") {
+    if (mode !== "background") {
       setListBusy(true);
       setListError(null);
     }
     try {
       const { requests: rows, kyc: verdict } = await listMyConversionRequests(conn.wallet, {
-        interactive: mode === "interactive" ? "session-only" : false,
+        interactive: mode === "manual" ? true : mode === "interactive" ? "session-only" : false,
       });
       if (!current()) return;
       lastListAt.current = Date.now();
@@ -323,7 +332,7 @@ function ConversionWorkspace() {
       });
     } finally {
       listInFlight.current -= 1;
-      if (mode === "interactive") setListBusy(false);
+      if (mode !== "background") setListBusy(false);
     }
   }, [conn.wallet, isCurrent, requestsRead, wallet, network]);
 
@@ -475,7 +484,7 @@ function ConversionWorkspace() {
       ),
     );
     recovery.forget(receipt);
-    void loadRequests();
+    void loadRequests("manual");
   }
 
   async function retryDepositRecord(receipt: PendingChainRecord) {
@@ -547,7 +556,7 @@ function ConversionWorkspace() {
           "Escrow vault is not active",
           "The conversion vault was closed on-chain (cancelled or expired) — depositing now would strand your tokens. Contact Manci.",
         );
-        void loadRequests();
+        void loadRequests("manual");
         return;
       }
       // Conversion vaults are `DeliveryEscrow`-typed, and
@@ -560,7 +569,7 @@ function ConversionWorkspace() {
           "This vault is not yours to fund",
           `The conversion vault names ${vaultBefore.data.beneficiary} as beneficiary, and only the beneficiary may deposit into it. Contact Manci.`,
         );
-        void loadRequests();
+        void loadRequests("manual");
         return;
       }
       if (vaultBefore.data.deposited > BigInt(0)) {
@@ -633,7 +642,7 @@ function ConversionWorkspace() {
         metadata: { conversion_request_id: req.id, vault_pda: req.vault_pda },
       });
       void refresh();
-      void loadRequests();
+      void loadRequests("manual");
     } catch (err) {
       toast.dismiss(pendingId);
       if (sentSignature) {
@@ -681,7 +690,7 @@ function ConversionWorkspace() {
         ),
       ),
     );
-    void loadRequests();
+    void loadRequests("manual");
   }
 
   async function retryReturnRecord(receipt: PendingChainRecord) {
@@ -805,7 +814,7 @@ function ConversionWorkspace() {
         tx_signature: sig,
         metadata: { conversion_request_id: req.id, vault_pda: req.vault_pda },
       });
-      void loadRequests();
+      void loadRequests("manual");
     } catch (err) {
       toast.dismiss(pendingId);
       if (sentSignature)
@@ -851,7 +860,7 @@ function ConversionWorkspace() {
       toast.dismiss(pendingId);
       setConfirmCancel(null);
       setCancelBusy(null);
-      void loadRequests();
+      void loadRequests("manual");
     }
   }
 
@@ -914,7 +923,7 @@ function ConversionWorkspace() {
           </span>
           <button
             type="button"
-            onClick={() => void loadRequests("interactive")}
+            onClick={() => void loadRequests("manual")}
             disabled={listBusy}
             className="min-h-10 shrink-0 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
           >
@@ -1023,7 +1032,7 @@ function ConversionWorkspace() {
                   <span>Sign in with your wallet to check eligibility</span>
                   <button
                     type="button"
-                    onClick={() => void loadRequests("interactive")}
+                    onClick={() => void loadRequests("manual")}
                     disabled={listBusy}
                     className="font-medium text-slate-900 underline underline-offset-2 disabled:opacity-50"
                   >
@@ -1035,7 +1044,7 @@ function ConversionWorkspace() {
                   <span>Could not load —</span>
                   <button
                     type="button"
-                    onClick={() => void loadRequests("interactive")}
+                    onClick={() => void loadRequests("manual")}
                     disabled={listBusy}
                     className="font-medium text-slate-900 underline underline-offset-2 disabled:opacity-50"
                   >
@@ -1058,7 +1067,7 @@ function ConversionWorkspace() {
                   <span>Could not check your verification —</span>
                   <button
                     type="button"
-                    onClick={() => void loadRequests("interactive")}
+                    onClick={() => void loadRequests("manual")}
                     disabled={listBusy}
                     className="font-medium text-slate-900 underline underline-offset-2 disabled:opacity-50"
                   >
@@ -1098,7 +1107,7 @@ function ConversionWorkspace() {
           <button
             type="button"
             onClick={() => {
-              void loadRequests("interactive");
+              void loadRequests("manual");
               if (requestsOpen) void refresh();
             }}
             disabled={listBusy}
@@ -1267,7 +1276,7 @@ function ConversionWorkspace() {
                 sortConversionRequests([request, ...rows.filter((row) => row.id !== request.id)]),
               );
             }
-            await loadRequests("interactive");
+            await loadRequests("manual");
             setShowRequest(false);
           }}
         />
