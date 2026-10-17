@@ -116,7 +116,9 @@ describe("/admin/custody shows the evidence (source)", () => {
     expect(detail).not.toContain("String(vault.deposited)} units");
     const surplus = detail.indexOf("0 — a return is KYC-free and closes the vault");
     expect(surplus).toBeGreaterThan(-1);
-    const guard = detail.lastIndexOf("{kycGated && vaultLive && (", surplus);
+    // Every vault type: the program's split decides against the mint's hook mode, not the vault type.
+    const guard = detail.lastIndexOf("{vaultLive && (", surplus);
+    expect(detail).not.toContain("{kycGated && vaultLive && (");
     expect(guard).toBeGreaterThan(-1);
     expect(detail.slice(guard, surplus)).not.toContain("</Field>");
   });

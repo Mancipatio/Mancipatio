@@ -6,7 +6,15 @@ import {
 } from "@/lib/use-custody-open-recovery";
 import { parseCustodyVaultId, requireCustodyRequestAmount } from "@/lib/custody-open-recovery";
 
-import { useCustodyOutcomeRecovery } from "@/lib/use-custody-outcome-recovery";
+import {
+  custodyOutcomeId,
+  useCustodyOutcomeRecovery,
+} from "@/lib/use-custody-outcome-recovery";
+import {
+  clearPendingChainRecord,
+  savePendingChainRecord,
+  type PendingChainRecord,
+} from "@/lib/chain-record-recovery";
 import { CustodyAuthorityTransfer } from "@/components/custody-authority-transfer";
 // DeliveryEscrow deadline: 24 h..365 d out (6148), checked before signing. A
 // conversion escrow proposes 150 days and warns under 120 (the runbook's
@@ -27,6 +35,7 @@ import {
   custodyRequestEvidence,
   custodySettlementProof,
   fetchVerifiedCustodyVault,
+  waitForFinalizedSignature,
   type CustodySendStage,
 } from "@/lib/custody-authority";
 import {
@@ -102,6 +111,7 @@ import {
   type LinkedCustodyRequest,
 } from "@/lib/reclaim-rent";
 import {
+  DEFAULT_PUBKEY,
   loadBeneficiaryPassport,
   passportShortcutHref,
   pinnedRegistryWarning,
@@ -123,7 +133,9 @@ import { useChainClock } from "@/lib/use-chain-clock";
 import {
   conversionWaitsForAdmin,
   deliveryWaitsForAdmin,
+  queueRefreshDue,
   sortCustodyQueue,
+  type QueueRefreshReason,
 } from "@/lib/admin-badge-rules";
 import { createLatestGate } from "@/lib/latest-load";
 import { signedFetch, WalletSessionRequiredError } from "@/lib/siws-client";
@@ -1301,8 +1313,10 @@ function VaultDetail({
           value={escrowBalance === null ? "unknown" : String(escrowBalance)}
         />
         {/* The split only matters while a return is still possible: a
-            settled vault has no return, so the line would mislead. */}
-        {kycGated && vaultLive && (
+            settled vault has no return, so the line would mislead. It applies
+            to every vault type: return_custody_vault's split_escrow_release
+            decides against the mint's hook mode, not the vault type. */}
+        {vaultLive && (
           <Field
             label="Un-ledgered surplus"
             value={
@@ -2184,7 +2198,8 @@ const QUEUE_MIN_GAP_MS = 10_000;
  * background session read) runs every QUEUE_POLL_MS while `live` (a row
  * still waits on someone) and the tab is visible, and once more when the tab
  * becomes visible again — never while `busy` (a transaction, a recording or
- * a dialog is in progress), and never twice within QUEUE_MIN_GAP_MS.
+ * a dialog is in progress), and never twice within QUEUE_MIN_GAP_MS
+ * (lib/admin-badge-rules queueRefreshDue decides).
  */
 function useQueuePolling({
   live,
@@ -2201,10 +2216,18 @@ function useQueuePolling({
     refreshRef.current = refresh;
   }, [refresh]);
   useEffect(() => {
-    const tick = (reason: "poll" | "visible") => {
-      if (document.visibilityState !== "visible" || busy) return;
-      if (reason === "poll" && !live) return;
-      if (Date.now() - lastAt.current < QUEUE_MIN_GAP_MS) return;
+    const tick = (reason: QueueRefreshReason) => {
+      if (
+        !queueRefreshDue({
+          reason,
+          visible: document.visibilityState === "visible",
+          busy,
+          live,
+          sinceLastMs: Date.now() - lastAt.current,
+          minGapMs: QUEUE_MIN_GAP_MS,
+        })
+      )
+        return;
       lastAt.current = Date.now();
       void refreshRef.current();
     };
@@ -2246,6 +2269,46 @@ async function listDeliveryQueueInBackground(
   return data.requests ?? [];
 }
 
+/**
+ * The receipt of a sent custody outcome (lib/use-custody-outcome-recovery),
+ * saved FIRST — synchronously, right after the send and before the handler
+ * waits for the burn — so a reload, a closed tab or a crash during the wait
+ * finds "Retry recording" instead of a request stuck on `deposited` with
+ * nothing that knows the burn's signature. The hook's record() remembers the
+ * same record (same key, same signature: the save is idempotent) before it
+ * calls the evidence API.
+ */
+function saveCustodyOutcomeReceipt(
+  product: "conversion" | "delivery",
+  wallet: string,
+  requestId: string,
+  status: "converted" | "delivered" | "returned",
+  signature: string,
+): PendingChainRecord {
+  return savePendingChainRecord({
+    kind: "custody_outcome",
+    network: detectNetwork(),
+    wallet,
+    entityId: custodyOutcomeId(product, requestId, status),
+    signature,
+  });
+}
+
+/**
+ * Drops the receipt of a transaction the network reported FAILED: nothing
+ * was burned, so there is nothing to record, and the next attempt must not
+ * be refused as "already submitted". Best effort: a receipt that stays
+ * behind is only an unneeded Retry, never a lost signature (the audit row
+ * keeps it).
+ */
+function dropCustodyOutcomeReceipt(receipt: PendingChainRecord): void {
+  try {
+    clearPendingChainRecord(receipt);
+  } catch {
+    // Storage refused: the receipt stays until the operator clears it.
+  }
+}
+
 /** The refresh control of a queue header. */
 function QueueRefreshButton({
   refreshing,
@@ -2275,31 +2338,48 @@ const CUSTODY_ENTRY_PAUSED_HINT =
  * the display gate (lib/use-pause-flags, every 30 s). Approve & open vault
  * and the holder's deposit are both refused while it is set, so the operator
  * sees the window where the requests are, and closes it from /admin/platform
- * once the deposit lands. No on-chain action here.
+ * once the deposit lands. Paused with nothing waiting is the normal idle
+ * state (neutral, never a nudge to resume platform-wide); hidden while
+ * conversion is off, when nothing can be approved here. No on-chain action.
  */
-function CustodyEntryWindow({ paused }: { paused: boolean | null }) {
-  if (paused === null) return null;
+function CustodyEntryWindow({
+  paused,
+  entryOn,
+  waiting,
+}: {
+  paused: boolean | null;
+  /** moduleEnabled("custodyConversion"): off, the strip would only invite an unneeded resume. */
+  entryOn: boolean;
+  /** A request waits to be approved, or an open vault waits for its deposit. */
+  waiting: boolean;
+}) {
+  if (paused === null || !entryOn) return null;
+  const idle = paused && !waiting;
   return (
     <div
       className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b px-4 py-2 text-[11px] leading-snug ${
-        paused
-          ? "border-amber-200 bg-amber-50 text-amber-900"
-          : "border-emerald-100 bg-emerald-50 text-emerald-900"
+        idle
+          ? "border-slate-200 bg-slate-50 text-slate-600"
+          : paused
+            ? "border-amber-200 bg-amber-50 text-amber-900"
+            : "border-emerald-100 bg-emerald-50 text-emerald-900"
       }`}
     >
       <p>
         <span className="font-semibold">
           Custody entry (0x08) is {paused ? "paused" : "open"}.
         </span>{" "}
-        {paused
-          ? "Approve & open vault and holder deposits are refused until it is resumed."
-          : "Holders of approved requests can deposit; pause it again once the deposit lands."}
+        {idle
+          ? "Nothing waits on it. Resume it on Platform only to approve a request, and pause it again once the deposit lands."
+          : paused
+            ? "Approve & open vault and holder deposits are refused until it is resumed."
+            : "Holders of approved requests can deposit; pause it again once the deposit lands."}
       </p>
       <Link
         href="/admin/platform"
         className="shrink-0 font-medium underline-offset-2 hover:underline"
       >
-        {paused ? "Resume on Platform →" : "Pause on Platform →"}
+        {idle ? "Platform →" : paused ? "Resume on Platform →" : "Pause on Platform →"}
       </Link>
     </div>
   );
@@ -2364,11 +2444,14 @@ function DeadlineCell({
   if (info === undefined) return <span className="text-slate-400">—</span>;
   const urgency = custodyDeadlineUrgency(info.deadline, nowSec);
   if (urgency === null) return <span className="text-slate-500">no deadline</span>;
-  const day = new Date(Number(info.deadline) * 1000).toISOString().slice(0, 10);
+  // The chain's instant as a UTC date (the approve dialog took a local time;
+  // the hover shows the exact moment).
+  const at = new Date(Number(info.deadline) * 1000).toISOString();
+  const day = `${at.slice(0, 10)} UTC`;
   if (urgency.level === "passed")
     return (
       <span className="text-red-700" title="After the deadline return_custody_vault is permissionless: anyone can hand the escrow back to the holder.">
-        <span className="font-mono">{day}</span>
+        <span className="font-mono" title={at}>{day}</span>
         <br />
         Deadline passed — anyone can return the escrow to the holder
       </span>
@@ -2381,7 +2464,7 @@ function DeadlineCell({
         : "text-slate-600";
   return (
     <span className={tone}>
-      <span className="font-mono">{day}</span>
+      <span className="font-mono" title={at}>{day}</span>
       <br />
       {urgency.daysLeft} days left
     </span>
@@ -2425,8 +2508,13 @@ function requestPassportBlock(
 ): string | null {
   if (info === undefined && issue === "missing")
     return "The linked custody vault was not found on-chain.";
-  if (info === undefined && issue === "error")
-    return "Could not read the custody vault or the holder's investor passport — retry.";
+  // A read that failed closes Confirm even after an earlier success: the
+  // facts on show may be one poll old (fail closed, as before; the row
+  // offers a retry and the next poll re-reads).
+  if (issue === "error")
+    return info === undefined
+      ? "Could not read the custody vault or the holder's investor passport — retry."
+      : "The last read of the custody vault or the holder's investor passport failed — retry.";
   if (info !== undefined && info.passport === null)
     return "The linked vault is not a KYC-gated DeliveryEscrow — return the deposit instead.";
   return passportBlockReason(info?.passport);
@@ -2445,27 +2533,46 @@ function RequestPassportGate({
   clientId: string | null;
   holderWallet: string;
 }) {
+  const retry = (
+    <button
+      type="button"
+      onClick={onRetry}
+      className="font-medium text-brand-700 underline-offset-2 hover:underline"
+    >
+      Retry
+    </button>
+  );
   if (info === undefined && issue !== undefined) {
     return (
       <p className="mt-1 text-[11px] text-slate-600">
-        {requestPassportBlock(info, issue)}{" "}
-        <button
-          type="button"
-          onClick={onRetry}
-          className="font-medium text-brand-700 underline-offset-2 hover:underline"
-        >
-          Retry
-        </button>
+        {requestPassportBlock(info, issue)} {retry}
       </p>
     );
   }
+  // The last facts stay on show; a read that failed after them, or a
+  // passport the read could not settle (the registry or the entry did not
+  // answer within the cut-off), keeps Confirm closed and offers the re-read.
+  const unsettled =
+    issue === "error"
+      ? "The last read failed."
+      : info?.passport?.status === "registry_unreadable" &&
+          info.kycRegistry !== DEFAULT_PUBKEY
+        ? "The passport could not be read."
+        : null;
   return (
-    <BeneficiaryPassport
-      passport={info?.passport}
-      registry={info?.kycRegistry ?? null}
-      shortcutHref={passportShortcutHref({ clientId, wallet: holderWallet })}
-      compact
-    />
+    <>
+      <BeneficiaryPassport
+        passport={info?.passport}
+        registry={info?.kycRegistry ?? null}
+        shortcutHref={passportShortcutHref({ clientId, wallet: holderWallet })}
+        compact
+      />
+      {unsettled && (
+        <p className="mt-0.5 text-[11px] text-slate-600">
+          {unsettled} {retry}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -2536,7 +2643,28 @@ function useRequestVaultInfo() {
     },
     [client],
   );
-  return { vaultInfo, vaultLoadIssue, loadVaultInfo };
+  /** Drops the facts of vaults no longer among the queue's live rows (a row
+   *  that turned terminal keeps no stale authority or deadline line); a read
+   *  still in flight for one of them is dropped with them. */
+  const pruneVaultInfo = useCallback((keep: readonly string[]) => {
+    const keepSet = new Set(keep);
+    const stale = [...generation.current.keys()].filter((pda) => !keepSet.has(pda));
+    if (stale.length === 0) return;
+    for (const pda of stale)
+      generation.current.set(pda, (generation.current.get(pda) ?? 0) + 1);
+    const drop = <V,>(prev: Map<string, V>) => {
+      let next: Map<string, V> | null = null;
+      for (const pda of stale) {
+        if (!prev.has(pda)) continue;
+        next ??= new Map(prev);
+        next.delete(pda);
+      }
+      return next ?? prev;
+    };
+    setVaultInfo(drop);
+    setVaultLoadIssue(drop);
+  }, []);
+  return { vaultInfo, vaultLoadIssue, loadVaultInfo, pruneVaultInfo };
 }
 
 function ConversionRequestsSection({
@@ -2568,11 +2696,12 @@ function ConversionRequestsSection({
   // already sent (the vault is open on-chain but not linked to the request):
   // that sends no transaction.
   const conversionOn = moduleEnabled("custodyConversion");
+  // The saved open intents are read whatever the switch says: linking a
+  // vault this wallet already opened sends no transaction, so neither the
+  // switch nor the custody-entry pause (below) may hide that path.
   const savedOpens = useSavedCustodyOpens(
     "conversion",
-    conversionOn
-      ? []
-      : requests.filter((r) => r.status === "requested").map((r) => r.id),
+    requests.filter((r) => r.status === "requested").map((r) => r.id),
     wallet?.toString(),
   );
   const approvalOffered = (r: ConversionRequest) =>
@@ -2588,18 +2717,30 @@ function ConversionRequestsSection({
   const pauseFlags = usePauseFlags();
   const entryPaused =
     pauseFlags === null ? null : isPaused(pauseFlags, PAUSE_CUSTODY_ENTRY);
+  // Something waits on the window: a request to approve, or an open vault
+  // whose holder has yet to deposit.
+  const entryWaiting = requests.some(
+    (r) => r.status === "requested" || r.status === "vault_opened",
+  );
   // vault_pda → on-chain state/authority for live rows. trigger/realize and
   // the pre-deadline return are `has_one = authority` on-chain (the wallet
   // that opened the vault) — surface that instead of failing Unauthorized.
-  const { vaultInfo, vaultLoadIssue, loadVaultInfo } = useRequestVaultInfo();
+  const { vaultInfo, vaultLoadIssue, loadVaultInfo, pruneVaultInfo } = useRequestVaultInfo();
 
   // Only the latest list read may commit: a slow earlier read (a poll, a
-  // manual refresh) never overwrites a newer one.
+  // manual refresh) never overwrites a newer one. A background read never
+  // starts while another read is in flight: it would supersede an
+  // interactive read still waiting on the wallet session and, failing
+  // without one, leave the queue on "Loading…" once the gate drops the
+  // interactive answer.
   const [listGate] = useState(() => createLatestGate());
+  const reading = useRef(false);
   const load = useCallback(
     async (mode: "interactive" | "background" = "interactive") => {
       if (!conn.wallet) return;
+      if (mode === "background" && reading.current) return;
       const current = listGate.begin();
+      reading.current = true;
       try {
         // A timer or a tab shown again reads with the session only: it
         // never opens the wallet. The operator's own click may prompt once
@@ -2612,14 +2753,18 @@ function ConversionRequestsSection({
         setRequests(rows);
         setLoaded(true);
         setLoadError(null);
-        void loadVaultInfo(liveRequestVaults(rows));
+        const live = liveRequestVaults(rows);
+        pruneVaultInfo(live);
+        void loadVaultInfo(live);
       } catch (err) {
         // A background read that fails (no session, a hiccup) keeps the last rows.
         if (!current() || mode === "background") return;
         setLoadError(queueLoadFailure(err, "Could not load conversion requests"));
+      } finally {
+        if (current()) reading.current = false;
       }
     },
-    [conn.wallet, loadVaultInfo, listGate],
+    [conn.wallet, loadVaultInfo, pruneVaultInfo, listGate],
   );
 
   useEffect(() => {
@@ -2711,7 +2856,7 @@ function ConversionRequestsSection({
   async function confirmConversion(req: ConversionRequest, reason: string) {
     if (!wallet || !req.vault_pda) return;
     const target = conversionTargetLabel(req);
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       `Confirming conversion for ${target}…`,
       reason,
     );
@@ -2756,8 +2901,7 @@ function ConversionRequestsSection({
       // BurnAndAttest burns the escrowed tokens — trigger then realize in one
       // transaction; the attestation hash the vault carried at open is what
       // gets attested (it is immutable on-chain). send() resolves once the
-      // transaction is submitted (lib/send-outcome.ts), so the burn is
-      // confirmed below before anything reads it back; tx.signature is stale
+      // transaction is submitted (lib/send-outcome.ts); tx.signature is stale
       // closure state.
       stage = "send";
       const sig = await tx.send({
@@ -2766,18 +2910,38 @@ function ConversionRequestsSection({
       });
       sentSignature = sig;
       stage = "record";
-      // The recording reads the realize from the chain and the directory
-      // re-reads the vault: both need the burn confirmed, not just submitted.
-      // A burn the network rejected is reported as such, never recorded.
+      // The receipt FIRST, before any wait (saveCustodyOutcomeReceipt): from
+      // here on a reload offers Retry recording with this signature.
+      const receipt = saveCustodyOutcomeReceipt(
+        "conversion",
+        wallet.toString(),
+        req.id,
+        "converted",
+        sig,
+      );
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending(
+        `Burn sent for ${target} — waiting for the network to finalize it…`,
+        "The receipt is saved: a reload offers Retry recording; nothing is sent again.",
+      );
+      // The recording and the directory re-read both need the burn landed:
+      // the evidence API verifies the realize at finalized and refuses a
+      // recording sent before that. A burn the network rejected is reported
+      // as such and its receipt dropped — never recorded. A finality wait
+      // that runs out only means the recording may be refused once more and
+      // then retried from the saved receipt.
       const outcome = await waitForSignature(client.runtime.rpc, sig, {
         timeoutMs: 60_000,
       });
       if (outcome === "failed") {
         stage = "chain-failed";
+        dropCustodyOutcomeReceipt(receipt);
         throw new Error(
           "The transaction was sent but the network reported it failed: nothing was burned. Check the signature in the explorer before trying again.",
         );
       }
+      if (outcome === "confirmed")
+        await waitForFinalizedSignature(client.runtime.rpc, sig);
       await outcomeRecovery.record(req.id, "converted", sig);
       toast.dismiss(pendingId);
       toast.showTx(sig, {
@@ -2929,6 +3093,7 @@ function ConversionRequestsSection({
         metadata: {
           conversion_request_id: req.id,
           vault_pda: req.vault_pda,
+          attestation_hash: requestAttestation(attestations, req),
         },
       });
       setReturnReq(null);
@@ -2957,6 +3122,7 @@ function ConversionRequestsSection({
               conversion_request_id: req.id,
               request_id: req.id,
               vault_pda: req.vault_pda,
+              attestation_hash: requestAttestation(attestations, req),
             },
             stage,
             signature: sentSignature,
@@ -3133,7 +3299,11 @@ function ConversionRequestsSection({
       className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card"
     >
       {outcomeRecovery.panel}
-      <CustodyEntryWindow paused={entryPaused} />
+      <CustodyEntryWindow
+        paused={entryPaused}
+        entryOn={conversionOn}
+        waiting={entryWaiting}
+      />
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-slate-100 px-4 py-3">
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -3249,6 +3419,14 @@ function ConversionRequestsSection({
                   ? "No vault is linked to this request."
                   : (passportBlock ?? (!isVaultAuthority ? authorityHint : undefined) ?? null);
               const rowLive = r.status === "vault_opened" || r.status === "deposited";
+              // The custody-entry pause (0x08) holds a NEW open, never the
+              // linking of a vault this wallet already opened (no
+              // transaction): the saved intent exempts the row.
+              const entryBlocked =
+                conversionOn && entryPaused === true && !savedOpens.has(r.id);
+              // The passport is still being read: a normal state, not a warning.
+              const confirmChecking =
+                r.vault_pda !== null && info === undefined && loadIssue === undefined;
               return (
                 <tr key={r.id} className="text-slate-700">
                   <td className="px-4 py-3">
@@ -3289,14 +3467,8 @@ function ConversionRequestsSection({
                           {approvalOffered(r) && (
                             <button
                               type="button"
-                              disabled={
-                                tx.isSending || (conversionOn && entryPaused === true)
-                              }
-                              title={
-                                conversionOn && entryPaused === true
-                                  ? CUSTODY_ENTRY_PAUSED_HINT
-                                  : undefined
-                              }
+                              disabled={tx.isSending || entryBlocked}
+                              title={entryBlocked ? CUSTODY_ENTRY_PAUSED_HINT : undefined}
                               onClick={() => setApproveReq(r)}
                               className={ROW_ACTION_PRIMARY}
                             >
@@ -3308,11 +3480,10 @@ function ConversionRequestsSection({
                             </button>
                           )}
                           {!conversionOn && !savedOpens.has(r.id) ? (
-                            <span
-                              className="text-[11px] leading-snug text-slate-500"
-                              title={moduleDisabledMessage("custodyConversion")}
-                            >
-                              Approval paused: conversion is switched off.
+                            // The real reason (KYC-only mode, or the module
+                            // switch), visible: a phone shows no title.
+                            <span className="w-full text-[11px] leading-snug text-slate-500">
+                              Approval paused: {moduleDisabledMessage("custodyConversion")}
                             </span>
                           ) : null}
                           <button
@@ -3387,8 +3558,13 @@ function ConversionRequestsSection({
                           </button>
                           {confirmBlock && (
                             // Why Confirm is disabled, in the row (a phone
-                            // shows no title).
-                            <p className="w-full text-[11px] leading-snug text-amber-700">
+                            // shows no title); slate while it is only the
+                            // first read of the passport.
+                            <p
+                              className={`w-full text-[11px] leading-snug ${
+                                confirmChecking ? "text-slate-500" : "text-amber-700"
+                              }`}
+                            >
                               Confirm is disabled: {confirmBlock}
                             </p>
                           )}
@@ -4206,16 +4382,20 @@ function DeliveryRequestsSection({
   // delivery realizes a KYC-gated DeliveryEscrow). Per row, bounded, with a
   // retry per row (useRequestVaultInfo): Mark in delivery / Confirm delivery
   // fail CLOSED on a first read that fails (passport unverifiable).
-  const { vaultInfo, vaultLoadIssue, loadVaultInfo } = useRequestVaultInfo();
+  const { vaultInfo, vaultLoadIssue, loadVaultInfo, pruneVaultInfo } = useRequestVaultInfo();
 
   // delivery_requests has no anon SELECT (rows carry the holder's physical
   // address + contact — PII); load the queue through the signed admin route.
-  // Only the latest list read may commit.
+  // Only the latest list read may commit, and a background read never starts
+  // while another read is in flight (see the conversion queue).
   const [listGate] = useState(() => createLatestGate());
+  const reading = useRef(false);
   const load = useCallback(
     async (mode: "interactive" | "background" = "interactive") => {
       if (!conn.wallet) return;
+      if (mode === "background" && reading.current) return;
       const current = listGate.begin();
+      reading.current = true;
       try {
         const rows =
           mode === "background"
@@ -4225,13 +4405,17 @@ function DeliveryRequestsSection({
         setRequests(rows);
         setLoaded(true);
         setLoadError(null);
-        void loadVaultInfo(liveRequestVaults(rows));
+        const live = liveRequestVaults(rows);
+        pruneVaultInfo(live);
+        void loadVaultInfo(live);
       } catch (err) {
         if (!current() || mode === "background") return;
         setLoadError(queueLoadFailure(err, "Could not load delivery requests"));
+      } finally {
+        if (current()) reading.current = false;
       }
     },
-    [conn.wallet, loadVaultInfo, listGate],
+    [conn.wallet, loadVaultInfo, pruneVaultInfo, listGate],
   );
 
   useEffect(() => {
@@ -4464,7 +4648,7 @@ function DeliveryRequestsSection({
   async function confirmDelivery(req: DeliveryRequest, reason: string) {
     if (!wallet || !req.vault_pda) return;
     const target = deliveryTargetLabel(req);
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       `Confirming delivery for ${target}…`,
       reason,
     );
@@ -4509,8 +4693,7 @@ function DeliveryRequestsSection({
       // BurnAndAttest burns the escrowed tokens — trigger then realize in one
       // transaction; the Triggered state from the first ix is visible to the
       // second within the same transaction. send() resolves once the
-      // transaction is submitted (lib/send-outcome.ts), so the burn is
-      // confirmed below before anything reads it back; tx.signature is stale
+      // transaction is submitted (lib/send-outcome.ts); tx.signature is stale
       // closure state.
       stage = "send";
       const sig = await tx.send({
@@ -4519,15 +4702,32 @@ function DeliveryRequestsSection({
       });
       sentSignature = sig;
       stage = "record";
+      // The receipt first, then the waits, then the recording — see
+      // confirmConversion.
+      const receipt = saveCustodyOutcomeReceipt(
+        "delivery",
+        wallet.toString(),
+        req.id,
+        "delivered",
+        sig,
+      );
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending(
+        `Burn sent for ${target} — waiting for the network to finalize it…`,
+        "The receipt is saved: a reload offers Retry recording; nothing is sent again.",
+      );
       const outcome = await waitForSignature(client.runtime.rpc, sig, {
         timeoutMs: 60_000,
       });
       if (outcome === "failed") {
         stage = "chain-failed";
+        dropCustodyOutcomeReceipt(receipt);
         throw new Error(
           "The transaction was sent but the network reported it failed: nothing was burned. Check the signature in the explorer before trying again.",
         );
       }
+      if (outcome === "confirmed")
+        await waitForFinalizedSignature(client.runtime.rpc, sig);
       await outcomeRecovery.record(req.id, "delivered", sig);
       toast.dismiss(pendingId);
       toast.showTx(sig, {
@@ -4674,6 +4874,7 @@ function DeliveryRequestsSection({
         metadata: {
           delivery_request_id: req.id,
           vault_pda: req.vault_pda,
+          attestation_hash: requestAttestation(attestations, req),
         },
       });
       setReturnReq(null);
@@ -4702,6 +4903,7 @@ function DeliveryRequestsSection({
               delivery_request_id: req.id,
               request_id: req.id,
               vault_pda: req.vault_pda,
+              attestation_hash: requestAttestation(attestations, req),
             },
             stage,
             signature: sentSignature,
@@ -4805,6 +5007,9 @@ function DeliveryRequestsSection({
                 ? vaultLoadIssue.get(r.vault_pda)
                 : undefined;
               const passportBlock = requestPassportBlock(info, loadIssue);
+              // The passport is still being read: a normal state, not a warning.
+              const confirmChecking =
+                r.vault_pda !== null && info === undefined && loadIssue === undefined;
               const rowLive =
                 r.status === "vault_opened" ||
                 r.status === "deposited" ||
@@ -4913,7 +5118,11 @@ function DeliveryRequestsSection({
                           Cancel &amp; return
                         </button>
                         {passportBlock && (
-                          <p className="w-full text-[11px] leading-snug text-amber-700">
+                          <p
+                            className={`w-full text-[11px] leading-snug ${
+                              confirmChecking ? "text-slate-500" : "text-amber-700"
+                            }`}
+                          >
                             Confirm is disabled: {passportBlock}
                           </p>
                         )}

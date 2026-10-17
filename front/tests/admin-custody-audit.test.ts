@@ -40,7 +40,7 @@ describe("custodyFailureStage", () => {
   it("finds a pre-wallet refusal down the cause chain, by name", () => {
     const wrapped = new Error("plan failed", { cause: new Error("hook", { cause: Object.assign(new Error("gate"), { name: "GateAccountSetError" }) }) });
     expect(isPreWalletRefusal(wrapped)).toBe(true);
-    for (const name of ["MaintenanceModeError", "KycOnlyFlowError", "ModuleDisabledFlowError", "SimulationUnavailableError", "EarlierTransactionUnconfirmedError"])
+    for (const name of ["MaintenanceModeError", "MaintenanceUnknownError", "KycOnlyFlowError", "ModuleDisabledFlowError", "SimulationUnavailableError", "EarlierTransactionUnconfirmedError"])
       expect(isPreWalletRefusal(Object.assign(new Error(name), { name })), name).toBe(true);
     expect(isPreWalletRefusal(new Error("Wallet rejected the transaction."))).toBe(false);
     expect(isPreWalletRefusal({ code: 4001 })).toBe(false);
@@ -129,18 +129,39 @@ describe("/admin/custody handlers (source)", () => {
     expect(functionSource("DeliveryRequestsSection")).not.toContain('status: "failed"');
   });
 
-  it("a burn waits for its confirmation before it is recorded, and a network failure is never recorded", () => {
-    for (const [section, name] of [["ConversionRequestsSection", "confirmConversion"], ["DeliveryRequestsSection", "confirmDelivery"]] as const) {
+  it("a burn's receipt is saved before any wait, the burn is finalized before it is recorded, and a network failure drops the receipt and is never recorded", () => {
+    for (const [section, name, status] of [
+      ["ConversionRequestsSection", "confirmConversion", "converted"],
+      ["DeliveryRequestsSection", "confirmDelivery", "delivered"],
+    ] as const) {
       const h = handler(functionSource(section), name);
+      const sent = h.indexOf("sentSignature = sig;");
+      // The receipt first — synchronously, right after the send, before the
+      // handler waits: a reload during the wait offers Retry recording.
+      const save = h.indexOf("const receipt = saveCustodyOutcomeReceipt(");
+      expect(save, `${name} receipt`).toBeGreaterThan(sent);
+      expect(h.slice(sent, save), `${name} nothing awaited before the receipt`).not.toContain("await ");
+      expect(h.slice(save, save + 160)).toContain(`"${status}",`);
       const wait = h.indexOf("await waitForSignature(client.runtime.rpc, sig, {");
-      expect(wait, name).toBeGreaterThan(h.indexOf("sentSignature = sig;"));
-      expect(h.indexOf("await outcomeRecovery.record(req.id,"), name).toBeGreaterThan(wait);
-      expect(h).toContain('if (outcome === "failed") {');
-      expect(h).toContain('stage = "chain-failed";');
+      expect(wait, `${name} wait after the receipt`).toBeGreaterThan(save);
+      const finality = h.indexOf("await waitForFinalizedSignature(client.runtime.rpc, sig);");
+      expect(finality, `${name} finality after the confirmation`).toBeGreaterThan(wait);
+      const record = h.indexOf("await outcomeRecovery.record(req.id,");
+      expect(record, `${name} record after finality`).toBeGreaterThan(finality);
+      const failed = h.indexOf('if (outcome === "failed") {');
+      expect(failed).toBeGreaterThan(wait);
+      expect(h.slice(failed, finality)).toContain('stage = "chain-failed";');
+      expect(h.slice(failed, finality)).toContain("dropCustodyOutcomeReceipt(receipt);");
       expect(h).toContain('"Burn sent — recording pending"');
       expect(h).not.toContain("send() resolves with the confirmed signature");
     }
     expect(functionSource("ConversionRequestsSection")).toContain('"Return sent — recording pending"');
+    // The helpers write the hook's own record (same kind, same identity) and only ever drop it.
+    const save = functionSource("saveCustodyOutcomeReceipt");
+    expect(save).toContain("savePendingChainRecord({");
+    expect(save).toContain('kind: "custody_outcome",');
+    expect(save).toContain("entityId: custodyOutcomeId(product, requestId, status),");
+    expect(functionSource("dropCustodyOutcomeReceipt")).toContain("clearPendingChainRecord(receipt);");
   });
 
   it("the approve modals report an open that did not complete from the saved intent", () => {

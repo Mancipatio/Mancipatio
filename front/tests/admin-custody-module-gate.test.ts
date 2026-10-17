@@ -46,11 +46,11 @@ describe("/admin/custody with conversion off hides only the conversion entry", (
     const queue = functionSource(code, "ConversionRequestsSection");
     expect(queue.split("\n").filter((l) => /\bconversionOn\b/.test(l)).map((l) => l.trim())).toEqual([
       'const conversionOn = moduleEnabled("custodyConversion");',
-      "conversionOn",
       "conversionOn || savedOpens.has(r.id);",
-      // The custody-entry pause (0x08) disables the real approve, never "Finish recording".
-      "tx.isSending || (conversionOn && entryPaused === true)",
-      "conversionOn && entryPaused === true",
+      "entryOn={conversionOn}",
+      // The custody-entry pause (0x08) disables a NEW open only: never "Finish
+      // recording", never the linking of a vault already opened (saved intent).
+      "conversionOn && entryPaused === true && !savedOpens.has(r.id);",
       "{conversionOn ? (",
       "{!conversionOn && !savedOpens.has(r.id) ? (",
       "recordOnly={!conversionOn}",
@@ -72,9 +72,12 @@ describe("/admin/custody with conversion off hides only the conversion entry", (
       expect(queue).toContain(exit);
       for (const block of guarded) expect(block).not.toContain(exit);
     }
-    // Off, the row says why there is no approve button.
-    expect(queue).toContain("Approval paused: conversion is switched off.");
-    expect(queue).toContain('title={moduleDisabledMessage("custodyConversion")}');
+    // Off, the row says why there is no approve button — the real reason
+    // (KYC-only mode, or the module switch), as visible text.
+    expect(queue).toContain('Approval paused: {moduleDisabledMessage("custodyConversion")}');
+    expect(queue).not.toContain('title={moduleDisabledMessage("custodyConversion")}');
+    // The saved open intents are read whatever the switch says.
+    expect(queue).toContain('useSavedCustodyOpens(\n    "conversion",\n    requests.filter((r) => r.status === "requested").map((r) => r.id),');
   });
 
   it("off, the conversion modal never shows the approval form or Open vault", () => {

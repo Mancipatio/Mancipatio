@@ -1,4 +1,11 @@
-import { address, type Address, type TransactionSigner } from "@solana/kit";
+import {
+  address,
+  type Address,
+  type GetSignatureStatusesApi,
+  type Rpc as KitRpc,
+  type Signature,
+  type TransactionSigner,
+} from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   findAdminRecordPda,
@@ -305,6 +312,7 @@ const PRE_WALLET_REFUSALS: ReadonlySet<string> = new Set([
   "ModuleDisabledFlowError",
   "KycOnlyFlowError",
   "MaintenanceModeError",
+  "MaintenanceUnknownError",
   "SimulationRefusedError",
   "SimulationUnavailableError",
   "GateAccountSetError",
@@ -498,4 +506,53 @@ export function custodyAttestationHex(hash: Iterable<number>): string | null {
     hex += byte.toString(16).padStart(2, "0");
   }
   return zero || hex.length === 0 ? null : hex;
+}
+
+// ── Waiting for the burn (confirmConversion / confirmDelivery) ─────────────
+//
+// The evidence API records a realize only once it reads it at `finalized`
+// (lib/server/custody-evidence.ts recordRealization): a recording sent the
+// moment the transaction is submitted is refused as "not finalized". The
+// handler therefore waits — with the receipt already saved — until the
+// signature is finalized before it records, so the first recording is the
+// one that succeeds and "Retry recording" stays the exception, not the rule.
+
+/** How long the handler waits for the realize to be finalized before it records it. */
+export const REALIZE_FINALITY_TIMEOUT_MS = 45_000;
+
+/** The longest one status read may take (the RPC transport has no timeout of its own). */
+const FINALITY_READ_TIMEOUT_MS = 10_000;
+
+export type FinalityOutcome = "finalized" | "failed" | "timeout";
+
+/**
+ * Polls one signature until the network reports it finalized, failed (the
+ * transaction landed with an error), or `timeoutMs` passes. A read that
+ * fails, or a status not known yet, counts as "not yet". Never throws: the
+ * caller decides what a timeout means (the handler records anyway and lets
+ * the server's answer stand, with the receipt saved for a retry).
+ */
+export async function waitForFinalizedSignature(
+  rpc: KitRpc<GetSignatureStatusesApi>,
+  signature: string,
+  opts: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<FinalityOutcome> {
+  const timeoutMs = opts.timeoutMs ?? REALIZE_FINALITY_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? 2_000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const { value } = await rpc
+        .getSignatureStatuses([signature as Signature])
+        .send({ abortSignal: AbortSignal.timeout(FINALITY_READ_TIMEOUT_MS) });
+      const status = value[0];
+      if (status?.err) return "failed";
+      if (status?.confirmationStatus === "finalized") return "finalized";
+    } catch {
+      // A failed read counts as "not yet".
+    }
+    if (Date.now() + pollMs > deadline) return "timeout";
+    await sleep(pollMs);
+  }
 }

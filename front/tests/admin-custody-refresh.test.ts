@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isSessionReadAction } from "@/lib/siws-session";
-import { custodyPageSource, topLevelFunction } from "./admin-custody-source";
+import { queueRefreshDue } from "@/lib/admin-badge-rules";
+import { custodyPageSource, topLevelFunction } from "./admin-custody-source.test.helpers";
 
 const page = custodyPageSource();
 const functionSource = (name: string) => topLevelFunction(page, name);
@@ -23,7 +24,30 @@ describe("refresh and polling (F085)", () => {
       // Only the latest list read commits; a failed background read keeps the rows.
       expect(src).toContain("const current = listGate.begin();");
       expect(src).toContain('if (!current() || mode === "background") return;');
+      // A background read never supersedes a read still in flight: an
+      // interactive read waiting on the session would otherwise be dropped by
+      // the gate once the background one failed without a session.
+      expect(src).toContain('if (mode === "background" && reading.current) return;');
+      expect(src).toContain("if (current()) reading.current = false;");
     }
+  });
+
+  describe("queueRefreshDue (the poll decision)", () => {
+    const base = { reason: "poll" as const, visible: true, busy: false, live: true, sinceLastMs: 30_000, minGapMs: 10_000 };
+    it("runs the timer only while visible, idle, live and past the minimum gap", () => {
+      expect(queueRefreshDue(base)).toBe(true);
+      expect(queueRefreshDue({ ...base, visible: false })).toBe(false);
+      expect(queueRefreshDue({ ...base, busy: true })).toBe(false);
+      expect(queueRefreshDue({ ...base, live: false })).toBe(false);
+      expect(queueRefreshDue({ ...base, sinceLastMs: 9_999 })).toBe(false);
+      expect(queueRefreshDue({ ...base, sinceLastMs: 10_000 })).toBe(true);
+    });
+    it("a tab shown again refreshes whatever the rows, still never hidden, busy or within the gap", () => {
+      expect(queueRefreshDue({ ...base, reason: "visible", live: false })).toBe(true);
+      expect(queueRefreshDue({ ...base, reason: "visible", live: false, busy: true })).toBe(false);
+      expect(queueRefreshDue({ ...base, reason: "visible", live: false, visible: false })).toBe(false);
+      expect(queueRefreshDue({ ...base, reason: "visible", sinceLastMs: 1_000 })).toBe(false);
+    });
   });
 
   it("a timer or a tab shown again reads with the session only, never a prompt", () => {
@@ -38,8 +62,9 @@ describe("refresh and polling (F085)", () => {
     }
     const poll = functionSource("useQueuePolling");
     expect(poll).toContain('document.addEventListener("visibilitychange", onVisibility);');
-    expect(poll).toContain('if (document.visibilityState !== "visible" || busy) return;');
-    expect(poll).toContain('if (reason === "poll" && !live) return;');
+    expect(poll).toContain("!queueRefreshDue({");
+    expect(poll).toContain('visible: document.visibilityState === "visible",');
+    expect(poll).toContain("minGapMs: QUEUE_MIN_GAP_MS,");
     expect(page).toContain("const QUEUE_POLL_MS = 30_000;");
     expect(page).toContain("const QUEUE_MIN_GAP_MS = 10_000;");
   });
@@ -80,7 +105,18 @@ describe("per-row vault reads (F203)", () => {
       // The retry re-reads that one row, not the whole queue.
       expect(src).toContain("onRetry={() => void loadVaultInfo(liveRequestVaults([r]))}");
       expect(src).not.toContain("loadVaultInfo(requests)");
+      // A row that left the live set keeps no stale facts (authority, deadline).
+      expect(src).toContain("pruneVaultInfo(live);");
     }
+    expect(hook).toContain("const pruneVaultInfo = useCallback((keep: readonly string[]) => {");
+    // A read that failed after an earlier success closes Confirm (fail closed)
+    // and the row offers the re-read; so does a passport the read could not settle.
+    const block = functionSource("requestPassportBlock");
+    expect(block).toContain('if (issue === "error")');
+    expect(block).not.toContain('if (info === undefined && issue === "error")');
+    const gate = functionSource("RequestPassportGate");
+    expect(gate).toContain('info?.passport?.status === "registry_unreadable"');
+    expect(gate).toContain("{unsettled} {retry}");
     // The vault facts are read once per burn and shared with the KYC accounts.
     expect(page).not.toContain("requestRealizeKycAccounts");
     expect(page.match(/fetchVerifiedCustodyVault\(client\.runtime\.rpc, vaultPda\)/g)).toHaveLength(2);
@@ -103,6 +139,14 @@ describe("why a button is disabled (F200, F205)", () => {
     expect(modal).not.toContain("{!reasonOk && reason.length > 0 && (");
     expect(modal).toContain("`Enter a reason (at least ${reasonMinLength} characters).`");
     expect(modal).toContain("`At least ${reasonMinLength} characters.`");
+  });
+
+  it("a Confirm disabled only by the first passport read says so in slate, not amber", () => {
+    for (const name of ["ConversionRequestsSection", "DeliveryRequestsSection"]) {
+      const src = functionSource(name);
+      expect(src).toContain("r.vault_pda !== null && info === undefined && loadIssue === undefined;");
+      expect(src).toContain('confirmChecking ? "text-slate-500" : "text-amber-700"');
+    }
   });
 
   it("the registry resolving is shown as loading, in slate with a spinner; red is for a real error only", () => {
