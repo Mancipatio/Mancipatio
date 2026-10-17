@@ -30,8 +30,11 @@ import {
 } from "@/lib/wallet-changes";
 import { walletChain } from "@/lib/wallet-chain";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
-import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
+import { assertInstructionsInScope, assertInstructionsNotPaused, clearPauseFlagsCache, hasPauseFlow, readPauseFlags } from "@/lib/pause-gate";
 import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
+import { withRpcReadRetry, type RpcReadRetryOptions } from "@/lib/rpc-retry";
+import { emitSendStage } from "@/lib/send-stage";
+import { markSentAfterSigning } from "@/lib/tx-error";
 import {
   computeUnitLimitFromSimulation,
   PROBE_LIFETIME,
@@ -398,6 +401,31 @@ export const SETTLE_WINDOW_MS = 60_000;
 /** The longest the next send waits for the previous one to be confirmed. */
 export const SETTLE_TIMEOUT_MS = 30_000;
 /**
+ * The longest a blockhash fetch (and the batch path's block-height read) may
+ * take: the RPC transport has no timeout of its own, and a page's busy modal
+ * cannot be closed meanwhile. The single path sets it as the request's
+ * abortSignal, which the SDK (@solana/client 1.7) hands to its blockhash
+ * fetch and its planning only — never to the wallet, whose prompt may take
+ * as long as the user needs (the send options' signal would reach the
+ * wallet signer too). Cut off, nothing was sent, and lib/tx-error says so.
+ */
+export const BLOCKHASH_FETCH_TIMEOUT_MS = 15_000;
+/**
+ * The longest one broadcast of prepareAndSendAll may take. Cut off after the
+ * wallet signed, its outcome is unknown and lib/tx-error says so (the
+ * journal keeps the signature; the resume reads its status).
+ */
+export const BROADCAST_TIMEOUT_MS = 30_000;
+
+export type VerifiedTransactionsOptions = {
+  /**
+   * How a read of the gate that the RPC refused for a moment (the genesis
+   * hash, the simulation: HTTP 429, a 5xx, no answer) is retried
+   * (lib/rpc-retry): its default waits unless given. Tests pass their own.
+   */
+  readRetry?: Pick<RpcReadRetryOptions, "delaysMs" | "sleep" | "random">;
+};
+/**
  * How a send is waited for: at most SETTLE_TIMEOUT_MS in all, a status read
  * the RPC refused for a moment (HTTP 429, a 5xx, no response) retried within
  * that time (lib/rpc-retry) instead of ending the wait as "unknown" — one
@@ -452,6 +480,15 @@ function settleWait(context: { assertCurrent: () => void }): SignatureWaitOption
  * made by this client in the last minute is first waited for (at most 30 s),
  * so back-to-back dependent sends (lib/issuer-authority sendBatches) are
  * simulated against the state the earlier one created.
+ * Between the click and the wallet, prepareAndSend runs the checks none of
+ * which needs another's result together (checksTogether: the network
+ * identity, the pause flags, the gate accounts, the priority fee, the
+ * maintenance flag), then waits for the previous send, then takes the
+ * pause decision on flags read after that wait, then the simulation gate,
+ * then the policy check, then the wallet; every step is announced on
+ * lib/send-stage, so the site-wide notice (components/send-progress-notice)
+ * says what a button is waiting for. Reads the RPC refuses for a moment
+ * (the genesis hash, the simulation) are retried (lib/rpc-retry).
  * Not covered, on purpose: the co-signed envelopes (issuer recovery, KYC
  * registry creation) are signed outside this client by two keys over a fixed
  * message (fixed blockhash and compute budget), run their own live checks
@@ -461,7 +498,9 @@ function settleWait(context: { assertCurrent: () => void }): SignatureWaitOption
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,
+  options: VerifiedTransactionsOptions = {},
 ): SolanaClient {
+  const readRetry = options.readRetry ?? {};
   const verifiers = new WeakMap<
     SolanaClient["runtime"]["rpc"],
     ReturnType<typeof createNetworkVerifier>
@@ -494,7 +533,8 @@ export function withVerifiedTransactions(
     const { rpc } = context;
     let verify = verifiers.get(rpc);
     if (!verify) {
-      verify = createNetworkVerifier(rpc, network);
+      // Every send checks the network; a read the RPC refused for a moment is read again.
+      verify = createNetworkVerifier(rpc, network, { retryReads: readRetry });
       verifiers.set(rpc, verify);
     }
     await verify();
@@ -587,6 +627,91 @@ export function withVerifiedTransactions(
     context.assertCurrent();
   }
 
+  /** The value of a check that ran together with others, or its failure thrown: they are reported in order. */
+  function checked<T>(result: PromiseSettledResult<T>): T {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  }
+
+  /** v1: a frozen issuer or a blocklisted party, as the program would refuse it (lib/proceeds-gate.ts). */
+  async function gateAccountsUnset(input: TransactionPrepareRequest, context: Context) {
+    await assertGateAccountsUnset(context.rpc, input.instructions);
+    context.assertCurrent();
+  }
+
+  /**
+   * The pause flags read now, alongside the other checks, so that the
+   * decision taken after the wait for the previous send (notPaused) finds
+   * them cached (lib/pause-gate: a few seconds). Nothing is decided here, a
+   * failed read is no error (the gate fails open), and a request without a
+   * pause flow (an exit, a custody recording) reads nothing.
+   */
+  async function warmPauseFlags(input: TransactionPrepareRequest, context: Context) {
+    if (hasPauseFlow(input.instructions)) await readPauseFlags(context.rpc);
+  }
+
+  /** The emergency pause's decision (lib/pause-gate.ts), on the flags as cached, or re-read once this client's previous send was waited for. */
+  async function notPaused(input: TransactionPrepareRequest, context: Context) {
+    await assertInstructionsNotPaused(context.rpc, input.instructions);
+    context.assertCurrent();
+  }
+
+  /**
+   * prepareAndSend's checks none of which needs another's result, started
+   * together — the network identity, the pause flags (read only: the
+   * decision waits for the previous send), the gate accounts, the priority
+   * fee and the maintenance flag — about one round trip of waiting instead
+   * of five between the click and the wallet. Reported in the order they
+   * ran in one after another before, so a request that fails several of
+   * them fails the same way: the network first (an RPC on the wrong cluster
+   * stops everything else from being looked at), then the two checks that
+   * need no network (the fee payer, the pilot scope), then the gate
+   * accounts, the fee and the maintenance flag. Every check is started
+   * before any is reported, and none is left unhandled. Returns the request
+   * with its priority fee.
+   */
+  async function checksTogether(input: TransactionPrepareAndSendRequest, context: Context): Promise<TransactionPrepareAndSendRequest> {
+    emitSendStage({ kind: "checking" });
+    const net = assertNetwork(context);
+    const rest = Promise.allSettled([warmPauseFlags(input, context), gateAccountsUnset(input, context), withFee(input, context), writable(context)]);
+    await net;
+    checkAuthority(input, context);
+    // The pilot scope and KYC-only mode, before any wallet prompt (lib/pause-gate.ts).
+    assertInstructionsInScope(input.instructions, network);
+    const [, gates, fee, site] = await rest;
+    checked(gates);
+    const request = checked(fee);
+    checked(site);
+    context.assertCurrent();
+    return request;
+  }
+
+  /** `send`, with the stage channel told how it ended: "done" when it returns, "failed" when it throws (the notice hides either way). */
+  async function staged<T>(send: () => Promise<T>): Promise<T> {
+    try {
+      const result = await send();
+      emitSendStage({ kind: "done" });
+      return result;
+    } catch (err) {
+      emitSendStage({ kind: "failed" });
+      throw err;
+    }
+  }
+
+  /** The wait for this client's previous send, announced (the notice says what it is waiting for). */
+  const announceWait = (info: { count: number }) =>
+    emitSendStage({ kind: "waiting-previous", count: info.count, maxSeconds: SETTLE_TIMEOUT_MS / 1000 });
+
+  /**
+   * The request's abortSignal, which the SDK hands to its blockhash fetch
+   * and its planning only (BLOCKHASH_FETCH_TIMEOUT_MS): the wallet's prompt
+   * is never cut off, and the broadcast comes only after it. A caller's own
+   * signal is kept.
+   */
+  function withBlockhashDeadline(request: TransactionPrepareAndSendRequest): TransactionPrepareAndSendRequest {
+    return request.abortSignal ? request : { ...request, abortSignal: AbortSignal.timeout(BLOCKHASH_FETCH_TIMEOUT_MS) };
+  }
+
   // The last send this client made (every transaction of it not yet known
   // to be confirmed: a batch's all, the per-transaction path's last one), so
   // the next one can wait for it.
@@ -609,19 +734,26 @@ export function withVerifiedTransactions(
    * outcome ("failed" first), for prepareAndSendAll to act on; a single send
    * lets the simulation decide. A send not decided yet (timeout, unreadable)
    * is kept, so the next send waits for it again (within SETTLE_WINDOW_MS).
+   * `waited` says whether there was a previous send to wait for at all (its
+   * first status read may already show it confirmed): the callers then take
+   * the pause decision on flags read after it, not on flags cached from
+   * before it landed. The outcome is advisory: a send still open after the
+   * timeout is not refused here (the simulation, or prepareAndSendAll,
+   * decides); the wait is at most SETTLE_TIMEOUT_MS, shorter than a
+   * blockhash's life, so a dropped transaction is told apart only there.
    */
   async function settlePreviousSend(
     context: Context,
     onWait?: (info: { count: number }) => void,
-  ): Promise<Exclude<SignatureOutcome, "confirmed"> | null> {
+  ): Promise<{ outcome: Exclude<SignatureOutcome, "confirmed"> | null; waited: boolean }> {
     const previous = lastSend;
-    if (!previous || previous.rpc !== context.rpc || Date.now() - previous.at > SETTLE_WINDOW_MS) return null;
+    if (!previous || previous.rpc !== context.rpc || Date.now() - previous.at > SETTLE_WINDOW_MS) return { outcome: null, waited: false };
     onWait?.({ count: previous.signatures.length });
     const outcomes = await waitForSignatures(context.rpc, previous.signatures, settleWait(context));
     context.assertCurrent();
     if (lastSend === previous && outcomes.every((o) => o === "confirmed" || o === "failed")) lastSend = null;
     const open = outcomes.filter((o): o is Exclude<SignatureOutcome, "confirmed"> => o !== "confirmed");
-    return open.find((o) => o === "failed") ?? open[0] ?? null;
+    return { outcome: open.find((o) => o === "failed") ?? open[0] ?? null, waited: true };
   }
 
   /**
@@ -633,7 +765,9 @@ export function withVerifiedTransactions(
   async function gate(message: SimulatableMessage, appInstructions: TransactionPrepared["instructions"], context: Context) {
     let verdict: SimulationVerdict;
     try {
-      verdict = await simulateMessage(context.rpc, message);
+      // A read the RPC refused for a moment (HTTP 429, a 5xx, no answer) is
+      // read again (lib/rpc-retry), each attempt with its own cut-off; never a send.
+      verdict = await withRpcReadRetry(() => simulateMessage(context.rpc, message), readRetry);
     } catch (cause) {
       context.assertCurrent();
       throw new SimulationUnavailableError(network, cause);
@@ -716,35 +850,50 @@ export function withVerifiedTransactions(
     prepareAndSend: async (input, options) => {
       // A note about an earlier signing never explains this send (lib/wallet-changes).
       clearWalletChange();
-      const context = capture();
-      await assertNetwork(context);
-      checkAuthority(input, context);
-      // The pilot scope and the emergency pause, before any wallet prompt (lib/pause-gate.ts).
-      assertInstructionsInScope(input.instructions, network);
-      await assertInstructionsNotPaused(context.rpc, input.instructions);
-      await assertGateAccountsUnset(context.rpc, input.instructions);
-      context.assertCurrent();
-      // The fee is settled before the policy check's wallet prompt.
-      const { request, placeholder } = withLeadingComputeUnitLimit(await withFee(input, context));
-      // Maintenance first: nothing is simulated or offered while the site is paused.
-      await writable(context);
-      await settlePreviousSend(context);
-      // The simulation gate, before the policy prompt and the wallet.
-      const verdict = await gateRequest(request, context);
-      const tuned = placeholder ? withSimulatedComputeUnitLimit(request, verdict) : request;
-      await requestPolicy(context);
-      const result = await base.prepareAndSend(guardTransactionGraph(tuned, context.session, context.assertCurrent), options);
-      rememberSend(context, result);
-      clearWalletChange();
-      context.assertCurrent();
-      return result;
+      return staged(() => sendOne(input, options));
     },
   });
 
+  /** prepareAndSend proper (see withVerifiedTransactions): the checks together, the previous send, the pause decision, the gate, the policy, the wallet. */
+  async function sendOne(input: TransactionPrepareAndSendRequest, options: Parameters<SolanaClient["transaction"]["prepareAndSend"]>[1]) {
+    const context = capture();
+    // The fee is settled before the policy check's wallet prompt; nothing is simulated or offered while the site is paused.
+    const { request, placeholder } = withLeadingComputeUnitLimit(await checksTogether(input, context));
+    // This client's previous send first; then the pause decision, on flags
+    // read after it when there was one: a click right after a Resume, or a
+    // retry once a window reopened, is not refused on flags cached from before.
+    const { waited } = await settlePreviousSend(context, announceWait);
+    if (waited) clearPauseFlagsCache();
+    await notPaused(input, context);
+    // The simulation gate, before the policy prompt and the wallet.
+    emitSendStage({ kind: "testing" });
+    const verdict = await gateRequest(request, context);
+    const tuned = placeholder ? withSimulatedComputeUnitLimit(request, verdict) : request;
+    // The account check (a sign-in message prompt is possible), then the wallet.
+    emitSendStage({ kind: "account" });
+    await requestPolicy(context);
+    emitSendStage({ kind: "wallet" });
+    const result = await base.prepareAndSend(guardTransactionGraph(withBlockhashDeadline(tuned), context.session, context.assertCurrent), options);
+    rememberSend(context, result);
+    clearWalletChange();
+    context.assertCurrent();
+    return result;
+  }
+
+  /**
+   * One signed transaction of prepareAndSendAll sent with preflight, bounded
+   * (BROADCAST_TIMEOUT_MS). What fails here failed after the wallet signed
+   * and is marked so (lib/tx-error markSentAfterSigning): the transaction
+   * may still land, and the wording must not say nothing was sent.
+   */
   async function broadcast(context: Context, tx: Transaction) {
-    await context.rpc
-      .sendTransaction(getBase64EncodedWireTransaction(tx), { encoding: "base64", preflightCommitment: "confirmed", skipPreflight: false })
-      .send();
+    try {
+      await context.rpc
+        .sendTransaction(getBase64EncodedWireTransaction(tx), { encoding: "base64", preflightCommitment: "confirmed", skipPreflight: false })
+        .send({ abortSignal: AbortSignal.timeout(BROADCAST_TIMEOUT_MS) });
+    } catch (err) {
+      throw markSentAfterSigning(err);
+    }
   }
 
   async function prepareAndSendAll(
@@ -757,14 +906,25 @@ export function withVerifiedTransactions(
       throw new Error(`The compute unit headroom must be an integer between 0 and ${MAX_COMPUTE_UNIT_LIMIT}`);
     }
     clearWalletChange();
+    return staged(() => sendAll(requests, options, headroom));
+  }
+
+  /** prepareAndSendAll proper, its arguments checked: see BatchSender. */
+  async function sendAll(
+    requests: readonly TransactionPrepareAndSendRequest[],
+    options: BatchSendOptions,
+    headroom: number,
+  ): Promise<BatchSendResult> {
     const context = capture();
+    emitSendStage({ kind: "checking" });
     await assertNetwork(context);
     // Every gate of prepareAndSend, for each transaction, before any prompt.
     const gated: { request: TransactionPrepareAndSendRequest; placeholder: boolean }[] = [];
     for (const input of requests) {
       checkAuthority(input, context);
       assertInstructionsInScope(input.instructions, network);
-      await assertInstructionsNotPaused(context.rpc, input.instructions);
+      // The pause flags, read now and decided once the previous send is waited for (below).
+      await warmPauseFlags(input, context);
       await assertGateAccountsUnset(context.rpc, input.instructions);
       context.assertCurrent();
       gated.push(withLeadingComputeUnitLimit(await withFee(input, context)));
@@ -779,8 +939,15 @@ export function withVerifiedTransactions(
     // one-by-one prompts: one that failed or is not confirmed stops this call
     // before anything is simulated or signed (a wallet would guard against a
     // state that is about to change; the resume decides).
-    const previous = await settlePreviousSend(context, options.onSettlingPrevious);
-    if (previous !== null) throw new EarlierTransactionUnconfirmedError(null, previous);
+    const previous = await settlePreviousSend(context, (info) => {
+      announceWait(info);
+      options.onSettlingPrevious?.(info);
+    });
+    if (previous.outcome !== null) throw new EarlierTransactionUnconfirmedError(null, previous.outcome);
+    // The pause decision for each, on flags read after that wait when there was one (see sendOne).
+    if (previous.waited) clearPauseFlagsCache();
+    for (const input of requests) await notPaused(input, context);
+    emitSendStage({ kind: "testing" });
     const tuned: TransactionPrepareRequest[] = [];
     // What a wallet may do to each one's compute budget if it sets its own (a
     // price up to the network's cap, a limit no lower than the units the
@@ -795,6 +962,7 @@ export function withVerifiedTransactions(
       tuned.push(rest);
       bounds.push({ maxComputeUnitPrice, minComputeUnitLimit: verdict.unitsConsumed || null });
     }
+    emitSendStage({ kind: "account" });
     await requestPolicy(context);
 
     const outcomes: BatchOutcome[] = requests.map((_, index) => ({
@@ -809,7 +977,9 @@ export function withVerifiedTransactions(
 
     if (options.mode !== "per-transaction") {
       // One blockhash for all of them: they are signed together and sent at once.
-      const lifetime = (await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      const lifetime = (
+        await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(BLOCKHASH_FETCH_TIMEOUT_MS) })
+      ).value;
       context.assertCurrent();
       const prepared: TransactionPrepared[] = [];
       for (const request of tuned) {
@@ -820,6 +990,7 @@ export function withVerifiedTransactions(
       }
       const built = prepared.map((p) => compileTransaction(p.message));
       try {
+        emitSendStage({ kind: "wallet" });
         options.onPrompt?.({ mode: "batch", index: 0, count: built.length });
         const signedBytes = await signTransactionsWithWallet({
           session: context.session,
@@ -835,7 +1006,9 @@ export function withVerifiedTransactions(
         // Signing N transactions can outlast the one blockhash (a Ledger confirms
         // each on the device): nothing is journalled or sent then, and the batch
         // falls back to fresh-blockhash signing one by one.
-        const height = BigInt(await context.rpc.getBlockHeight({ commitment: "confirmed" }).send());
+        const height = BigInt(
+          await context.rpc.getBlockHeight({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(BLOCKHASH_FETCH_TIMEOUT_MS) }),
+        );
         context.assertCurrent();
         if (height + BATCH_EXPIRY_MARGIN_BLOCKS >= lifetime.lastValidBlockHeight) {
           throw new BatchSigningUnsupportedError(SIGNING_TOO_SLOW);
@@ -850,6 +1023,7 @@ export function withVerifiedTransactions(
         await options.onSigned(journal, { waitMs: Number(lifetime.lastValidBlockHeight - height - BATCH_EXPIRY_MARGIN_BLOCKS) * MS_PER_BLOCK });
         // It may have taken a while: still the same wallet, RPC and network before anything is sent.
         context.assertCurrent();
+        emitSendStage({ kind: "sending" });
         const sentSignatures: string[] = [];
         for (const [index, tx] of signed.entries()) {
           outcomes[index] = { ...outcomes[index], signature: journal[index].signature, lastValidBlockHeight: lifetime.lastValidBlockHeight };
@@ -879,13 +1053,16 @@ export function withVerifiedTransactions(
     let prompts = 0;
     for (let index = 0; index < tuned.length; index++) {
       context.assertCurrent();
-      const lifetime = (await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      const lifetime = (
+        await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(BLOCKHASH_FETCH_TIMEOUT_MS) })
+      ).value;
       const fetchedAt = Date.now();
       const p = await base.prepare(guardTransactionGraph({ ...tuned[index], lifetime }, context.session, context.assertCurrent));
       context.assertCurrent();
       checkAuthority(p, context);
       let signed: Transaction;
       try {
+        emitSendStage({ kind: "wallet" });
         options.onPrompt?.({ mode: "per-transaction", index, count: tuned.length });
         prompts += 1;
         // The SDK keeps the wallet's message bytes: compared with the one built
@@ -914,6 +1091,7 @@ export function withVerifiedTransactions(
       try {
         // The hook may have taken a while: still the same wallet, RPC and network (else not sent).
         context.assertCurrent();
+        emitSendStage({ kind: "sending" });
         await broadcast(context, signed);
       } catch (error) {
         // Refused, or failed in flight and still able to land (or not sent: the
@@ -926,10 +1104,11 @@ export function withVerifiedTransactions(
       lastSent = signature;
       if (index + 1 === tuned.length) break;
       options.onWaiting?.({ index, count: tuned.length });
-      const [settled] = await waitForSignatures(context.rpc, [signature], settleWait(context));
+      announceWait({ count: 1 });
+      const [landed] = await waitForSignatures(context.rpc, [signature], settleWait(context));
       context.assertCurrent();
-      if (settled !== "confirmed") {
-        const error = new EarlierTransactionUnconfirmedError(`${index + 1} of ${tuned.length}`, settled);
+      if (landed !== "confirmed") {
+        const error = new EarlierTransactionUnconfirmedError(`${index + 1} of ${tuned.length}`, landed);
         for (let rest = index + 1; rest < tuned.length; rest++) outcomes[rest].error = error;
         break;
       }

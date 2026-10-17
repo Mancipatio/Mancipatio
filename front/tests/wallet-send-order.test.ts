@@ -25,6 +25,8 @@ import {
   getSolanaErrorFromJsonRpcError,
   getTransactionDecoder,
   getTransactionEncoder,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  SolanaError,
   type Instruction,
 } from "@solana/kit";
 import type { Wallet } from "@wallet-standard/base";
@@ -108,15 +110,27 @@ function fakeWallet(signed: SignInput[], mode: WalletMode = {}): Wallet {
   } as unknown as Wallet;
 }
 
-function fakeRpc(unitsConsumed: bigint, simulationErr: unknown = null, preflightErr: unknown = null, simulationLogs: string[] = []) {
+type RpcFaults = {
+  simulationErr?: unknown;
+  simulationLogs?: string[];
+  preflightErr?: unknown;
+  /** Thrown by getLatestBlockhash (made at call time, so a test's NODE_ENV applies to the message). */
+  blockhashErr?: () => unknown;
+  /** Thrown by sendTransaction, likewise. */
+  sendErr?: () => unknown;
+};
+
+function fakeRpc(unitsConsumed: bigint, faults: RpcFaults = {}) {
   const simulated: string[] = [];
   const simulateConfigs: unknown[] = [];
   const sent: string[] = [];
-  const blockhashes = { count: 0 };
+  const blockhashes = { count: 0, signals: [] as (AbortSignal | undefined)[] };
   const rpc = {
     getLatestBlockhash: () => ({
-      send: async () => {
+      send: async (options?: { abortSignal?: AbortSignal }) => {
         blockhashes.count += 1;
+        blockhashes.signals.push(options?.abortSignal);
+        if (faults.blockhashErr) throw faults.blockhashErr();
         return { value: { blockhash: BLOCKHASH, lastValidBlockHeight: BigInt(100) } };
       },
     }),
@@ -124,18 +138,19 @@ function fakeRpc(unitsConsumed: bigint, simulationErr: unknown = null, preflight
       send: async () => {
         simulated.push(wire);
         simulateConfigs.push(config);
-        return { value: { unitsConsumed, err: simulationErr, logs: simulationLogs } };
+        return { value: { unitsConsumed, err: faults.simulationErr ?? null, logs: faults.simulationLogs ?? [] } };
       },
     }),
     sendTransaction: (wire: string) => ({
       send: async () => {
         sent.push(wire);
-        if (preflightErr) {
+        if (faults.sendErr) throw faults.sendErr();
+        if (faults.preflightErr) {
           // What kit makes of the RPC's -32002 answer.
           throw getSolanaErrorFromJsonRpcError({
             code: -32002,
             message: "Transaction simulation failed",
-            data: { accounts: null, err: preflightErr, logs: [], unitsConsumed: 0, loadedAccountsDataSize: 0 },
+            data: { accounts: null, err: faults.preflightErr, logs: [], unitsConsumed: 0, loadedAccountsDataSize: 0 },
           });
         }
         return SIGNATURE;
@@ -156,7 +171,7 @@ function instructionsOf(wire: string): string[] {
   });
 }
 
-type Setup = { withOverrides?: boolean; wallet?: WalletMode; simulationErr?: unknown; simulationLogs?: string[]; preflightErr?: unknown };
+type Setup = RpcFaults & { withOverrides?: boolean; wallet?: WalletMode };
 
 async function setup(unitsConsumed: bigint, options: Setup = {}) {
   const signed: SignInput[] = [];
@@ -167,7 +182,7 @@ async function setup(unitsConsumed: bigint, options: Setup = {}) {
   );
   // As in app/providers: every session is the guarded one.
   const session: WalletSession = guardWalletSession(await connector.connect(), () => session);
-  const { rpc, simulated, simulateConfigs, sent, blockhashes } = fakeRpc(unitsConsumed, options.simulationErr, options.preflightErr, options.simulationLogs);
+  const { rpc, simulated, simulateConfigs, sent, blockhashes } = fakeRpc(unitsConsumed, options);
   const runtime = { rpc, rpcSubscriptions: {} } as unknown as SolanaClient["runtime"];
   const transaction = createTransactionHelper(runtime, () => "confirmed");
   const client = {
@@ -336,6 +351,49 @@ describe("what the wallet is handed on a send", () => {
     expect((failure as SimulationRefusedError).instructionIndex).toBe(0);
     expect(explainSendError(failure)).toMatch(
       /^This transaction would fail, so your wallet was not opened\. Step 1 of 1 \(.+\) was refused by the Manci registry program: A wallet in this transaction .+ \(PartyBlocklisted\)\.$/,
+    );
+  });
+});
+
+// r2g4-03 / r2g4-06, against the real SDK: where an RPC refusal lands in its
+// error tree decides the wording — a blockhash fetch comes before the wallet,
+// sendTransaction after it signed — and a production build's message ("Solana
+// error #8100002; Decode this error by running npx …") never reaches the user.
+describe("an RPC that refuses the request, before and after the wallet", () => {
+  const http = (statusCode: number) => new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode });
+
+  it("the blockhash fetch carries the request's own cut-off, and a 429 there means nothing was sent", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const f = await setup(BigInt(10_000), { blockhashErr: () => http(429) });
+    const failure = await f.send().then(() => null, (err: unknown) => err);
+    expect(failure).not.toBeNull();
+    expect(f.signed).toHaveLength(0);
+    expect(f.sent).toHaveLength(0);
+    expect(f.blockhashes.signals).toHaveLength(1);
+    expect(f.blockhashes.signals[0]).toBeInstanceOf(AbortSignal);
+    expect(explainSendError(failure)).toBe("The Solana RPC refused the request (HTTP 429). Nothing was sent — try again in a moment.");
+  });
+
+  it("a 503 on sendTransaction, after the wallet signed: the outcome is unknown, never 'nothing was sent', never the decode text", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const f = await setup(BigInt(10_000), { sendErr: () => http(503) });
+    const failure = await f.send().then(() => null, (err: unknown) => err);
+    expect(failure).not.toBeNull();
+    expect(f.signed).toHaveLength(1);
+    expect(f.sent).toHaveLength(1);
+    const text = explainSendError(failure);
+    expect(text).toBe(
+      "The Solana RPC refused the request (HTTP 503) after your wallet signed. The transaction may not have been broadcast; check it in the explorer before retrying.",
+    );
+    expect(text).not.toMatch(/npx|Nothing was sent/);
+  });
+
+  it("no answer from the RPC on sendTransaction reads the same way", async () => {
+    const f = await setup(BigInt(10_000), { sendErr: () => new TypeError("Failed to fetch") });
+    const failure = await f.send().then(() => null, (err: unknown) => err);
+    expect(f.signed).toHaveLength(1);
+    expect(explainSendError(failure)).toBe(
+      "The Solana RPC did not answer after your wallet signed. The transaction may not have been broadcast; check it in the explorer before retrying.",
     );
   });
 });

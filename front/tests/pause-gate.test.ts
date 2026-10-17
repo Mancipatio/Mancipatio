@@ -19,8 +19,10 @@ import {
   CANCEL_OFFER_DISCRIMINATOR,
   CREATE_OFFER_DISCRIMINATOR,
   CREATE_PROPOSAL_DISCRIMINATOR,
+  DEPOSIT_TO_CUSTODY_VAULT_DISCRIMINATOR,
   REALIZE_CUSTODY_VAULT_DISCRIMINATOR,
   RETURN_CUSTODY_VAULT_DISCRIMINATOR,
+  SET_PAUSE_FLAGS_DISCRIMINATOR,
   TAKE_OFFER_DISCRIMINATOR,
   TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
   getOpenCustodyVaultInstructionDataEncoder,
@@ -35,7 +37,9 @@ import {
   assertInstructionsInScope,
   assertInstructionsNotPaused,
   clearPauseFlagsCache,
+  CUSTODY_ENTRY_CLOSED_MESSAGE,
   declaredGateFacts,
+  hasPauseFlow,
   heldBit,
   MODULE_FLOWS,
   ModuleDisabledFlowError,
@@ -46,6 +50,7 @@ import {
   pauseFlowsFor,
   pauseMaskFor,
   pausedFlowFor,
+  pausedFlowMessage,
   pausedInstruction,
   PausedFlowError,
   readPauseFlags,
@@ -282,6 +287,41 @@ describe("the cached read and the gate", () => {
     const read = vi.fn(async () => PAUSE.PAUSE_FLAGS_ALL);
     await assertInstructionsNotPaused(rpc, [ix(BUY_DISCRIMINATOR, "11111111111111111111111111111111")], { read });
     expect(read).not.toHaveBeenCalled();
+  });
+
+  // r2g4-11: the custody recordings (trigger, realize, return) and the pause
+  // itself have no pause flow, so a send of them reads nothing.
+  it("reads the flags only for an instruction with a pause flow: not for the custody recordings or an exit, once for an entry next to them", async () => {
+    const read = vi.fn(async () => PAUSE.PAUSE_FLAGS_ALL);
+    await assertInstructionsNotPaused(rpc, [ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(REALIZE_CUSTODY_VAULT_DISCRIMINATOR)], { read });
+    await assertInstructionsNotPaused(rpc, [ix(RETURN_CUSTODY_VAULT_DISCRIMINATOR)], { read });
+    await assertInstructionsNotPaused(rpc, [ix(SET_PAUSE_FLAGS_DISCRIMINATOR), ix(CANCEL_OFFER_DISCRIMINATOR)], { read });
+    expect(read).not.toHaveBeenCalled();
+    expect(hasPauseFlow([ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(RETURN_CUSTODY_VAULT_DISCRIMINATOR)])).toBe(false);
+    expect(hasPauseFlow([ix(new Uint8Array(8).fill(9))])).toBe(false);
+    expect(hasPauseFlow([ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(BUY_DISCRIMINATOR)])).toBe(true);
+    await expect(assertInstructionsNotPaused(rpc, [ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(BUY_DISCRIMINATOR)], { read })).rejects.toBeInstanceOf(PausedFlowError);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  // r2g4-12: on mainnet 0x08 is the steady state between conversions; a
+  // holder who deposits outside the window meets a closed window, not an
+  // emergency.
+  it("the custody entry is worded as a closed window; the other bits keep the emergency wording", async () => {
+    const err = await assertInstructionsNotPaused(rpc, [ix(DEPOSIT_TO_CUSTODY_VAULT_DISCRIMINATOR)], { read: async () => PAUSE.PAUSE_CUSTODY_ENTRY }).catch((e) => e);
+    expect(err).toBeInstanceOf(PausedFlowError);
+    expect(err.bit).toBe(PAUSE.PAUSE_CUSTODY_ENTRY);
+    expect(err.message).toBe(CUSTODY_ENTRY_CLOSED_MESSAGE);
+    expect(err.message).toBe(
+      "Custody entry is closed: deposits and new escrows open only while Manci opens the window for your request. Nothing was sent to your wallet. Ask Manci to open it, then try again.",
+    );
+    expect(err.message).not.toMatch(/emergency/);
+    expect(explainSendError(new Error("send failed", { cause: err }))).toBe(CUSTODY_ENTRY_CLOSED_MESSAGE);
+    // The page banner says the same, for the deposit and the escrow open alike.
+    expect(pausedFlowFor(PAUSE.PAUSE_CUSTODY_ENTRY, AssetRegistryInstruction.DepositToCustodyVault)).toBe(CUSTODY_ENTRY_CLOSED_MESSAGE);
+    expect(pausedFlowMessage(PAUSE.PAUSE_CUSTODY_ENTRY)).toBe(CUSTODY_ENTRY_CLOSED_MESSAGE);
+    expect(pausedFlowMessage(PAUSE.PAUSE_SECONDARY)).toBe(`Trading through Manci is paused on Manci (emergency pause). Nothing was sent to your wallet. ${PAUSE.PAUSE_EXITS_OPEN}`);
+    expect(pausedFlowMessage(PAUSE.PAUSE_PAYOUT_MODULES)).toBe(PAYOUT_MODULES_OFF_MESSAGE);
   });
 
   it("pausedFlowFor gives a page its banner text (null when unread or not paused)", () => {
