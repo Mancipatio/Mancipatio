@@ -23,6 +23,15 @@
 // have accepted the Terms in force (lib/server/tos-gate.ts: 409 without an
 // acceptance, 503 when it cannot be checked), checked last, right before
 // the write.
+//
+// One balance, one set of requests: the wallet's requests of the same share
+// class whose units are STILL IN THE WALLET (requested / vault_opened) claim
+// units of that balance, so their sum plus this request must fit it (409
+// otherwise). A deposited request no longer counts: its units already left
+// the wallet for the escrow (deposit_to_custody_vault), so the balance read
+// below does not include them. A holder whose page reloaded slowly cannot
+// file the same conversion twice. The check reads the table (500 when it
+// cannot, fail closed) after the balance and before the Terms.
 
 import { NextResponse } from "next/server";
 import { requireModule } from "@/lib/server/feature-gate";
@@ -38,6 +47,22 @@ import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { detectNetwork } from "@/lib/network";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** Requests whose units are still in the holder's wallet (a deposit moved them to the escrow). */
+function claimsWalletUnits(status: unknown): boolean {
+  return status === "requested" || status === "vault_opened";
+}
+
+/** Units the wallet's open, undeposited requests of the class still claim (unreadable amounts count as nothing extra). */
+function openConversionUnits(rows: readonly { amount?: unknown; status?: unknown }[]): bigint {
+  let total = BigInt(0);
+  for (const row of rows) {
+    if (!claimsWalletUnits(row.status)) continue;
+    const amount = typeof row.amount === "number" ? row.amount : Number(row.amount);
+    if (Number.isSafeInteger(amount) && amount > 0) total += BigInt(amount);
+  }
+  return total;
+}
 
 export async function POST(request: Request) {
   try {
@@ -119,15 +144,39 @@ export async function POST(request: Request) {
       );
     }
 
+    // The wallet's undeposited open requests of this class claim units of
+    // the same balance (see header): together with this request they must
+    // fit it. Deposited rows are read too but never counted.
+    const network = detectNetwork();
+    const { data: openRows, error: openError } = await sb
+      .from("conversion_requests")
+      .select("amount, status")
+      .eq("holder_wallet", wallet)
+      .eq("network", network)
+      .eq("share_class_pda", shareClassPda);
+    if (openError) {
+      console.error("[api/conversion/create] open-requests read failed:", openError.message);
+      throw new SiwsError(500, "Could not check your open conversion requests");
+    }
+    const openUnits = openConversionUnits(openRows ?? []);
+    if (openUnits + BigInt(amount) > balance) {
+      throw new SiwsError(
+        409,
+        `You already have open conversion requests for ${openUnits.toString()} units of this share class; together with this request that exceeds your balance.`,
+      );
+    }
+
     // Mainnet: the requesting wallet must have accepted the Terms in force —
     // checked last, right before the write (on test networks only with
     // TOS_SERVER_GATE=enforce).
     await requireAcceptedTos(sb, wallet, "requesting a conversion");
 
+    // The whole row comes back so the page can show it before its reload
+    // lands (it is the signer's own row: no one else's data).
     const { data, error } = await sb
       .from("conversion_requests")
       .insert({
-        network: detectNetwork(),
+        network,
         holder_wallet: wallet,
         client_id: clientId,
         share_class_pda: shareClassPda,
@@ -138,14 +187,14 @@ export async function POST(request: Request) {
         contact,
         note,
       })
-      .select("id")
+      .select("*")
       .single();
     if (error || !data) {
       console.error("[api/conversion/create] insert failed:", error?.message);
       throw new SiwsError(500, "Could not save the conversion request");
     }
 
-    return NextResponse.json({ ok: true, data: { id: data.id as string } });
+    return NextResponse.json({ ok: true, data: { id: data.id as string, request: data } });
   } catch (err) {
     return siwsErrorResponse(err);
   }
