@@ -13,12 +13,15 @@ import { navHrefVisible } from "@/lib/pilot-scope";
 import {
   acceptTos,
   getClientForOnboarding,
+  kycUploadProblem,
   linkClientWallet,
   listRequirementsForOnboarding,
+  onboardingGates,
   uploadClientDocumentWithToken,
+  KYC_UPLOAD_ACCEPT,
   TOS_VERSION,
-  type ClientRow,
-  type KycRequirement,
+  type OnboardingRequirement,
+  type OnboardingView,
 } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
 
@@ -52,6 +55,14 @@ const NEXT_STEP: Record<string, { title: string; body: string; href: string }> =
   },
 };
 
+// The same next step for a dossier owned by a wallet-less account: no wallet
+// was linked here, so the copy points at the account's wallets instead.
+const NEXT_STEP_ACCOUNT_BODY: Record<string, string> = {
+  issuer: "Run register_issuer to anchor your entity on Solana from a wallet linked to your account — that wallet becomes the permanent issuer authority.",
+  delegate: "Link a wallet in Your account. The platform Super Admin grants any operational role to it from /admin/admins.",
+  officer: "Link a wallet in Your account. The relevant issuer grants officer permissions to it from their issuer console.",
+};
+
 export default function OnboardingPage({
   params,
 }: {
@@ -74,17 +85,20 @@ function Consumer({ id }: { id: string }) {
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  const [client, setClient] = useState<ClientRow | null | undefined>(undefined);
+  const [client, setClient] = useState<OnboardingView | null | undefined>(undefined);
   const [tokenValid, setTokenValid] = useState<boolean | null>(null);
   const [linking, setLinking] = useState(false);
   const [linked, setLinked] = useState(false);
+  // Why the last link attempt was refused, shown under the link card (an
+  // account-owned dossier may need the account's sign-in first).
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   // ToS acceptance state (doc flow step 1: onboarding includes accepting ToS)
   const [tosChecked, setTosChecked] = useState(false);
   const [tosAccepting, setTosAccepting] = useState(false);
 
   // KYC requirements state
-  const [requirements, setRequirements] = useState<KycRequirement[]>([]);
+  const [requirements, setRequirements] = useState<OnboardingRequirement[]>([]);
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   // Per-requirement file selections: requirementId → File
   const [selectedFiles, setSelectedFiles] = useState<Record<number, File>>({});
@@ -125,9 +139,28 @@ function Consumer({ id }: { id: string }) {
     return () => { cancelled = true; };
   }, [client, token]);
 
+  // Which steps the page shows (lib/clients.ts onboardingGates): a dossier
+  // owned by a wallet-less (email/Google) account needs no wallet — the
+  // Terms, then the documents; a wallet dossier keeps the wallet path.
+  const accountOwned = client?.account_owned === true;
+  const alreadyConnected =
+    !!client && client.onboarding_status !== "invited" && !!client.wallet;
+  const sameWallet =
+    !!wallet && !!client?.wallet && wallet.toString() === client.wallet;
+  const tosAccepted = !!client?.tos_accepted_at;
+  const gates = onboardingGates({
+    accountOwned,
+    walletConnected: !!wallet,
+    alreadyConnected,
+    linked,
+    sameWallet,
+    tosAccepted,
+  });
+
   async function linkWallet() {
     if (!conn.wallet || !wallet || !client) return;
     setLinking(true);
+    setLinkError(null);
     try {
       // The signature proves control of this exact wallet and invitation.
       // The server atomically links it once and records the system note.
@@ -150,22 +183,26 @@ function Consumer({ id }: { id: string }) {
       });
       await refresh();
     } catch (err) {
-      toast.showError(
-        "Failed to link wallet",
-        err instanceof Error ? err.message : String(err),
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      setLinkError(message);
+      toast.showError("Failed to link wallet", message);
     } finally {
       setLinking(false);
     }
   }
 
-  // Standalone acceptance for clients whose wallet is already linked but who
-  // predate the ToS gate (no tos_accepted_at yet).
+  // Standalone acceptance: an account-owned dossier accepts through its token
+  // (no wallet needed); a wallet dossier whose wallet is already linked but
+  // predates the ToS gate accepts in place, bound to that wallet.
   async function acceptTosNow() {
-    if (!wallet || !client) return;
+    if (!client || (!client.account_owned && !wallet)) return;
     setTosAccepting(true);
     try {
-      const ok = await acceptTos(client.id, token, wallet.toString());
+      const ok = await acceptTos(
+        client.id,
+        token,
+        client.account_owned ? "" : (wallet?.toString() ?? ""),
+      );
       if (!ok) throw new Error("Could not record the acceptance");
       toast.show({
         kind: "success",
@@ -183,16 +220,17 @@ function Consumer({ id }: { id: string }) {
     }
   }
 
-  async function handleUpload(req: KycRequirement) {
+  async function handleUpload(req: OnboardingRequirement) {
     const file = selectedFiles[req.id];
-    if (!file || !client || !wallet) return;
-    const walletStr = wallet.toString();
+    if (!file || !client || !gates.uploadsOpen) return;
     setUploading((prev) => ({ ...prev, [req.id]: true }));
     try {
+      // The wallet is informational: the server stamps uploaded_by from the
+      // validated dossier (its wallet, or "client" for an account-owned one).
       const { ok, error } = await uploadClientDocumentWithToken(
         client.id,
         token,
-        walletStr,
+        wallet?.toString() ?? "",
         file,
         req.doc_kind,
         req.id,
@@ -205,9 +243,9 @@ function Consumer({ id }: { id: string }) {
         });
         // Clear the file selection for this requirement.
         setSelectedFiles((prev) => {
-          const next = { ...prev };
-          delete next[req.id];
-          return next;
+          const rest = { ...prev };
+          delete rest[req.id];
+          return rest;
         });
         // Reset the file input element.
         const el = fileInputRefs.current[req.id];
@@ -259,11 +297,10 @@ function Consumer({ id }: { id: string }) {
   // (/issuer/onboarding) is paused, so the card says so and links nowhere.
   // The investor, delegate and officer steps are unchanged.
   const nextOpen = !!next && navHrefVisible(next.href);
-  const alreadyConnected =
-    client.onboarding_status !== "invited" && !!client.wallet;
-  const sameWallet =
-    !!wallet && !!client.wallet && wallet.toString() === client.wallet;
-  const tosAccepted = !!client.tos_accepted_at;
+  const nextBody = accountOwned ? (NEXT_STEP_ACCOUNT_BODY[client.type] ?? next?.body) : next?.body;
+  const openDocuments = requirements.filter(
+    (r) => r.status === "requested" || r.status === "rejected",
+  ).length;
 
   return (
     <div className="space-y-6">
@@ -277,44 +314,61 @@ function Consumer({ id }: { id: string }) {
         <p className="mt-2 text-sm text-slate-600">
           You&apos;ve been invited to onboard as a{" "}
           <strong>{TYPE_LABEL[client.type] ?? client.type}</strong> on
-          Manci. One step here: connect the Solana wallet you want to use
-          long-term, and we&apos;ll link it to your account.
+          Manci.{" "}
+          {accountOwned
+            ? "Accept the Terms and upload the requested documents — no wallet needed. You can add wallets later in Your account."
+            : "One step here: connect the Solana wallet you want to use long-term, and we'll link it to your account."}
         </p>
       </div>
 
       {/* Stepper */}
-      <ol className="flex flex-wrap items-center gap-2 text-xs">
-        <Step n={1} active={!wallet} done={!!wallet} label="Connect wallet" />
-        <Sep />
-        <Step
-          n={2}
-          active={!!wallet && !tosAccepted}
-          done={tosAccepted}
-          label="Accept ToS"
-        />
-        <Sep />
-        <Step
-          n={3}
-          active={!!wallet && tosAccepted && !alreadyConnected && !linked}
-          done={alreadyConnected || linked}
-          label="Link to account"
-        />
-        <Sep />
-        <Step
-          n={4}
-          active={(alreadyConnected || linked) && tosAccepted}
-          done={false}
-          label="Next steps"
-        />
-      </ol>
+      {accountOwned ? (
+        <ol className="flex flex-wrap items-center gap-2 text-xs">
+          <Step n={1} active={!tosAccepted} done={tosAccepted} label="Accept ToS" />
+          <Sep />
+          <Step
+            n={2}
+            active={tosAccepted && openDocuments > 0}
+            done={tosAccepted && requirements.length > 0 && openDocuments === 0}
+            label="Upload documents"
+          />
+          <Sep />
+          <Step n={3} active={tosAccepted && openDocuments === 0} done={false} label="Next steps" />
+        </ol>
+      ) : (
+        <ol className="flex flex-wrap items-center gap-2 text-xs">
+          <Step n={1} active={!wallet} done={!!wallet} label="Connect wallet" />
+          <Sep />
+          <Step
+            n={2}
+            active={!!wallet && !tosAccepted}
+            done={tosAccepted}
+            label="Accept ToS"
+          />
+          <Sep />
+          <Step
+            n={3}
+            active={!!wallet && tosAccepted && !alreadyConnected && !linked}
+            done={alreadyConnected || linked}
+            label="Link to account"
+          />
+          <Sep />
+          <Step
+            n={4}
+            active={(alreadyConnected || linked) && tosAccepted}
+            done={false}
+            label="Next steps"
+          />
+        </ol>
+      )}
 
-      {/* Step 1 — connect */}
-      {!wallet && (
+      {/* Step 1 — connect (a wallet dossier needs its wallet first) */}
+      {gates.showConnect && (
         <WalletRequired />
       )}
 
       {/* Step 2 — Terms of Service */}
-      {!!wallet && (
+      {gates.showTerms && (
         <Card>
           <h2 className="text-lg font-semibold text-slate-900">
             Terms of Service &amp; Privacy Policy
@@ -364,8 +418,8 @@ function Consumer({ id }: { id: string }) {
                   I have read and accept the Manci Terms of Service and Privacy Policy.
                 </span>
               </label>
-              {/* Already-linked clients (pre-ToS-gate) accept in place. */}
-              {alreadyConnected && sameWallet && (
+              {/* Account-owned dossiers and already-linked clients (pre-ToS-gate) accept in place. */}
+              {gates.showTermsAccept && (
                 <button
                   type="button"
                   disabled={!tosChecked || tosAccepting}
@@ -380,19 +434,35 @@ function Consumer({ id }: { id: string }) {
         </Card>
       )}
 
-      {/* Step 3 — link wallet to account */}
-      {!!wallet && !alreadyConnected && !linked && (
+      {/* Account-owned dossier, no wallet connected: the wallet is optional. */}
+      {accountOwned && !wallet && (
+        <p className="text-xs text-slate-500">
+          Optional: connect a wallet to link it now, or add wallets later in{" "}
+          <Link
+            href="/account"
+            className="font-medium text-slate-900 underline underline-offset-2 hover:text-slate-700"
+          >
+            Your account
+          </Link>
+          .
+        </p>
+      )}
+
+      {/* Step 3 — link wallet to account (optional for an account-owned dossier) */}
+      {gates.showLink && (
         <Card>
           <h2 className="text-lg font-semibold text-slate-900">
-            Link this wallet to your Manci account
+            {gates.linkOptional
+              ? "Link this wallet to your Manci account (optional)"
+              : "Link this wallet to your Manci account"}
           </h2>
           <p className="mt-2 text-sm text-slate-600">
-            Connecting this wallet will associate it with your invitation. After
-            this, every interaction (sale, OTC, claim, vote) is tied to the
-            address below.
+            {gates.linkOptional
+              ? "Linking adds the connected wallet to your account and ties this verification to it. You can also add wallets later in Your account."
+              : "Connecting this wallet will associate it with your invitation. After this, every interaction (sale, OTC, claim, vote) is tied to the address below."}
           </p>
           <p className="mt-4 break-all rounded-md bg-slate-50 px-3 py-2 font-mono text-xs">
-            {wallet.toString()}
+            {wallet?.toString()}
           </p>
           <button
             type="button"
@@ -407,11 +477,34 @@ function Consumer({ id }: { id: string }) {
               Accept the Terms of Service and Privacy Policy above to enable linking.
             </p>
           )}
+          {gates.linkOptional && (
+            <p className="mt-2 text-xs text-slate-500">
+              To link it here, this browser must be signed in to your Manci
+              account, unless the wallet is already one of your account&apos;s
+              wallets.
+            </p>
+          )}
+          {linkError && (
+            <p className="mt-2 text-xs text-red-700" role="alert">
+              {linkError}
+              {gates.linkOptional && (
+                <>
+                  {" "}
+                  <Link
+                    href="/login"
+                    className="font-medium underline underline-offset-2"
+                  >
+                    Sign in
+                  </Link>
+                </>
+              )}
+            </p>
+          )}
         </Card>
       )}
 
       {/* Step 3.5 — already linked but wrong wallet */}
-      {!!wallet && alreadyConnected && !sameWallet && (
+      {gates.showWrongWallet && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
           <p className="font-semibold text-amber-900">
             Different wallet already linked
@@ -428,7 +521,7 @@ function Consumer({ id }: { id: string }) {
       )}
 
       {/* Step 4 — next */}
-      {(alreadyConnected || linked) && sameWallet && next && (
+      {gates.showNext && next && (
         <Card>
           <div className="flex items-start gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-lg text-emerald-700">
@@ -438,7 +531,7 @@ function Consumer({ id }: { id: string }) {
               <h2 className="text-lg font-semibold text-slate-900">
                 {nextOpen ? next.title : "Registration paused"}
               </h2>
-              <p className="mt-1 text-sm text-slate-600">{nextOpen ? next.body : KYC_ONLY_MESSAGE}</p>
+              <p className="mt-1 text-sm text-slate-600">{nextOpen ? nextBody : KYC_ONLY_MESSAGE}</p>
             </div>
           </div>
           {nextOpen && (
@@ -464,8 +557,7 @@ function Consumer({ id }: { id: string }) {
                 req.status === "requested" || req.status === "rejected";
               const isUploading = uploading[req.id] ?? false;
               const chosenFile = selectedFiles[req.id] ?? null;
-              const canUpload =
-                needsUpload && !!wallet && (alreadyConnected || linked);
+              const canUpload = needsUpload && gates.uploadsOpen;
 
               return (
                 <div
@@ -534,18 +626,23 @@ function Consumer({ id }: { id: string }) {
                           }}
                           type="file"
                           className="sr-only"
-                          accept="image/*,.pdf,.doc,.docx"
+                          accept={KYC_UPLOAD_ACCEPT}
                           onChange={(e) => {
-                            const f = e.target.files?.[0];
-                            setSelectedFiles((prev) =>
-                              f
-                                ? { ...prev, [req.id]: f }
-                                : (() => {
-                                    const next = { ...prev };
-                                    delete next[req.id];
-                                    return next;
-                                  })(),
-                            );
+                            const input = e.target;
+                            const f = input.files?.[0];
+                            // Refuse what the server would refuse (type,
+                            // size, empty) before an upload starts.
+                            const problem = f ? kycUploadProblem(f) : null;
+                            if (f && problem) {
+                              toast.showError("Can't use this file", problem);
+                              input.value = "";
+                            }
+                            setSelectedFiles((prev) => {
+                              const rest = { ...prev };
+                              if (f && !problem) rest[req.id] = f;
+                              else delete rest[req.id];
+                              return rest;
+                            });
                           }}
                         />
                       </label>
@@ -562,12 +659,17 @@ function Consumer({ id }: { id: string }) {
                       >
                         {isUploading ? "Uploading…" : "Upload"}
                       </button>
+                      <p className="w-full text-[11px] text-slate-400">
+                        PDF, PNG, JPG or DOCX, up to 4 MB.
+                      </p>
                     </div>
                   )}
 
                   {needsUpload && !canUpload && (
                     <p className="mt-2 text-xs text-slate-500">
-                      Connect and link your wallet above to upload this document.
+                      {accountOwned
+                        ? "Accept the Terms of Service and Privacy Policy above to upload this document."
+                        : "Connect and link your wallet above to upload this document."}
                     </p>
                   )}
                 </div>

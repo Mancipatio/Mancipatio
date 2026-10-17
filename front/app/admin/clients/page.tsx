@@ -362,12 +362,14 @@ function ClientsOps() {
         </div>
       )}
 
+      {/* After a create the list refreshes behind the modal, which stays on
+          its success view (the onboarding link is shown nowhere else) until
+          Done or Open detail closes it. */}
       {showAdd && isAdmin && (
         <AddClientModal
           onClose={() => setShowAdd(false)}
           onSuccess={() => {
             void refresh();
-            setShowAdd(false);
           }}
         />
       )}
@@ -440,9 +442,11 @@ function AddClientModal({
     createdToken && createdId
       ? `${typeof window !== "undefined" ? window.location.origin : "https://www.manci.io"}/onboarding/${createdId}?t=${createdToken}`
       : null;
-  // After-create success view shows up either when we have an invite link
-  // (no wallet supplied) or a pre-linked wallet (skipping the magic-link).
-  const createdSuccess = !!createdId && (inviteLink || createdWallet);
+  // Once a row is created the modal shows its success view — the magic-link
+  // with Copy (no wallet supplied) or the linked wallet — and stays there
+  // until Done or Open detail: the link is shown nowhere else, and the filled
+  // form must never stay on screen (a second click would create a duplicate).
+  const createdSuccess = !!createdId;
 
   return (
     <div
@@ -450,7 +454,8 @@ function AddClientModal({
       role="dialog"
       aria-modal="true"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !submitting) onClose();
+        // A stray click outside must not throw away a link nobody can show again.
+        if (e.target === e.currentTarget && !submitting && !createdSuccess) onClose();
       }}
     >
       <div className="mx-auto w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
@@ -667,8 +672,16 @@ function AddClientModal({
                   The client opens this link, connects a Solana wallet and
                   finishes onboarding on their side.
                 </p>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Valid for 14 days. Copy it now — it is not shown again.
+                </p>
               </label>
-              ) : null}
+              ) : (
+                <p className="text-xs text-slate-600">
+                  No upload link could be issued for this dossier. Open the
+                  detail and use Request more info to send one.
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
               <Link

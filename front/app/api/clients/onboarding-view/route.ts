@@ -1,11 +1,19 @@
-// POST /api/clients/onboarding-view — token-authed read of a client's own row.
+// POST /api/clients/onboarding-view — token-authed read of a client's own
+// onboarding view.
 //
-// The onboarding page needs its client row (name, type, KYC status, ToS state)
-// AND to know whether its magic-link token is valid — but clients.onboarding_token
-// is a BEARER SECRET that must never be read by the browser's anon Supabase
-// client (W3-RLS revokes `select (onboarding_token)` from the anon role). So the
-// token is validated SERVER-SIDE here (against clients.onboarding_token) and the
-// row is returned with onboarding_token STRIPPED. Body: { client_id, token }.
+// The onboarding page needs a few fields of its dossier (name, type, KYC
+// status, ToS state, the linked wallet) AND to know whether its magic-link
+// token is valid — but clients.onboarding_token is a BEARER SECRET that must
+// never be read by the browser's anon Supabase client (W3-RLS revokes
+// `select (onboarding_token)` from the anon role). So the token is validated
+// SERVER-SIDE here (against clients.onboarding_token) and a FIXED PROJECTION
+// of the row is returned (ONBOARDING_VIEW_KEYS, the same pattern as
+// /api/clients/me SELF_KEYS): never the token, and never the dossier's
+// internal columns (tags, tier, source, provider references, account id,
+// notes) — anyone holding the link would otherwise read internal risk
+// labels. `account_owned` says whether the dossier belongs to a wallet-less
+// (email/Google) account, which accepts the Terms and uploads without a
+// wallet (isAccountOwnedDossier). Body: { client_id, token }.
 //
 // Requires the Node runtime (service-role client). 401 on an invalid token.
 
@@ -15,9 +23,23 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import {
   assertUuid,
   clientIpOf,
+  isAccountOwnedDossier,
   rateLimited,
   requireClientToken,
 } from "../_helpers";
+
+// What the onboarding page renders — nothing else leaves the dossier. The
+// wallet stays an address (the page compares it with the connected wallet).
+const ONBOARDING_VIEW_KEYS = [
+  "id",
+  "type",
+  "display_name",
+  "kyc_status",
+  "onboarding_status",
+  "wallet",
+  "tos_accepted_at",
+  "tos_version",
+] as const;
 
 export async function POST(request: Request) {
   try {
@@ -39,12 +61,18 @@ export async function POST(request: Request) {
 
     const sb = getSupabaseAdmin();
     // Validates the presented token against clients.onboarding_token (401 else).
+    // requireClientToken reads the whole row: it needs the token columns.
     const row = await requireClientToken(sb, clientId, b.token);
 
-    // Never return the bearer secret to the browser.
-    const { onboarding_token: _secret, ...safe } = row;
-    void _secret;
-    return NextResponse.json({ ok: true, data: safe });
+    // A projection in JS, not only a select list: the bearer secret and the
+    // internal columns never reach the browser, whatever the row carries.
+    const view = Object.fromEntries(
+      ONBOARDING_VIEW_KEYS.map((key) => [key, row[key] ?? null]),
+    );
+    return NextResponse.json({
+      ok: true,
+      data: { ...view, account_owned: isAccountOwnedDossier(row) },
+    });
   } catch (err) {
     return siwsErrorResponse(err);
   }

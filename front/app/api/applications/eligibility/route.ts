@@ -1,85 +1,35 @@
-// POST /api/applications/eligibility — read-only apply-gate check for /apply.
+// POST /api/applications/eligibility — the signer's OWN apply verdict, for
+// the /apply gate.
 //
-// UNSIGNED on purpose: the /apply page needs to know whether the connected
-// wallet may submit BEFORE the founder fills the wizard, and demanding a
-// wallet signature just to render the gate would be a popup on page load.
-// It exposes only { hasClient, kycStatus, eligible } — no PII from the
-// clients row — and stays correct after W3-RLS locks the clients table to
-// the service role (the browser can no longer read clients directly).
+// A session read bound to the signer ("applications.eligibility" is in
+// SESSION_READ_ACTIONS, lib/siws-session.ts): the wallet session the /apply
+// page already holds for applications.mine answers it, so rendering the gate
+// costs no extra wallet prompt. The verdict is the caller's own and never
+// another wallet's — the former unsigned route took any `wallet` in the body
+// and answered with that wallet's KYC/KYB outcome (verified, rejected,
+// suspended), which links a pseudonymous wallet to a compliance outcome for
+// anyone who asks. A body wallet is ignored now. The shape is unchanged:
+// { hasClient, kycStatus, eligible, kybStatus, individualKycStatus,
+// applicantKind } — no row id, no PII — and the client still fails OPEN when
+// the read fails (null = unknown).
 //
-// The authoritative gate lives in the signed submit/resubmit routes
-// (requireVerifiedApplicant — approved KYB or live KYC); this endpoint is UX only.
+// UX only: the authoritative gate is requireVerifiedApplicant in the signed
+// submit/resubmit routes.
 
 import { NextResponse } from "next/server";
-import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { lookupApplicant } from "../_lib";
 
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
-// ---------------------------------------------------------------------------
-// Best-effort rate limit — the endpoint is unsigned and returns a wallet's KYC
-// status for ANY wallet param, so without a throttle a caller could enumerate
-// verified/rejected/suspended status across many wallets. Cap per client IP
-// (trusted source: x-real-ip, else the RIGHTMOST — non-spoofable — XFF hop; the
-// LEFTMOST token is attacker-controlled). Per-instance memory, documented.
-// ---------------------------------------------------------------------------
-const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 30;
-const hits = new Map<string, number[]>();
-
-function clientIp(request: Request): string {
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  if (realIp) return realIp;
-  const xff = request.headers.get("x-forwarded-for");
-  if (xff) {
-    const hops = xff
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (hops.length > 0) return hops[hops.length - 1];
-  }
-  return "unknown";
-}
-
-function rateLimited(ip: string, now: number): boolean {
-  const windowStart = now - RATE_WINDOW_MS;
-  const prev = (hits.get(ip) ?? []).filter((t) => t > windowStart);
-  if (prev.length >= RATE_MAX) {
-    hits.set(ip, prev);
-    return true;
-  }
-  prev.push(now);
-  hits.set(ip, prev);
-  if (hits.size > 10_000) {
-    const oldest = hits.keys().next().value;
-    if (oldest !== undefined) hits.delete(oldest);
-  }
-  return false;
-}
-
 export async function POST(request: Request) {
   try {
-    if (rateLimited(clientIp(request), Date.now())) {
-      throw new SiwsError(429, "Too many requests — slow down");
-    }
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      throw new SiwsError(400, "Invalid JSON body");
-    }
-    const wallet =
-      typeof (body as { wallet?: unknown })?.wallet === "string"
-        ? ((body as { wallet: string }).wallet).trim()
-        : "";
-    if (!BASE58_RE.test(wallet)) {
-      throw new SiwsError(400, "wallet must be a base58 address");
-    }
-
+    const { wallet } = await verifySigned(request, "applications.eligibility");
     // Approved KYB (company) or live KYC (individual — Manci opens the company).
     const verdict = await lookupApplicant(getSupabaseAdmin(), wallet);
-    return NextResponse.json({ ok: true, data: verdict });
+    return NextResponse.json(
+      { ok: true, data: verdict },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
   } catch (err) {
     return siwsErrorResponse(err);
   }

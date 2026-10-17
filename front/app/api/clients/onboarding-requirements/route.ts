@@ -5,6 +5,10 @@
 // page authenticates with its magic-link token (same credential as
 // /api/clients/onboarding-view), and the query is bound to that client_id, so a
 // caller can only read the requirements of the client whose token they hold.
+// Each row is returned as a FIXED PROJECTION (REQUIREMENT_VIEW_KEYS): what the
+// checklist renders, never who requested it (`requested_by` is a staff wallet
+// or a system key — the GDPR export masks it too, _privacy.ts
+// OPERATOR_COLUMNS) nor the document and audit columns.
 // Body: { client_id, token }.
 
 import { NextResponse } from "next/server";
@@ -16,6 +20,15 @@ import {
   rateLimited,
   requireClientToken,
 } from "../_helpers";
+
+const REQUIREMENT_VIEW_KEYS = [
+  "id",
+  "doc_kind",
+  "label",
+  "note",
+  "status",
+  "requested_at",
+] as const;
 
 export async function POST(request: Request) {
   try {
@@ -41,7 +54,7 @@ export async function POST(request: Request) {
 
     const { data, error } = await sb
       .from("kyc_requirements")
-      .select("*")
+      .select(REQUIREMENT_VIEW_KEYS.join(", "))
       .eq("client_id", clientId)
       .order("requested_at", { ascending: false });
     if (error) {
@@ -52,7 +65,12 @@ export async function POST(request: Request) {
       throw new SiwsError(500, "Could not load your requirements");
     }
 
-    return NextResponse.json({ ok: true, data: { requirements: data ?? [] } });
+    // Projected in JS as well as in the select list: a wider select later
+    // (or a stand-in that ignores the columns) still returns only these keys.
+    const requirements = ((data ?? []) as unknown as Record<string, unknown>[]).map((row) =>
+      Object.fromEntries(REQUIREMENT_VIEW_KEYS.map((key) => [key, row[key] ?? null])),
+    );
+    return NextResponse.json({ ok: true, data: { requirements } });
   } catch (err) {
     return siwsErrorResponse(err);
   }

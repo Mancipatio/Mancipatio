@@ -53,6 +53,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "applications.adminEvents",
   "applications.adminList",
   "applications.capacity",
+  // The signer's own apply verdict (KYC/KYB) — never another wallet's.
+  "applications.eligibility",
   "applications.mine",
   "archive.check",
   "audit.list",
