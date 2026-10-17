@@ -52,10 +52,17 @@ their own path (runbook §9, through Squads).
    Instant Rollback: Vercel → Deployments.
 6. **Smoke.** Sign-in (wallet and email) and `/verify` load; in KYC-only
    mode `/marketplace/launchpad` shows "Paused.", the sidebar has no
-   Primary sales and no Issuer workspace, and the home page shows one
-   Equity tile (`ops/env-vars.md`, the post-deploy check of "KYC-only
-   mode"). Then each PR's own post-deploy check, from its description or
-   the runbook section it names.
+   Primary sales and no Issuer workspace, and the home page (equity only)
+   has no "Explore by asset class" section and no class tiles, no Primary
+   sales tab and no link to `/marketplace/launchpad` or `/apply`, while its
+   "Know what you own" card links "Read the equity guide"
+   (`ops/env-vars.md`, the post-deploy check of "KYC-only mode";
+   `front/tests/asset-classes.test.ts` pins this as the mainnet default).
+   Class tiles or a Primary sales tab mean that `NEXT_PUBLIC_ASSET_CLASSES`
+   or `NEXT_PUBLIC_FEATURE_KYC_ONLY` is set in Vercel Production (unset is
+   the lockdown): correct the variable and Redeploy; an Instant Rollback
+   would return to the previous build. Then each PR's own post-deploy
+   check, from its description or the runbook section it names.
 7. **Pause mask.** `/admin/platform` shows the mask of the mode in force
    (runbook §8, "Pause mask by mode": 0x7F in KYC-only mode). The push
    changes no bit; a bit the release needs is set or cleared on-chain,
