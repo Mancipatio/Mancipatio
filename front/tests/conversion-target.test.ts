@@ -164,3 +164,27 @@ describe("views never offer the marker's mint (read from the sources)", () => {
     },
   );
 });
+
+
+describe("views label an unlinked marker and never offer it a mint (F038)", () => {
+  const read = (p: string) => readFileSync(join(__dirname, "..", p), "utf8");
+  it.each([
+    "app/issuer/share-classes/page.tsx",
+    "app/admin/share-classes/page.tsx",
+  ])("%s gates the mint button on the marker's shape and shows the unlinked label", (p) => {
+    const src = read(p);
+    expect(src).toContain("UNLINKED_TARGET_LABEL");
+    expect(src).toContain("unlinkedMarkerKeys(data?.shareClasses ?? [])");
+    // The synchronous guard: no mint button for a marker-shaped class, even before the targets resolve.
+    const button = src.indexOf("Initialize Token-2022 mint");
+    expect(button).toBeGreaterThan(-1);
+    const gate = src.lastIndexOf("!hasMarkerShape(sc)", button);
+    expect(gate).toBeGreaterThan(-1);
+    expect(button - gate).toBeLessThan(600);
+  });
+  it("the asset detail labels the unlinked marker", () => {
+    const src = read("components/asset-detail.tsx");
+    expect(src).toContain("unlinkedMarkerKeys(linked)");
+    expect(src).toContain("UNLINKED_TARGET_LABEL");
+  });
+});

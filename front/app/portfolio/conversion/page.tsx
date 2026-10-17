@@ -150,6 +150,17 @@ type ConvertibleHolding = {
 // coming back (never prompts).
 type ListMode = "interactive" | "manual" | "background";
 
+// What the holder reads when a sent deposit or return could not be recorded
+// (lib/use-chain-record-recovery recordFinalized outcomes).
+const DEPOSIT_FAILED_MESSAGE =
+  "The deposit transaction failed on the network — nothing moved and the receipt was discarded. Deposit again.";
+const DEPOSIT_NOT_FINALIZED_MESSAGE =
+  "The deposit is not finalized yet. Use Retry recording in a minute; do not deposit again.";
+const RETURN_FAILED_MESSAGE =
+  "The return transaction failed on the network — nothing moved and the receipt was discarded. Reclaim again.";
+const RETURN_NOT_FINALIZED_MESSAGE =
+  "The return is not finalized yet. Use Retry recording in a minute; do not reclaim again.";
+
 function formatDeadline(deadline: bigint | undefined): string | null {
   if (deadline === undefined || deadline <= BigInt(0)) return null;
   return new Date(Number(deadline) * 1000).toLocaleString(undefined, {
@@ -463,13 +474,16 @@ function ConversionWorkspace() {
     ) {
       throw new Error("Connect the wallet and network that sent this deposit.");
     }
-    // Throws with the server's words: "not finalized" is retried with the
-    // saved receipt, a refusal is read as one.
-    await markConversionDeposited(
-      conn.wallet,
-      receipt.entityId,
-      receipt.signature,
-    );
+    // Wait for the deposit to finalize (plain RPC reads, no prompt), then one
+    // signed record; a server whose node lags is retried after a backoff. A
+    // failed transaction discards the receipt: nothing moved. The record
+    // throws with the server's words, and a refusal is read as one.
+    const session = conn.wallet;
+    const outcome = await recovery.recordFinalized(receipt, async () => {
+      await markConversionDeposited(session, receipt.entityId, receipt.signature);
+    });
+    if (outcome === "failed") throw new Error(DEPOSIT_FAILED_MESSAGE);
+    if (outcome === "not_finalized") throw new Error(DEPOSIT_NOT_FINALIZED_MESSAGE);
     setRequests((rows) =>
       sortConversionRequests(
         rows.map((row) =>
@@ -485,6 +499,28 @@ function ConversionWorkspace() {
     );
     recovery.forget(receipt);
     void loadRequests("manual");
+  }
+
+  // A receipt whose transaction failed or can no longer land is removed after
+  // one fresh read of the network; a pending or landed one is kept.
+  async function discardReceipt(
+    hook: typeof recovery,
+    receipt: PendingChainRecord,
+    again: string,
+  ) {
+    const { discarded, state } = await hook.discard(receipt);
+    if (discarded) {
+      toast.show({ kind: "success", title: "Receipt discarded", description: `Nothing moved on the network. You can ${again} again.` });
+      return;
+    }
+    toast.showError(
+      "Receipt kept",
+      state === "pending"
+        ? "The transaction is still pending on the network."
+        : state === "landed"
+          ? "The transaction landed — use Retry recording instead."
+          : "The network could not be asked. Try again in a moment.",
+    );
   }
 
   async function retryDepositRecord(receipt: PendingChainRecord) {
@@ -537,7 +573,7 @@ function ConversionWorkspace() {
     depositBusy.current = true;
     setDepositActionBusy(true);
     let sentSignature: string | null = null;
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       `Depositing ${req.amount} units into the conversion escrow…`,
     );
     try {
@@ -629,6 +665,10 @@ function ConversionWorkspace() {
       });
       sentSignature = sig;
       const receipt = recovery.remember(req.id, sig);
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending(
+        "Deposit sent — waiting for Solana to finalize (usually 15–30 s). Keep this page open; you will sign once to record it.",
+      );
       await finishDepositRecord(receipt);
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Deposit recorded" });
@@ -675,11 +715,12 @@ function ConversionWorkspace() {
     ) {
       throw new Error("Connect the wallet and network that sent this return.");
     }
-    await reclaimConversionRequest(
-      conn.wallet,
-      receipt.entityId,
-      receipt.signature,
-    );
+    const session = conn.wallet;
+    const outcome = await returnRecovery.recordFinalized(receipt, async () => {
+      await reclaimConversionRequest(session, receipt.entityId, receipt.signature);
+    });
+    if (outcome === "failed") throw new Error(RETURN_FAILED_MESSAGE);
+    if (outcome === "not_finalized") throw new Error(RETURN_NOT_FINALIZED_MESSAGE);
     returnRecovery.forget(receipt);
     setRequests((rows) =>
       sortConversionRequests(
@@ -732,7 +773,7 @@ function ConversionWorkspace() {
     returnBusy.current = true;
     setReturnActionBusy(true);
     let sentSignature: string | undefined;
-    const pendingId = toast.showPending("Reclaiming your tokens from escrow…");
+    let pendingId = toast.showPending("Reclaiming your tokens from escrow…");
     try {
       assertChainRecordStorageAvailable();
       const before = await fetchMaybeLiveCustodyVault(
@@ -800,6 +841,10 @@ function ConversionWorkspace() {
       });
       sentSignature = sig;
       const receipt = returnRecovery.remember(req.id, sig);
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending(
+        "Return sent — waiting for Solana to finalize (usually 15–30 s). Keep this page open; you will sign once to record it.",
+      );
       // The proof endpoint verifies the actual holder transfer. Unrelated
       // surplus may keep the vault active after this deposit is fully returned.
       await finishReturnRecord(receipt);
@@ -906,12 +951,16 @@ function ConversionWorkspace() {
         receipts={recovery.receipts}
         busy={depositActionBusy || tx.isSending}
         onRetry={retryDepositRecord}
+        states={recovery.states}
+        onDiscard={(receipt) => discardReceipt(recovery, receipt, "deposit")}
       />
 
       <ChainRecordRecoveryPanel
         receipts={returnRecovery.receipts}
         busy={returnActionBusy || tx.isSending}
         onRetry={retryReturnRecord}
+        states={returnRecovery.states}
+        onDiscard={(receipt) => discardReceipt(returnRecovery, receipt, "reclaim")}
       />
 
       {listError && (

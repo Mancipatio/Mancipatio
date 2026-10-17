@@ -534,7 +534,9 @@ export function withVerifiedTransactions(
     let verify = verifiers.get(rpc);
     if (!verify) {
       // Every send checks the network; a read the RPC refused for a moment is read again.
-      verify = createNetworkVerifier(rpc, network, { retryReads: readRetry });
+      // The cluster behind an RPC endpoint does not change within a page session: one
+      // genesis read per 10 minutes instead of one per click (the server verifier caches 30 s).
+      verify = createNetworkVerifier(rpc, network, { retryReads: readRetry, cacheMs: 10 * 60_000 });
       verifiers.set(rpc, verify);
     }
     await verify();

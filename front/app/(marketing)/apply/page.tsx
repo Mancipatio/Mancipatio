@@ -454,7 +454,8 @@ export default function ApplyPage() {
       setReadPhase("ready");
     })();
     void (async () => {
-      const kyc = await checkApplyEligibility(walletAddress);
+      // The signer's own verdict (session read; shares the prompt applications.mine starts).
+      const kyc = await checkApplyEligibility(session);
       if (cancelled) return;
       setEligibility(kyc);
       setEligibilityLoading(false);

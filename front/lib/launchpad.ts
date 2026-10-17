@@ -2,7 +2,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { getSupabase } from "@/lib/supabase";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { detectNetwork } from "@/lib/network";
 
@@ -153,36 +153,26 @@ export async function getMyRaiseCapacity(
 }
 
 /**
- * Server-side apply-gate check: does this wallet have an onboarded client
- * row with kyc_status === 'verified'? Unsigned read-only route (UX gate);
- * the signed submit/resubmit routes enforce the same rule authoritatively.
- * Returns null when the check itself fails (network/server) — callers should
- * fail OPEN client-side and let the submit route reject.
+ * The signer's own apply verdict (session read "applications.eligibility" —
+ * never another wallet's; the UX gate). The signed submit/resubmit routes
+ * enforce the same rule authoritatively. Returns null when the read fails or
+ * no session could be started — callers fail OPEN client-side and let the
+ * submit route reject.
  */
 export async function checkApplyEligibility(
-  wallet: string,
+  session: WalletSession | null | undefined,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<ApplyEligibility | null> {
   try {
-    const res = await fetch("/api/applications/eligibility", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wallet }),
-    });
-    const json = (await res.json()) as {
-      ok?: boolean;
-      data?: ApplyEligibility;
-      error?: string;
-    };
-    if (!res.ok || json.ok !== true || !json.data) {
-      console.warn(
-        "[launchpad] checkApplyEligibility:",
-        json.error ?? res.status,
-      );
-      return null;
-    }
-    return json.data;
+    return await signedFetch<ApplyEligibility>(
+      session,
+      "/api/applications/eligibility",
+      "applications.eligibility",
+      {},
+      { interactive: opts.interactive ?? "session-only" },
+    );
   } catch (e) {
-    console.warn("[launchpad] checkApplyEligibility threw:", e);
+    console.warn("[launchpad] checkApplyEligibility:", e);
     return null;
   }
 }

@@ -796,6 +796,7 @@ describe("role-change-pending and payout-modules", () => {
     for (const broken of ["platforms", "compliance_alerts", "custody_vaults", "conversion_requests", "delivery_requests"]) {
       expect(await run({ broken }), broken).toBeNull();
     }
+    expect(SOURCE_LABELS["onchain:custody-entry-open"]).toMatchObject({ format: "platform" });
     // Recorded with the other cheap checks (devnet here, no Platform mirrored: hold).
     const { sb: mock, rpcs } = mockSb(heartbeats);
     const result = await runAlarmChecks(mock, Date.now() + 10_000, AbortSignal.timeout(10_000));

@@ -27,13 +27,12 @@ describe("refresh and polling (F085)", () => {
   });
 
   it("a timer or a tab shown again reads with the session only, never a prompt", () => {
-    for (const [reader, action] of [
-      ["listConversionQueueInBackground", "conversion.adminList"],
-      ["listDeliveryQueueInBackground", "delivery.adminList"],
-    ] as const) {
-      const src = functionSource(reader);
-      expect(src).toContain(`"${action}"`);
-      expect(src).toContain("{ interactive: false }");
+    // The background reads go through the lib readers (lib/conversion.ts, lib/delivery.ts)
+    // told never to prompt; the operator's own click may start the session once.
+    expect(page).toContain("await adminListConversionRequests(conn.wallet, undefined, { interactive: false })");
+    expect(page).toContain("await adminListDeliveryRequests(conn.wallet, undefined, undefined, { interactive: false })");
+    expect(page).not.toContain("QueueInBackground(");
+    for (const action of ["conversion.adminList", "delivery.adminList"]) {
       expect(isSessionReadAction(action), action).toBe(true);
     }
     const poll = functionSource("useQueuePolling");

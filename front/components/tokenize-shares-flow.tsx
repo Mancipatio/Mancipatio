@@ -325,7 +325,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       }
       let clientKybVerified = false;
       if (clientName?.trim()) {
-        const eligibility = await checkApplyEligibility(wallet.toString());
+        const eligibility = await checkApplyEligibility(session, { interactive: false });
         clientKybVerified = eligibility?.kybStatus === "verified";
       }
       let canInitMint = false;

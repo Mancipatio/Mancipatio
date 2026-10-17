@@ -36,10 +36,7 @@ import {
   SimulationUnavailableError,
 } from "@/lib/simulation-gate";
 import { MaintenanceModeError, MaintenanceUnknownError } from "@/lib/maintenance";
-import {
-  PrimaryWalletRequiredError,
-  TransactionWalletChangedError,
-} from "@/lib/transaction-wallet-policy";
+import { PrimaryWalletRequiredError, TransactionWalletChangedError, TransactionWalletPolicyError } from "@/lib/transaction-wallet-policy";
 import { AssetRegistryInstruction } from "@/lib/generated/asset_registry";
 import {
   findPlatformPda,
@@ -337,7 +334,7 @@ describe("custody approval intent: never-broadcast sends and the preflight", () 
         throw paused();
       }),
     };
-    await expect(openCustodyOnce(input)).rejects.toThrow("paused");
+    await expect(openCustodyOnce(input)).rejects.toThrow(/Custody entry is closed|paused/);
     expect(readCustodyOpenIntent(scope)).toBeNull();
     expect(input.build).toHaveBeenCalledOnce();
     expect(input.preflight).toHaveBeenCalledWith({ instruction: "public" });
@@ -361,7 +358,7 @@ describe("custody approval intent: never-broadcast sends and the preflight", () 
         );
         throw paused();
       });
-      await expect(openCustodyOnce(input)).rejects.toThrow("paused");
+      await expect(openCustodyOnce(input)).rejects.toThrow(/Custody entry is closed|paused/);
       const kept = readCustodyOpenIntent(scope)!;
       expect(kept).not.toBeNull();
       if (change === "signature") expect(kept.signature).toBe(signature);
@@ -402,6 +399,8 @@ describe("custody approval intent: never-broadcast sends and the preflight", () 
       Object.assign(new Error("Proceeds are frozen"), {
         name: "GateAccountSetError",
       }),
+      new TransactionWalletPolicyError("server"),
+      // An older plain Error from the policy module: matched by its opening words.
       new Error(
         `${WALLET_POLICY_REFUSAL_PREFIX}. Approve the wallet verification and try again.`,
       ),
@@ -413,7 +412,7 @@ describe("custody approval intent: never-broadcast sends and the preflight", () 
     ];
     for (const error of refused)
       expect(custodySendNeverBroadcast(error), String(error)).toBe(true);
-    for (const error of refused.slice(0, 9))
+    for (const error of refused.slice(0, 10))
       expect(NEVER_BROADCAST_ERROR_NAMES.has((error as Error).name)).toBe(true);
     const uncertain = [
       new Error("RPC disconnected"),
@@ -428,10 +427,11 @@ describe("custody approval intent: never-broadcast sends and the preflight", () 
     for (const error of uncertain)
       expect(custodySendNeverBroadcast(error), String(error)).toBe(false);
     expect(isWalletRejection(new Error("Insufficient funds"))).toBe(false);
-    // The wallet-policy wording is matched by its opening words: pin them at the source.
+    // The wallet-policy wording is matched by its opening words: pin them at the source
+    // (lib/transaction-wallet-policy.ts builds every variant from this constant).
     expect(
       readFileSync(join(process.cwd(), "lib/transaction-wallet-policy.ts"), "utf8"),
-    ).toContain(`"${WALLET_POLICY_REFUSAL_PREFIX}.`);
+    ).toContain(`"${WALLET_POLICY_REFUSAL_PREFIX}"`);
   });
 });
 

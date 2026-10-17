@@ -126,7 +126,7 @@ import {
   sortCustodyQueue,
 } from "@/lib/admin-badge-rules";
 import { createLatestGate } from "@/lib/latest-load";
-import { signedFetch, WalletSessionRequiredError } from "@/lib/siws-client";
+import { WalletSessionRequiredError } from "@/lib/siws-client";
 import { waitForSignature } from "@/lib/simulation-gate";
 import { readCustodyOpenIntent } from "@/lib/custody-open-recovery";
 
@@ -2218,34 +2218,6 @@ function useQueuePolling({
   }, [live, busy]);
 }
 
-/** The conversion queue's background read: the same session read as adminListConversionRequests, told never to prompt (a timer must not open the wallet). */
-async function listConversionQueueInBackground(
-  session: Parameters<typeof adminListConversionRequests>[0],
-): Promise<ConversionRequest[]> {
-  const data = await signedFetch<{ requests: ConversionRequest[] }>(
-    session,
-    "/api/conversion/admin-list",
-    "conversion.adminList",
-    {},
-    { interactive: false },
-  );
-  return data.requests ?? [];
-}
-
-/** The delivery queue's background read (see listConversionQueueInBackground). */
-async function listDeliveryQueueInBackground(
-  session: Parameters<typeof adminListDeliveryRequests>[0],
-): Promise<DeliveryRequest[]> {
-  const data = await signedFetch<{ requests: DeliveryRequest[] }>(
-    session,
-    "/api/delivery/admin-list",
-    "delivery.adminList",
-    {},
-    { interactive: false },
-  );
-  return data.requests ?? [];
-}
-
 /** The refresh control of a queue header. */
 function QueueRefreshButton({
   refreshing,
@@ -2606,7 +2578,7 @@ function ConversionRequestsSection({
         // if the session lapsed.
         const rows =
           mode === "background"
-            ? await listConversionQueueInBackground(conn.wallet)
+            ? await adminListConversionRequests(conn.wallet, undefined, { interactive: false })
             : await adminListConversionRequests(conn.wallet);
         if (!current()) return;
         setRequests(rows);
@@ -4219,7 +4191,7 @@ function DeliveryRequestsSection({
       try {
         const rows =
           mode === "background"
-            ? await listDeliveryQueueInBackground(conn.wallet)
+            ? await adminListDeliveryRequests(conn.wallet, undefined, undefined, { interactive: false })
             : await adminListDeliveryRequests(conn.wallet);
         if (!current()) return;
         setRequests(rows);

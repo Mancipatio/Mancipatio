@@ -220,12 +220,12 @@ describe("transaction session and prepared-message provenance", () => {
     expect(f.submitted).not.toHaveBeenCalled();
   });
 
-  it("prepares and sends through the pool with a single policy read at send time", async () => {
+  it("prepares and sends through the pool with a single policy read at send time (one cached genesis read)", async () => {
     const f = fixture();
     const prepared = await f.guarded.transaction.prepare(f.request);
     await f.guarded.transaction.send(prepared);
     expect(remote.signedFetch).toHaveBeenCalledOnce();
-    expect(f.genesis).toHaveBeenCalledTimes(2);
+    expect(f.genesis).toHaveBeenCalledTimes(1);
     expect(f.submitted).toHaveBeenCalledOnce();
   });
 

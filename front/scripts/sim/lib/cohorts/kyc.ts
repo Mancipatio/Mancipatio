@@ -186,7 +186,7 @@ async function pollDossier(ctx: SimCtx, u: UserState): Promise<void> {
   if (status && TERMINAL_KYC.has(status)) return finish(u, "rejected", `dossier ${status}`);
   if (kind === "kyc" && status === "verified") return afterVerified(ctx, u);
   if (kind === "kyb") {
-    const el = await ctx.http.post<Eligibility>(a, { step: "poll.eligibility", route: "/api/applications/eligibility", body: { wallet: u.wallet } });
+    const el = await ctx.http.read<Eligibility>(a, { step: "poll.eligibility", route: "/api/applications/eligibility", action: "applications.eligibility", params: {} });
     if (el.outcome === "ok") {
       if (el.data?.applicantKind === "company") return go(u, "app.submit");
       if (el.data?.kybStatus === "rejected") return finish(u, "rejected", "KYB rejected");

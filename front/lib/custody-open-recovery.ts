@@ -217,8 +217,9 @@ export async function recordCustodyOpening(
  * message signature the user declined, or an answer the server did not
  * give. It runs before the transaction is offered to the wallet
  * (lib/verified-solana-client.ts prepareAndSend), so a send that failed
- * with it never reached the network. Matched by its opening words, since
- * that module re-throws a plain Error (tests/custody-open-recovery.test.ts
+ * with it never reached the network. The module throws a typed
+ * TransactionWalletPolicyError (matched by name below); the opening words
+ * stay matched for an older plain Error (tests/custody-open-recovery.test.ts
  * pins the wording there).
  */
 export const WALLET_POLICY_REFUSAL_PREFIX =
@@ -242,6 +243,7 @@ export const NEVER_BROADCAST_ERROR_NAMES: ReadonlySet<string> = new Set([
   "MaintenanceModeError",
   "MaintenanceUnknownError",
   "PrimaryWalletRequiredError",
+  "TransactionWalletPolicyError",
 ]);
 
 /** The words wallets use when the user said no to a transaction (with the standard code 4001). */

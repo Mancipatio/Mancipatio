@@ -65,6 +65,9 @@ export type ConversionRequest = {
   decided_at: string | null;
   deposit_tx: string | null;
   outcome_tx: string | null;
+  /** Server-verified proofs (lib/server/custody-evidence.ts); the admin lists return every column. */
+  deposit_evidence?: unknown;
+  outcome_evidence?: unknown;
 };
 
 // holder_wallet / client_id are derived server-side from the verified

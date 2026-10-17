@@ -62,7 +62,7 @@ import { RequireRole } from "@/components/require-role";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { CONVERSION_TARGET_LABEL, UNLINKED_TARGET_LABEL, classKey, hasMarkerShape, unlinkedMarkerKeys } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 const TOKEN_2022_ADDRESS =
@@ -143,6 +143,8 @@ function ShareClassesOps() {
   const [scByPda, setScByPda] = useState<Map<string, ShareClass>>(new Map());
   // The conversion marker (C2): labelled, never offered a mint.
   const conversionTargets = useConversionTargets(data?.shareClasses);
+  // Markers nothing converts into yet (synchronous; lib/conversion-target).
+  const unlinked = useMemo(() => unlinkedMarkerKeys(data?.shareClasses ?? []), [data]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -295,7 +297,7 @@ function ShareClassesOps() {
           )}
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -353,12 +355,16 @@ function ShareClassesOps() {
                       <ConvertibleTargetLabel sc={sc} scByPda={scByPda} />
                     </td>
                     <td className="px-4 py-3">
-                      {conversionTargets.has(classKey(sc)) ? (
+                      {conversionTargets.has(classKey(sc)) || unlinked.has(classKey(sc)) ? (
                         <span
-                          title="Capped at 0: the class another class of this asset converts into. It never holds tokens and needs no mint."
+                          title={
+                            unlinked.has(classKey(sc))
+                              ? "Not linked yet — link it with Set target on class #0 (issuer authority with the Conversion permission)."
+                              : "Capped at 0: the class another class of this asset converts into. It never holds tokens and needs no mint."
+                          }
                           className="inline-flex rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700"
                         >
-                          {CONVERSION_TARGET_LABEL}
+                          {unlinked.has(classKey(sc)) ? UNLINKED_TARGET_LABEL : CONVERSION_TARGET_LABEL}
                         </span>
                       ) : (
                         <span
@@ -389,6 +395,7 @@ function ShareClassesOps() {
           allClasses={data.shareClasses}
           scByPda={scByPda}
           conversionTarget={conversionTargets.has(classKey(selectedRow.sc))}
+          unlinked={unlinked.has(classKey(selectedRow.sc))}
           onRefresh={refresh}
           onClose={() => setSelectedIdx(null)}
         />
@@ -457,6 +464,7 @@ function ShareClassDetail({
   allClasses,
   scByPda,
   conversionTarget,
+  unlinked,
   onRefresh,
   onClose,
 }: {
@@ -466,6 +474,8 @@ function ShareClassDetail({
   scByPda: Map<string, ShareClass>;
   /** The conversion marker (C2): no mint is ever created for it. */
   conversionTarget: boolean;
+  /** The marker before class #0 points at it (unlinkedMarkerKeys). */
+  unlinked: boolean;
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -1228,13 +1238,14 @@ function ShareClassDetail({
           Lifecycle actions
         </p>
 
-        {!sc.mintInitialized && conversionTarget && (
+        {!sc.mintInitialized && (conversionTarget || unlinked) && (
           <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-            {CONVERSION_TARGET_LABEL}: capped at 0, the class another class of this asset converts into. It never holds
-            tokens, so it has no mint (creating one would break the issuer&apos;s tokenize flow).
+            {unlinked
+              ? `${UNLINKED_TARGET_LABEL}: capped at 0, it never holds tokens and needs no mint. Link it with Set target on class #0 (issuer authority with the Conversion permission).`
+              : `${CONVERSION_TARGET_LABEL}: capped at 0, the class another class of this asset converts into. It never holds tokens, so it has no mint (creating one would break the issuer's tokenize flow).`}
           </p>
         )}
-        {!sc.mintInitialized && !conversionTarget && (
+        {!sc.mintInitialized && !conversionTarget && !hasMarkerShape(sc) && (
           <button
             type="button"
             disabled={tx.isSending}

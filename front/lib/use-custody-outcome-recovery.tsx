@@ -4,6 +4,7 @@ import type { WalletSession } from "@solana/client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { signedFetch } from "@/lib/siws-client";
+import { recordAudit } from "@/lib/supabase";
 import {
   assertChainRecordStorageAvailable,
   discardableChainRecordState,
@@ -165,6 +166,24 @@ export function useCustodyOutcomeRecovery(
       // Landed: record now. Unreadable here: one signed attempt, the server decides.
       if (state === "landed" || state === "unknown") await finish(receipt);
       else await settle(receipt);
+      // The inline path wrote its own row; a retry gives the "pending" row its final.
+      const parsed = parseCustodyOutcome(receipt.entityId);
+      if (wallet) {
+        void recordAudit({
+          ix_name: parsed.status === "returned" ? "return_custody_vault" : "realize_custody",
+          category: "custody",
+          actor_wallet: wallet,
+          reason: "Retry recording a sent custody outcome",
+          target_label: `${product} ${parsed.id.slice(0, 8)}`,
+          tx_signature: receipt.signature,
+          metadata: {
+            [`${product}_request_id`]: parsed.id,
+            request_id: parsed.id,
+            signature: receipt.signature,
+            recorded_via: "retry_recording",
+          },
+        });
+      }
       toast.show({ kind: "success", title: "Custody outcome recorded" });
     } catch (error) {
       toast.showError(
