@@ -521,6 +521,33 @@ describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
       .toMatchObject({ severity: "critical", summary: expect.stringMatching(/^Pause flags set/) });
   });
 
+  it("set_pause_flags names the areas the event changed (a conversion window: 'resumed Custody entry'), then what is still paused", () => {
+    const changed = (old: number, now: number) => ({ events: [[encodeEvent("PauseFlagsChanged", { old, new: now })]] });
+    // The 0x08 window opens: critical as before, but the summary says what was resumed, not the list of what stayed closed.
+    expect(one(run([pauseFlags(0, 0x08)], changed(0x7e, 0x76)))).toMatchObject({ severity: "critical",
+      summary: expect.stringMatching(/^Pause flags cleared \(unpause\): resumed Custody entry \(0x7e → 0x76; now paused: Primary issuance, Trading through Manci, Distributions, Issuer proceeds, Payout modules\)$/) });
+    // …and closes again: high, naming the bit set.
+    expect(one(run([pauseFlags(0x08, 0)], changed(0x76, 0x7e)))).toMatchObject({ severity: "high",
+      summary: expect.stringMatching(/^Pause flags set: paused Custody entry \(0x76 → 0x7e; now paused: .*Custody entry/) });
+    // "Resume everything" (0xbf) when only 0x08 was clear-able: the event decides, not the mask.
+    const everything = one(run([pauseFlags(0, 0xbf)], changed(0x48, 0x40)));
+    expect(everything.summary).toMatch(/: resumed Custody entry \(0x48 → 0x40; now paused: Payout modules\)$/);
+    expect(everything.summary).not.toMatch(/paused Custody entry|Primary issuance/);
+    // A mixed Super Admin call (a clear is still an unpause, critical) names both sides; a no-op names no area.
+    expect(one(run([pauseFlags(0x02, 0x08)], changed(0x08, 0x02)))).toMatchObject({ severity: "critical",
+      summary: "Pause flags cleared (unpause): resumed Custody entry; paused Primary issuance (0x08 → 0x02; now paused: Primary issuance)" });
+    expect(one(run([pauseFlags(0x02, 0)], changed(0x02, 0x02)))).toMatchObject({ severity: "low", summary: expect.stringMatching(/^Pause flags set: no area changed \(0x02 → 0x02; now paused: Primary issuance\)$/) });
+    // Without the event the mask is a request, never a result: still critical.
+    expect(one(run([pauseFlags(0, 0x08)], { logs: "none" }))).toMatchObject({ severity: "critical",
+      summary: "Pause flags cleared (unpause): resume requested for Custody entry (event missing)" });
+    expect(one(run([pauseFlags(0x02, 0)], { logs: "none" })).summary).toBe("Pause flags set: pause requested for Primary issuance (event missing)");
+    // Sale windows name Primary issuance (0x02) and Issuer proceeds (0x20); the bootstrap close and the payout branches keep their openings.
+    expect(one(run([pauseFlags(0, 0x02)], changed(0x7e, 0x7c))).summary).toMatch(/^Pause flags cleared \(unpause\): resumed Primary issuance \(/);
+    expect(one(run([pauseFlags(0, 0x20)], changed(0x7e, 0x5e))).summary).toMatch(/^Pause flags cleared \(unpause\): resumed Issuer proceeds \(/);
+    expect(one(run([pauseFlags(0, 0x80)], changed(0xff, 0x7f))).summary).toBe("Bootstrap window closed (0xff → 0x7f; now paused: Onboarding, Primary issuance, Trading through Manci, Custody entry, Distributions, Issuer proceeds, Payout modules)");
+    expect(one(run([pauseFlags(0, 0x40)], changed(0x7e, 0x3e))).summary).toMatch(/^Payout modules switched ON \(0x40 cleared: .*\) \(0x7e → 0x3e; now paused: /);
+  });
+
   it("remove_admin is critical with the removed key, and critical when its arguments cannot be decoded", () => {
     const removed = critical.find(([name]) => name === "remove_admin")![1];
     expect(one(run([removed]))).toMatchObject({ source: "onchain:admin-record", severity: "critical", summary: `Admin removed: ${C}`, evidence: { admin: C } });
