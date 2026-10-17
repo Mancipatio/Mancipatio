@@ -2637,18 +2637,26 @@ branch `release/mainnet` (Ignored Build Step: only production), so a merge
 to `main` deploys devnet and never touches mainnet. Every front release is a
 fast-forward of that branch: `release/mainnet` is pushed from the tip of
 `main` (`ops/release-checklist.md`), never cherry-picked and never from a
-feature branch. Before the push, `RELEASE_GUARD_STRICT=1 bash
-scripts/check-release-ancestry.sh <sha>` checks the candidate: it must
-contain `origin/main` and carry nothing that is not on `main`. After the
-push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
+feature branch. Before the push, from the repository root,
+`RELEASE_GUARD_STRICT=1 bash scripts/check-release-ancestry.sh <sha>`
+checks the candidate: it must contain `origin/main` and carry nothing that
+is not on `main`. A push refused as non-fast-forward means that
+`release/mainnet` carries commits `main` lacks (the script run without an
+argument lists them as `::warning::`): merge `origin/release/mainnet` into
+`main` through a PR and start again at the check; never `--force`. After
+the push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
 runs the same script against the pushed commit: red means the live site is
 missing commits of `main`, as on 2026-10-15, when a push from a branch that
 had diverged before #78 left the KYC-only lockdown out of the release
 branch. GitHub reads a push workflow from the pushed commit, so a commit
 from a branch created before the workflow was merged runs no guard at all
 (exactly that shape): a missing run is a fault, and the pre-push check is
-the defence. A migration the new front needs is applied to the mainnet
-project before the push ("Apply migration 0080" below shows the order).
+the defence. A manual run (workflow_dispatch) checks the branch tip, and a
+re-run the commit pushed then, against the current `origin/main`, so it is
+red whenever `main` has unreleased commits: the next release's work, not a
+fault of the live one. A migration the new front needs is applied to the
+mainnet project before the push ("Apply migration 0080" below shows the
+order).
 
 #### Apply migration 0080
 

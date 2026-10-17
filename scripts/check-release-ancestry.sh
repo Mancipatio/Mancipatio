@@ -8,22 +8,22 @@
 # main cannot be left out of mainnet silently (on 2026-10-15 a push from a
 # branch that had diverged before the KYC-only lockdown, #78, did just that).
 #
-#   bash scripts/check-release-ancestry.sh [<release ref>]
+#   bash scripts/check-release-ancestry.sh [<release ref>]   # repository root
 #
 # The ref defaults to origin/release/mainnet (the current release); the
-# release checklist passes the candidate sha before the push, the Release
-# guard workflow the pushed commit. Exit 1, listing the commits of main that
-# are missing, when main is not an ancestor of the ref. Commits on the ref
-# that are not on main are a warning (main receives them next), or exit 1
-# with RELEASE_GUARD_STRICT=1 (the pre-push form: such a candidate is a
-# feature branch, not the tip of main). RELEASE_GUARD_NO_FETCH=1 skips the
-# fetch of main and release/mainnet (explicit refspecs, so a single-branch
-# clone sees both); RELEASE_GUARD_MAIN_REF replaces origin/main. No secret.
+# checklist passes the candidate sha before the push, the Release guard
+# workflow the pushed commit. Exit 1, listing the commits of main that are
+# missing, when main is not an ancestor of the ref. Commits on the ref that
+# are not on main are a warning (main receives them next), or exit 1 with
+# RELEASE_GUARD_STRICT=1 (the pre-push form; a value other than 0 or 1 exits 2).
+# RELEASE_GUARD_NO_FETCH=1 skips the fetch (explicit refspecs, so a single-
+# branch clone sees both); RELEASE_GUARD_MAIN_REF replaces origin/main. No secret.
 set -euo pipefail
 
 main_ref="${RELEASE_GUARD_MAIN_REF:-origin/main}"
 release_ref="${1:-origin/release/mainnet}"
 strict="${RELEASE_GUARD_STRICT:-0}"
+[[ "${strict}" == [01] ]] || { echo "::error::RELEASE_GUARD_STRICT must be 1 or 0, not '${strict}'" >&2; exit 2; }
 
 if [[ "${RELEASE_GUARD_NO_FETCH:-0}" != "1" ]]; then
   git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main \
