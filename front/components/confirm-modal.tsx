@@ -108,9 +108,17 @@ function ConfirmModalInner({
                 disabled={busy}
                 autoFocus
               />
-              {!reasonOk && reason.length > 0 && (
-                <p className="mt-1 text-xs text-amber-600">
-                  At least {reasonMinLength} characters.
+              {/* Why the confirm button is disabled: a required reason that is
+                  still empty is the usual cause, so it is said up front, not
+                  only once the operator starts typing. */}
+              {!reasonOk && (
+                <p
+                  id="confirm-reason-hint"
+                  className={`mt-1 text-xs ${reason.trim().length === 0 ? "text-slate-500" : "text-amber-600"}`}
+                >
+                  {reason.trim().length === 0
+                    ? `Enter a reason (at least ${reasonMinLength} characters).`
+                    : `At least ${reasonMinLength} characters.`}
                 </p>
               )}
             </div>
