@@ -14,21 +14,31 @@
 //
 // One transaction: [create the treasury token account (idempotent),
 // mint_to_treasury, set_pause_flags(set 0x02)?]. The re-pause rides in the
-// same transaction when the distribution asks for it (Primary issuance is
-// global: it is closed again in the very transaction that used it, unless a
-// sale of any issuer is Open and needs it). Measured: 626 B with the send
-// path's compute-budget instructions (tests/send-outcome.test.ts).
+// same transaction when the caller asks for it (Send to wallets and the
+// admin panel both decide with lib/public-sale mintRepausesPrimary: Primary
+// issuance is global, so it is closed again in the very transaction that
+// used it, unless a sale of any issuer is Open and needs it). Measured:
+// 626 B with the send path's compute-budget instructions
+// (tests/send-outcome.test.ts).
+//
+// Before the reservation is signed, the gate the send path applies later
+// (lib/pause-gate.ts) is read here: KYC-only mode and the 0x02 pause refuse
+// the mint without a signature, a reservation row or the release prompts a
+// refused reservation used to cost (one every 15 s for up to 3 minutes).
 import type { TransactionPrepareAndSendRequest, WalletSession } from "@solana/client";
 import type { Address, Instruction, TransactionSigner } from "@solana/kit";
 import { getCreateAssociatedTokenIdempotentInstructionAsync } from "@solana-program/token-2022";
 import {
+  AssetRegistryInstruction,
   getMintToTreasuryInstructionAsync,
   getSetPauseFlagsInstructionAsync,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
+import { kycOnly } from "@/lib/features";
 import { resolveIssuerPermission, ISSUER_CAPABILITIES } from "@/lib/issuer-permissions";
+import { detectNetwork, type Network } from "@/lib/network";
 import { PAUSE_PRIMARY } from "@/lib/pause-flags";
-import { clearPauseFlagsCache } from "@/lib/pause-gate";
+import { clearPauseFlagsCache, heldBit, KycOnlyFlowError, PausedFlowError, readPauseFlags } from "@/lib/pause-gate";
 import { releaseWhenExpired, reserveTreasuryMint } from "@/lib/sale-approvals";
 import { recordAudit } from "@/lib/supabase";
 import { tokenAccountOf, TOKEN_2022 } from "@/lib/share-transfer";
@@ -101,10 +111,32 @@ export class TreasuryMintError extends Error {
 }
 
 /**
- * Reserve → build → send → wait for the network. Returns once the mint is
- * confirmed, refused or not confirmed in time (`outcome`), with the audit
- * row written for that outcome. Throws (the reservation released once the
- * blockhash expires) when nothing was sent.
+ * Says before anything is signed what the send path would refuse after the
+ * reservation (lib/pause-gate.ts, the same words): KYC-only mode
+ * (KycOnlyFlowError) and the emergency pause on mint_to_treasury, 0x02
+ * (PausedFlowError), the flags read through the gate's short cache. An
+ * unreadable Platform refuses nothing, as the gate does: the program
+ * decides. `opts` are readPauseFlags' (tests inject the read).
+ */
+export async function assertTreasuryMintAllowed(
+  rpc: unknown,
+  opts: { network?: Network } & NonNullable<Parameters<typeof readPauseFlags>[1]> = {},
+): Promise<void> {
+  const { network = detectNetwork(), ...read } = opts;
+  if (kycOnly(network)) throw new KycOnlyFlowError(AssetRegistryInstruction.MintToTreasury);
+  const flags = await readPauseFlags(rpc, read);
+  if (flags === null || flags === 0) return;
+  const bit = heldBit(flags, AssetRegistryInstruction.MintToTreasury, { data: null, facts: {} });
+  if (bit !== null) throw new PausedFlowError(bit, AssetRegistryInstruction.MintToTreasury);
+}
+
+/**
+ * Gate → reserve → build → send → wait for the network. Returns once the
+ * mint is confirmed, refused or not confirmed in time (`outcome`), with the
+ * audit row written for that outcome. Throws (the reservation released once
+ * the blockhash expires) when nothing was sent; before the reservation
+ * (KYC-only mode, the 0x02 pause, a key without the Mint capability) nothing
+ * is reserved at all.
  */
 export async function runTreasuryMint(input: {
   session: WalletSession;
@@ -130,6 +162,12 @@ export async function runTreasuryMint(input: {
   let lastValidBlockHeight: bigint | null = null;
   let signature: string | null = null;
   try {
+    // Said before the reservation: what would refuse the mint after it (the
+    // send path checks again), and the Mint capability the proof needs, so a
+    // key without it reserves nothing (nothing would release that for 30 min).
+    await assertTreasuryMintAllowed(rpc);
+    const signer = walletSigner(session);
+    const adminRecord = await resolveIssuerPermission(rpc, input.issuerPda, signer.address, ISSUER_CAPABILITIES.Mint);
     input.onStage?.("reserve");
     const reserved = await reserveTreasuryMint(session, {
       share_class: input.scPda,
@@ -138,8 +176,6 @@ export async function runTreasuryMint(input: {
       reason: input.reason,
     });
     reservationId = reserved.reservation_id;
-    const signer = walletSigner(session);
-    const adminRecord = await resolveIssuerPermission(rpc, input.issuerPda, signer.address, ISSUER_CAPABILITIES.Mint);
     const { instructions, destination } = await buildTreasuryMintIxs({
       signer,
       issuerPda: input.issuerPda,
@@ -185,7 +221,9 @@ export async function runTreasuryMint(input: {
     // The server books it: the alarm worker sees the finalized mint and the
     // retry worker's ledger stage books the reservation at the block date
     // (Talas 5.1). Until then it stays counted at the reserved value.
-    const outcome = await confirmThenReport(() => waitForSignature(rpc, sig, { timeoutMs: input.confirmTimeoutMs ?? 60_000 }), {
+    // A status read the RPC refused for a moment (429) is retried within the
+    // timeout, never answered "unknown" at once (lib/simulation-gate retryReads).
+    const outcome = await confirmThenReport(() => waitForSignature(rpc, sig, { timeoutMs: input.confirmTimeoutMs ?? 60_000, retryReads: true }), {
       confirmed: () => void audit("success"),
       failed: () => void audit("failed", { error: "refused by the network" }),
       unconfirmed: (o) => void audit("pending", { confirmation: o }),
@@ -202,6 +240,52 @@ export async function runTreasuryMint(input: {
 }
 
 // ── The declared EUR value ──────────────────────────────────────────────────
+
+/** The ledger's floor (migration 0080) and the route's ceiling (route.ts) for a declared EUR value. */
+export const DECLARED_EUR_MIN = 1;
+export const DECLARED_EUR_MAX = 1e12;
+
+export type DeclaredEur = { ok: true; eur: number } | { ok: false; error: string };
+
+const DECLARED_EUR_HINT = "e.g. 1000 or 1000.50";
+
+/**
+ * The EUR value typed into the admin panel's field, read strictly: digits
+ * with at most two decimals after a dot, exactly as typed. "1.000" and
+ * "1,000" are ambiguous (one euro or one thousand, by locale), so grouping
+ * separators and a third decimal are refused rather than guessed: the
+ * raise-limit ledger booked €1 for "1.000" while the confirmation echoed
+ * "€1.000". The value is counted in integer cents (no float drift), at
+ * least DECLARED_EUR_MIN and at most DECLARED_EUR_MAX; the error is the
+ * sentence shown under the field.
+ */
+export function parseDeclaredEur(input: string): DeclaredEur {
+  const s = input.trim().replace(/^€\s*/, "");
+  if (s === "") return { ok: false, error: "Enter the EUR value this mint counts against the raise limit." };
+  if (/[,\s]/.test(s)) return { ok: false, error: `Use "." for cents and no thousands separators, ${DECLARED_EUR_HINT}.` };
+  const m = /^(\d{1,13})(?:\.(\d{1,2}))?$/.exec(s);
+  if (!m) {
+    if (/^\d{14,}(?:\.\d*)?$/.test(s)) return { ok: false, error: "Too large." };
+    // Digits with a third decimal or a second dot: a thousands separator, not cents.
+    const dots = s.split(".").length - 1;
+    const grouped = /^[\d.]+$/.test(s) && (dots > 1 || (dots === 1 && s.length - s.indexOf(".") - 1 > 2));
+    return grouped
+      ? { ok: false, error: "At most 2 decimals (cents). For one thousand type 1000 — no thousands separators." }
+      : { ok: false, error: `Enter the EUR value as a number, ${DECLARED_EUR_HINT}.` };
+  }
+  const cents = Number(m[1]) * 100 + Number((m[2] ?? "").padEnd(2, "0"));
+  const eur = cents / 100;
+  if (eur < DECLARED_EUR_MIN) return { ok: false, error: "At least €1 (the raise-limit ledger's floor)." };
+  if (eur > DECLARED_EUR_MAX) return { ok: false, error: "Too large." };
+  return { ok: true, eur };
+}
+
+const EUR_FORMAT = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** "€1,000.00", "€1.00": the parsed value echoed under the field and in the confirmation (the en-IE EUR style of /admin/spvs). */
+export function formatDeclaredEur(eur: number): string {
+  return EUR_FORMAT.format(eur);
+}
 
 /** "0.4", "12.5", "1000" (USD per token, at most 6 decimals) → millionths of a USD; null when invalid. */
 export function parseUsdPerToken(input: string): bigint | null {

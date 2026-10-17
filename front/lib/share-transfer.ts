@@ -24,10 +24,12 @@ import {
   isOffCurveAddress,
   type Address,
   type GetMultipleAccountsApi,
+  type GetSignatureStatusesApi,
   type Instruction,
   type MaybeEncodedAccount,
   type ReadonlyUint8Array,
   type Rpc,
+  type Signature,
   type TransactionSigner,
 } from "@solana/kit";
 import {
@@ -41,6 +43,7 @@ import {
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   findKycEntryPda,
+  getIssuerDecoder,
   getKycEntryDecoder,
   getKycEntryDiscriminatorBytes,
   getKycRegistryDecoder,
@@ -59,6 +62,8 @@ import { liveBlockEntry } from "@/lib/blocklist";
 import { findBlockEntryPda } from "@/lib/pdas";
 import { bitmapHasCode } from "@/lib/jurisdiction-bitmap";
 import { countryName } from "@/lib/countries";
+import { withRpcReadRetry, type RpcReadRetryOptions } from "@/lib/rpc-retry";
+import type { SignatureOutcome } from "@/lib/simulation-gate";
 
 export const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
 const TOKEN_CLASSIC = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
@@ -332,6 +337,77 @@ export async function loadShareTransferFacts(
     recipientBlocked: liveBlockEntry(recipientBlock, recipient) !== null,
     passport,
   };
+}
+
+/** What the "Send to holder" panel needs to show itself (loadSenderHolding). */
+export type SenderHolding = {
+  /** The class's issuer authority, or null when the Issuer account is missing or not the program's. */
+  issuerAuthority: string | null;
+  /** The mint has a transfer-hook config (a legacy mint without one cannot transfer). */
+  hookConfigured: boolean;
+  /** `wallet`'s balance of the mint; 0 without a token account. */
+  balance: bigint;
+};
+
+/**
+ * Who may send and what `wallet` holds, in ONE getMultipleAccounts round
+ * trip at `confirmed` (the Issuer account, the hook config, the wallet's
+ * token account): the panel used to read them in three calls, each of which
+ * a 429 could refuse. RPC failures throw: the caller retries
+ * (lib/rpc-retry), then shows the failure instead of hiding the panel.
+ */
+export async function loadSenderHolding(
+  rpc: Rpc<GetMultipleAccountsApi>,
+  input: { wallet: Address; mint: Address; issuer: Address },
+  options: { abortSignal?: AbortSignal } = {},
+): Promise<SenderHolding> {
+  const [configPda] = await findConfigPda({ mint: input.mint });
+  const tokenAccount = await tokenAccountOf(input.wallet, input.mint);
+  const [issuerAccount, config, holding] = await fetchEncodedAccounts(rpc, [input.issuer, configPda, tokenAccount], {
+    commitment: "confirmed",
+    ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+  });
+  let issuerAuthority: string | null = null;
+  if (issuerAccount.exists && issuerAccount.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS) {
+    try {
+      issuerAuthority = getIssuerDecoder().decode(issuerAccount.data).authority.toString();
+    } catch {
+      issuerAuthority = null;
+    }
+  }
+  return {
+    issuerAuthority,
+    hookConfigured: config.exists,
+    balance: readTokenAccount(holding, input.mint)?.amount ?? BigInt(0),
+  };
+}
+
+// ── A send the panel could not confirm in time ───────────────────────────────
+
+/**
+ * One read of a signature's status, the node's history searched (a send
+ * from minutes ago is past the recent-status cache), a read the RPC refused
+ * for a moment retried (lib/rpc-retry): "confirmed", "failed", or "unknown"
+ * when the network has no answer. For the "Check again" of a send the panel
+ * could not confirm in time; never a wait loop. `options` are the retry's
+ * (an AbortSignal ends it; tests shorten the waits).
+ */
+export async function readSignatureOutcome(
+  rpc: Rpc<GetSignatureStatusesApi>,
+  signature: string,
+  options: RpcReadRetryOptions = {},
+): Promise<Exclude<SignatureOutcome, "timeout">> {
+  const { value } = await withRpcReadRetry(
+    (signal) =>
+      rpc
+        .getSignatureStatuses([signature as Signature], { searchTransactionHistory: true })
+        .send(signal ? { abortSignal: signal } : {}),
+    options,
+  );
+  const status = value[0];
+  if (!status) return "unknown";
+  if (status.err) return "failed";
+  return status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized" ? "confirmed" : "unknown";
 }
 
 // ── Checks (pure) ────────────────────────────────────────────────────────────
