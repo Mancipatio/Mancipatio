@@ -27,6 +27,7 @@ import { POST as privateProfiles } from "@/app/api/profiles/read/route";
 import { POST as issuerProfiles } from "@/app/api/issuer-profiles/read/route";
 import { POST as otc } from "@/app/api/otc/list/route";
 import { POST as resell } from "@/app/api/resell/list/route";
+import { POST as moderate } from "@/app/api/resell/moderate/route";
 import { POST as audit } from "@/app/api/audit/list/route";
 import { POST as beneficiaries } from "@/app/api/vesting/beneficiaries/route";
 import { projectPublicAssetProfile, PUBLIC_ASSET_PROFILE_FIELDS, PUBLIC_TOKENIZE_SELECT } from "@/lib/profile-public";
@@ -234,5 +235,29 @@ describe("resell listing reader (0082: a post and its contact are public only wh
   });
   it("is a session read like the OTC list: the cookie suffices, no signature prompt per page", () => {
     expect(SESSION_READ_ACTIONS.has("resell.list")).toBe(true);
+  });
+});
+
+describe("resell moderation never puts a seller's withdrawal back on the board", () => {
+  it("restores a removed listing only, with the condition repeated on the update itself", async () => {
+    signed({ id: ID, action: "restore" }); mocks.result.data = [{ id: ID, status: "removed" }];
+    expect((await moderate(request())).status).toBe(200);
+    expect(mocks.calls.find(([method]) => method === "update")?.[1]).toMatchObject({ status: "active", moderated_by: WALLET });
+    expect(mocks.calls).toContainEqual(["eq", "status", "removed"]);
+  });
+  it.each(["withdrawn", "matched", "active"])("answers 409 for a %s listing and writes nothing", async (status) => {
+    signed({ id: ID, action: "restore" }); mocks.result.data = [{ id: ID, status }];
+    expect((await moderate(request())).status).toBe(409);
+    expect(mocks.calls.some(([method]) => method === "update")).toBe(false);
+  });
+  it("removes a listing that is not removed already (409 otherwise), 404 for an unknown id", async () => {
+    signed({ id: ID, action: "remove" }); mocks.result.data = [{ id: ID, status: "active" }];
+    expect((await moderate(request())).status).toBe(200);
+    expect(mocks.calls).toContainEqual(["neq", "status", "removed"]);
+    mocks.calls.length = 0; mocks.result.data = [{ id: ID, status: "removed" }];
+    expect((await moderate(request())).status).toBe(409);
+    expect(mocks.calls.some(([method]) => method === "update")).toBe(false);
+    mocks.result.data = [];
+    expect((await moderate(request())).status).toBe(404);
   });
 });
