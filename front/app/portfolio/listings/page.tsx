@@ -92,9 +92,11 @@ export default function SellListingsPage() {
 
   const refreshListings = useCallback(async () => {
     if (!wallet) return;
-    try { setListings(await listMyResellListings(wallet.toString())); setListingsError(null); }
+    // Signed read on the service role: every status of the signer's own
+    // listings (0082 hides withdrawn, matched and removed rows from the anon client).
+    try { setListings(await listMyResellListings(conn.wallet)); setListingsError(null); }
     catch (error) { setListingsError(error instanceof Error ? error.message : "Listings service unavailable"); }
-  }, [wallet]);
+  }, [wallet, conn.wallet]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

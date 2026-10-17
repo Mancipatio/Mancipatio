@@ -93,6 +93,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "payout-snapshots.adminRead",
   "payout-snapshots.proof",
   "profiles.read",
+  // The seller's own listings or the admin board (0082: a listing is public only while active).
+  "resell.list",
   "saleApprovals.capacity",
   "saleApprovals.list",
   "saleApprovals.mine",

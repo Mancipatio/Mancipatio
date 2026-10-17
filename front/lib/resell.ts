@@ -1,12 +1,20 @@
 "use client";
 
-// Resell listings — reads stay direct (anon Supabase); ALL writes go through
-// signed server routes (SIWS):
+// Resell listings — the PUBLIC board reads directly (anon Supabase: since
+// 0082 the browser roles see ACTIVE listings only, so a seller's contact is
+// public exactly while their post is). The seller's own history and the
+// admin board read through a signed route on the service role, and ALL
+// writes go through signed server routes (SIWS):
+//   resell.list     — scope "mine": the signer's own listings, every status
+//                     (the server binds the seller filter to the verified
+//                     wallet); scope "admin": every listing with its
+//                     moderation stamps (on-chain admin gate)
 //   resell.create   — seller posts; the SERVER verifies on-chain holdings
 //                     (amount ≤ Token-2022 balance) and that share_class_pda
 //                     really is the ShareClass behind the mint
 //   resell.update   — seller withdraws / marks matched (own listings only)
-//   resell.moderate — admin remove/restore (on-chain admin gate)
+//   resell.moderate — admin remove/restore (on-chain admin gate; restore only
+//                     a removed listing, never a seller's withdrawal)
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
@@ -32,8 +40,9 @@ export type ResellListing = {
   contact: string;
   status: ResellStatus;
   linked_offer_pda: string | null;
-  moderated_by: string | null;
-  moderated_at: string | null;
+  /** Moderation stamps: the admin board only (scope "admin"); absent from a seller's own history. */
+  moderated_by?: string | null;
+  moderated_at?: string | null;
 };
 
 // seller_wallet comes from the verified signature; share_class_pda is now
@@ -132,22 +141,49 @@ export async function moderateResellListing(
   }
 }
 
-/** A failed/missing database is unavailable, never an empty market. */
-async function readResellListings(opts: { status?: ResellStatus; mint?: string; wallet?: string }): Promise<ResellListing[]> {
+/**
+ * The public board (anon client): ACTIVE listings of the network only — the
+ * rows 0082 lets the browser roles read, so a status other than "active" is
+ * not accepted here (own history and the admin board are the signed readers
+ * below). A failed/missing database is unavailable, never an empty market.
+ */
+export async function listResellListings(opts: { status?: "active"; mint?: string } = {}): Promise<ResellListing[]> {
   const sb = getSupabase();
   if (!sb) throw new Error("Listings service is not configured");
   const rows: ResellListing[] = [];
   for (let offset = 0; ; offset += 1000) {
-    let query = sb.from("resell_listings").select("*").eq("network", detectNetwork())
+    let query = sb.from("resell_listings").select("*").eq("network", detectNetwork()).eq("status", "active")
       .order("created_at", { ascending: false }).order("id", { ascending: false }).range(offset, offset + 999);
-    if (opts.status) query = query.eq("status", opts.status);
     if (opts.mint) query = query.eq("mint", opts.mint);
-    if (opts.wallet) query = query.eq("seller_wallet", opts.wallet);
     const { data, error } = await query.abortSignal(AbortSignal.timeout(10_000));
     if (error || !data) throw new Error("Listings service is unavailable; retry shortly");
     rows.push(...data as ResellListing[]);
     if (data.length < 1000) return rows;
   }
 }
-export function listResellListings(opts?: { status?: ResellStatus; mint?: string }) { return readResellListings(opts ?? {}); }
-export function listMyResellListings(wallet: string) { return readResellListings({ wallet }); }
+
+/** Signed reads page through /api/resell/list (service role) 100 rows at a time, like readOtcRequests in lib/otc.ts. */
+async function readSignedResellListings(
+  session: WalletSession | null | undefined, scope: "admin" | "mine", status?: ResellStatus,
+): Promise<ResellListing[]> {
+  const rows: ResellListing[] = [];
+  for (let offset = 0; ; offset += 100) {
+    const page = await signedFetch<ResellListing[]>(session, "/api/resell/list", "resell.list", { scope, status, offset });
+    rows.push(...page);
+    if (page.length < 100) return rows;
+  }
+}
+
+/**
+ * The signer's own listings, every status (withdrawn and matched included).
+ * The server binds the seller filter to the verified wallet; no caller
+ * wallet parameter.
+ */
+export function listMyResellListings(session: WalletSession | null | undefined, status?: ResellStatus): Promise<ResellListing[]> {
+  return readSignedResellListings(session, "mine", status);
+}
+
+/** The admin board: every listing of the network with its moderation stamps (on-chain admin gate server-side). */
+export function listAllResellListings(session: WalletSession | null | undefined, status?: ResellStatus): Promise<ResellListing[]> {
+  return readSignedResellListings(session, "admin", status);
+}
