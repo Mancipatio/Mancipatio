@@ -118,6 +118,27 @@ describe("readFinalizedTransaction", () => {
     expect(error).toMatchObject({ status: 503 });
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
   });
+  it("with retries 0 (the purchase path) one finalized read decides", async () => {
+    node([null], null);
+    const { error } = await settled(readFinalizedTransaction(signature, { retries: 0 }));
+    expect(error).toBeInstanceOf(AwaitingFinalizationError);
+    expect(finalizedReads()).toBe(1);
+  });
+  it("an aborted signal ends the wait between two reads at once (503), with no further read", async () => {
+    node([null], null);
+    const controller = new AbortController();
+    const result = readFinalizedTransaction(signature, { signal: controller.signal }).then(
+      (value) => ({ value, error: undefined as unknown }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    await vi.advanceTimersByTimeAsync(FINALIZED_READ_RETRY_DELAY_MS / 2);
+    expect(finalizedReads()).toBe(1);
+    controller.abort();
+    const { error } = await result;
+    expect(error).toMatchObject({ status: 503 });
+    expect(finalizedReads()).toBe(1);
+  });
+
   it("the client recognizes the message and the code", () => {
     const error = new AwaitingFinalizationError("later");
     expect(AWAITING_FINALIZATION_RE.test(error.message)).toBe(true);

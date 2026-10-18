@@ -34,7 +34,20 @@ export type CustodyOpenIntent = CustodyOpenScope & {
   vaultPda: string;
   signature: string | null;
   createdAt: string;
+  /**
+   * When the send of this approval settled (it returned a signature, or
+   * failed in a way that may have reached the network): the wallet had
+   * returned by then, so the transaction's blockhash is older than this
+   * moment — the bound checkCustodyOpenIntent ages the discard from, in
+   * every tab and after a reload. Null while no send has settled (a record
+   * written before the field existed, or a tab closed mid-send).
+   */
+  attemptedAt: string | null;
   recordedAt: string | null;
+};
+/** The record as stored: `attemptedAt` was added later and may be missing. */
+type StoredCustodyOpenIntent = Omit<CustodyOpenIntent, "attemptedAt"> & {
+  attemptedAt?: string | null;
 };
 const PREFIX = "mancipatio:custody-open:v1:";
 
@@ -78,8 +91,14 @@ function storage(): Storage {
     throw new Error("Browser storage is unavailable.");
   return window.localStorage;
 }
+function isNullableDate(value: unknown): value is string | null {
+  return (
+    value === null ||
+    (typeof value === "string" && Number.isFinite(Date.parse(value)))
+  );
+}
 function parse(raw: string, scope: CustodyOpenScope): CustodyOpenIntent {
-  const v = JSON.parse(raw) as CustodyOpenIntent;
+  const v = JSON.parse(raw) as StoredCustodyOpenIntent;
   if (
     v.version !== 1 ||
     key(v) !== key(scope) ||
@@ -87,14 +106,13 @@ function parse(raw: string, scope: CustodyOpenScope): CustodyOpenIntent {
     typeof v.vaultId !== "string" ||
     String(parseCustodyVaultId(v.vaultId)) !== v.vaultId ||
     (v.signature !== null && !isSignature(v.signature)) ||
-    (v.recordedAt !== null &&
-      (typeof v.recordedAt !== "string" ||
-        !Number.isFinite(Date.parse(v.recordedAt)))) ||
+    !isNullableDate(v.recordedAt) ||
+    (v.attemptedAt !== undefined && !isNullableDate(v.attemptedAt)) ||
     typeof v.createdAt !== "string" ||
     !Number.isFinite(Date.parse(v.createdAt))
   )
     throw new Error("Invalid custody approval recovery record.");
-  return v;
+  return { ...v, attemptedAt: v.attemptedAt ?? null };
 }
 export function readCustodyOpenIntent(
   scope: CustodyOpenScope,
@@ -122,6 +140,7 @@ function save(intent: CustodyOpenIntent): void {
     vaultPda: intent.vaultPda,
     signature: intent.signature,
     createdAt: intent.createdAt,
+    attemptedAt: intent.attemptedAt,
     recordedAt: intent.recordedAt,
   };
   const encoded = JSON.stringify(value);
@@ -158,6 +177,37 @@ export function forgetCustodyOpenIntent(intent: CustodyOpenIntent): boolean {
     return false;
   store.removeItem(k);
   return true;
+}
+/**
+ * Stamps the saved approval `intent` with the moment its send settled
+ * (`attemptedAt`, see CustodyOpenIntent) — only while storage still holds
+ * exactly this attempt, as forgetCustodyOpenIntent — and returns what was
+ * saved, or null when nothing was: a record a newer attempt or another tab
+ * wrote, or storage that cannot be written (the send's own error is what
+ * the caller reports; this never throws).
+ */
+export function markCustodyOpenAttempted(
+  intent: CustodyOpenIntent,
+  at: Date = new Date(),
+): CustodyOpenIntent | null {
+  try {
+    const current = readCustodyOpenIntent(intent);
+    if (
+      !current ||
+      current.createdAt !== intent.createdAt ||
+      current.vaultPda !== intent.vaultPda ||
+      current.signature !== intent.signature
+    )
+      return null;
+    const marked: CustodyOpenIntent = {
+      ...current,
+      attemptedAt: at.toISOString(),
+    };
+    save(marked);
+    return marked;
+  } catch {
+    return null;
+  }
 }
 /** Runs `run` under the approval's cross-tab lock (Web Locks, where available): one open, record or discard of a request at a time. */
 export function withCustodyOpenLock<T>(
@@ -231,7 +281,10 @@ export const WALLET_POLICY_REFUSAL_PREFIX =
  * pause, the pilot scope and KYC-only mode (lib/pause-gate.ts), the
  * simulation gate (lib/simulation-gate.ts), a set freeze / blocklist gate
  * account (lib/proceeds-gate.ts), maintenance (lib/maintenance.ts) and the
- * wallet policy (lib/transaction-wallet-policy.ts).
+ * wallet policy (lib/transaction-wallet-policy.ts) — whose message-signing
+ * prompt, before the transaction is offered, is also where a hardware
+ * wallet's signing failure (lib/siws-signing.ts) and the off-chain message
+ * limit (lib/siws-offchain.ts) are raised.
  */
 export const NEVER_BROADCAST_ERROR_NAMES: ReadonlySet<string> = new Set([
   "PausedFlowError",
@@ -244,11 +297,18 @@ export const NEVER_BROADCAST_ERROR_NAMES: ReadonlySet<string> = new Set([
   "MaintenanceUnknownError",
   "PrimaryWalletRequiredError",
   "TransactionWalletPolicyError",
+  "HardwareWalletSigningError",
+  "OffchainMessageLimitError",
 ]);
 
-/** The words wallets use when the user said no to a transaction (with the standard code 4001). */
+/**
+ * The words wallets use when the user said no — with the user as the
+ * subject, so a node's or a transport's "rejected" never matches — and the
+ * Ledger's refusal code (0x6985: denied on the device, before signing). The
+ * standard codes (4001, and the wallets' named ones) are read first.
+ */
 const WALLET_REJECTION_RE =
-  /user rejected|user declined|rejected the request|request rejected|signature request denied|cancell?ed by user/i;
+  /\buser (rejected|declined|denied|cancell?ed)\b|\b(rejected|declined|denied|cancell?ed) by (the )?user\b|signature request denied|0x6985/i;
 
 /** A wallet's "the user said no": nothing was signed, so nothing was sent. */
 export function isWalletRejection(error: unknown): boolean {
@@ -291,11 +351,12 @@ export function custodySendNeverBroadcast(error: unknown): boolean {
 // ── What became of a saved approval ─────────────────────────────────────────
 
 /**
- * How long after an approval's last attempt a vault still absent at
- * finalized — with no successful transaction for it — counts as never
- * opened: a transaction lives ~60-90 s after its blockhash was fetched
- * (just before the wallet prompt), so by then it can no longer land. Five
- * minutes leaves room for a lagging node.
+ * How long after an approval's send settled a vault still absent — at
+ * finalized and at confirmed — with no successful transaction for it counts
+ * as never opened: a transaction lives ~60-90 s after its blockhash was
+ * fetched, and the blockhash is fetched inside the send, just before the
+ * wallet prompt, so by then it can no longer land. Five minutes leaves room
+ * for a lagging node.
  */
 export const CUSTODY_OPEN_ABANDON_AFTER_MS = 5 * 60_000;
 
@@ -313,36 +374,47 @@ export type CustodyOpenCheckRpc = Rpc<GetAccountInfoApi & GetSignatureStatusesAp
 
 /**
  * Asks the network what became of a saved approval: the vault at finalized
- * first (a tombstone counts: the PDA is taken for good), then, with a
- * signature, its status with the history searched. A transaction that ran
- * and failed, or none at all CUSTODY_OPEN_ABANDON_AFTER_MS after the later
- * of the intent's creation and `lastAttemptAt` (the moment this tab's send
- * gave up: the wallet had returned by then, so the blockhash was older),
- * means the vault was never opened. A read that fails answers "unknown".
+ * first (a tombstone counts: the PDA is taken for good), then at confirmed
+ * (on its way: pending), then, with a signature, its status with the
+ * history searched. A transaction that ran and failed at finalized, or none
+ * at all CUSTODY_OPEN_ABANDON_AFTER_MS after the LATEST of the intent's
+ * creation, its `attemptedAt` (when its send settled — the wallet had
+ * returned, so the blockhash was older; saved by openCustodyOnce, so every
+ * tab and a reloaded one age from it) and `options.since` (the hook's own
+ * bound: when this tab's send gave up, or when it first saw this exact
+ * record — so a record without attemptedAt is watched for a full window
+ * here), means the vault was never opened. A read that fails answers
+ * "unknown".
  */
 export async function checkCustodyOpenIntent(
   rpc: CustodyOpenCheckRpc,
-  intent: Pick<CustodyOpenIntent, "vaultPda" | "signature" | "createdAt">,
+  intent: Pick<CustodyOpenIntent, "vaultPda" | "signature" | "createdAt"> & {
+    attemptedAt?: string | null;
+  },
   options: {
     now?: number;
-    lastAttemptAt?: number | null;
+    since?: number | null;
     minAgeMs?: number;
   } = {},
 ): Promise<CustodyOpenChainState> {
   const now = options.now ?? Date.now();
   const since = Math.max(
     Date.parse(intent.createdAt),
-    options.lastAttemptAt ?? 0,
+    intent.attemptedAt ? Date.parse(intent.attemptedAt) : 0,
+    options.since ?? 0,
   );
   const aged =
     Number.isFinite(since) &&
     now - since >= (options.minAgeMs ?? CUSTODY_OPEN_ABANDON_AFTER_MS);
   try {
-    const account = await fetchEncodedAccount(rpc, address(intent.vaultPda), {
-      commitment: "finalized",
-      abortSignal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
-    });
-    if (account.exists) return "vault_present";
+    const read = (commitment: "finalized" | "confirmed") =>
+      fetchEncodedAccount(rpc, address(intent.vaultPda), {
+        commitment,
+        abortSignal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
+      });
+    if ((await read("finalized")).exists) return "vault_present";
+    // Seen at confirmed: finalized follows in seconds. Never discardable.
+    if ((await read("confirmed")).exists) return "pending";
     if (intent.signature) {
       const { value } = await rpc
         .getSignatureStatuses([intent.signature as Signature], {
@@ -351,11 +423,11 @@ export async function checkCustodyOpenIntent(
         .send({ abortSignal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS) });
       const status = value[0];
       if (status) {
-        const settled =
-          status.confirmationStatus === "confirmed" ||
-          status.confirmationStatus === "finalized";
-        // Ran and failed: no vault came of it. Ran well: the vault is on its way to finalized.
-        return status.err && settled ? "never_opened" : "pending";
+        // Ran and failed, for good: no vault came of it. Anything else the
+        // network knows is on its way (an error at confirmed waits for finalized).
+        return status.err && status.confirmationStatus === "finalized"
+          ? "never_opened"
+          : "pending";
       }
     }
     return aged ? "never_opened" : "pending";
@@ -407,10 +479,11 @@ export async function awaitCustodyOpenFinalized(
 /**
  * An existing intent always takes the API-only branch, even when the
  * sender failed before returning a signature: a send that MAY have reached
- * the network keeps its intent (no automatic clear or re-open). Only a send
- * that provably never reached it (`notSent`: a typed pre-wallet refusal,
- * the wallet's rejection) forgets the intent it had just saved, and a
- * `preflight` refusal saves none at all.
+ * the network keeps its intent (no automatic clear or re-open), stamped
+ * with the moment it settled (`attemptedAt`: the bound the discard ages
+ * from). Only a send that provably never reached it (`notSent`: a typed
+ * pre-wallet refusal, the wallet's rejection) forgets the intent it had
+ * just saved, and a `preflight` refusal saves none at all.
  */
 export async function openCustodyOnce<T>(input: {
   scope: CustodyOpenScope;
@@ -459,6 +532,7 @@ export async function openCustodyOnce<T>(input: {
       vaultPda: String(vaultPda),
       signature: null,
       createdAt: new Date().toISOString(),
+      attemptedAt: null,
       recordedAt: null,
     };
     save(intent); // Durable public intent BEFORE the wallet can broadcast anything.
@@ -467,19 +541,30 @@ export async function openCustodyOnce<T>(input: {
     try {
       signature = await input.send(prepared);
     } catch (error) {
-      // Never broadcast: the intent would only block this request. Anything
-      // uncertain keeps it (the record above matches only this attempt).
-      if (input.notSent?.(error) && forgetCustodyOpenIntent(intent))
-        input.onIntent(null);
+      if (input.notSent?.(error)) {
+        // Never broadcast: the intent would only block this request (the
+        // record above matches only this attempt).
+        if (forgetCustodyOpenIntent(intent)) input.onIntent(null);
+      } else {
+        // Uncertain: kept, stamped with this moment — the wallet had returned
+        // (or never answered) by now, so a blockhash of this attempt is older
+        // than it: the bound every tab ages the discard from.
+        const marked = markCustodyOpenAttempted(intent);
+        if (marked) input.onIntent(marked);
+      }
       throw error;
     }
-    if (!isSignature(signature))
+    if (!isSignature(signature)) {
+      const marked = markCustodyOpenAttempted(intent);
+      if (marked) input.onIntent(marked);
       throw new Error(
         "Sender returned an invalid signature. Check the saved vault before continuing.",
       );
-    intent = { ...intent, signature };
+    }
+    intent = { ...intent, signature, attemptedAt: new Date().toISOString() };
     input.onIntent(intent); // Keep visible even if persistence fails after send.
     save(intent);
+
     await recordCustodyOpening(intent, input.scope, input.link);
     return intent;
   };

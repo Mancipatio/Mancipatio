@@ -46,7 +46,18 @@ export function useChainRecordRecovery(
     () => new Map(),
   );
   const checked = useRef(new Set<string>());
+  // The record attempt in flight or the last one: state for rendering, and
+  // a ref for the pages' async catch blocks (latestAttempt), which would
+  // otherwise read the render they started from. Reset by resetAttempt (the
+  // outcome hook's prepare and retry) and once an outcome is recorded.
   const [attempt, setAttempt] = useState<ChainRecordAttempt | null>(null);
+  const attemptRef = useRef<ChainRecordAttempt | null>(null);
+  const noteAttempt = useCallback((next: ChainRecordAttempt | null) => {
+    attemptRef.current = next;
+    setAttempt(next);
+  }, []);
+  const resetAttempt = useCallback(() => noteAttempt(null), [noteAttempt]);
+  const latestAttempt = useCallback(() => attemptRef.current, []);
 
   useEffect(() => {
     const reload = () => {
@@ -159,11 +170,12 @@ export function useChainRecordRecovery(
     ): Promise<{ state: ChainRecordState; discarded: boolean }> => {
       const state = await checkPendingChainRecord(rpc, receipt);
       noteState(receipt.signature, state);
-      const discarded = discardableChainRecordState(state);
-      if (discarded) {
+      // Storage has the last word: a newer receipt for the request is never
+      // removed by this decision (discarded is then false).
+      const discarded =
+        discardableChainRecordState(state) &&
         discardPendingChainRecord(receipt, state);
-        drop(receipt);
-      }
+      if (discarded) drop(receipt);
       return { state, discarded };
     },
     [rpc, noteState, drop],
@@ -191,24 +203,26 @@ export function useChainRecordRecovery(
    * `record` (the one signed request) once, retrying a server that has not
    * seen the finalized transaction yet after a backoff. "failed" discards
    * the receipt: the network ran the transaction and nothing moved.
-   * `attempt` / `stage` show where it is.
+   * `attempt` / `stage` show where it is; a recorded outcome clears the
+   * attempt, any other keeps it (stage null) for "sent — recording pending".
    */
   const recordFinalized = useCallback(
     async (
       receipt: PendingChainRecord,
       record: () => Promise<void>,
     ): Promise<RecordingOutcome> => {
-      setAttempt({
+      noteAttempt({
         signature: receipt.signature,
         stage: "awaiting_finalization",
         attempt: 0,
       });
+      let outcome: RecordingOutcome | null = null;
       try {
-        const outcome = await recordOnceFinalized({
+        outcome = await recordOnceFinalized({
           waitForFinalized: (timeoutMs) => awaitFinalized(receipt, timeoutMs),
           record,
           onStage: (stage, n) =>
-            setAttempt({ signature: receipt.signature, stage, attempt: n }),
+            noteAttempt({ signature: receipt.signature, stage, attempt: n }),
         });
         if (outcome === "failed") {
           discardPendingChainRecord(receipt, "failed");
@@ -216,14 +230,14 @@ export function useChainRecordRecovery(
         }
         return outcome;
       } finally {
-        setAttempt((current) =>
-          current && current.signature === receipt.signature
-            ? { ...current, stage: null }
-            : current,
-        );
+        const current = attemptRef.current;
+        if (current?.signature === receipt.signature)
+          noteAttempt(
+            outcome === "recorded" ? null : { ...current, stage: null },
+          );
       }
     },
-    [awaitFinalized, drop],
+    [awaitFinalized, drop, noteAttempt],
   );
 
   return {
@@ -243,7 +257,12 @@ export function useChainRecordRecovery(
     awaitFinalized,
     recordFinalized,
     attempt,
+    /** Forgets the last attempt: a new one starts (nothing of it has been sent). */
+    resetAttempt,
+    /** The attempt as it is NOW (for an async catch block), not as rendered. */
+    latestAttempt,
     stage: attempt?.stage ?? null,
     signature: attempt?.signature ?? null,
   };
 }
+

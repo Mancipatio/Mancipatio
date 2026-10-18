@@ -11,6 +11,7 @@ import {
   pastReceiptHorizon,
   readPendingChainRecord,
   RECEIPT_EXPIRY_HORIZON_MS,
+  RECORD_MAX_RETRIES,
   RECORD_RETRY_DELAYS_MS,
   receiptChainState,
   recordOnceFinalized,
@@ -191,8 +192,8 @@ function fakeRpc(opts: {
 }
 
 describe("receipt chain state (F075)", () => {
-  it("the horizon is 24 h after the receipt was saved", () => {
-    expect(RECEIPT_EXPIRY_HORIZON_MS).toBe(24 * 60 * 60_000);
+  it("the horizon is 6 h after the receipt was saved (the server's own: lib/server/distribution-audits.ts)", () => {
+    expect(RECEIPT_EXPIRY_HORIZON_MS).toBe(6 * 60 * 60_000);
     expect(pastReceiptHorizon(createdAt, atHorizon - 1)).toBe(false);
     expect(pastReceiptHorizon(createdAt, atHorizon)).toBe(true);
     expect(pastReceiptHorizon("not a date", atHorizon)).toBe(false);
@@ -202,7 +203,7 @@ describe("receipt chain state (F075)", () => {
     ["confirmed without error", { err: null, confirmationStatus: "confirmed" }, undefined, T0, "landed"],
     ["processed without error", { err: null, confirmationStatus: "processed" }, undefined, atHorizon, "pending"],
     ["finalized with an error", { err: { x: 1 }, confirmationStatus: "finalized" }, undefined, T0, "failed"],
-    ["confirmed with an error", { err: { x: 1 }, confirmationStatus: "confirmed" }, undefined, T0, "failed"],
+    ["confirmed with an error (waits for finalized)", { err: { x: 1 }, confirmationStatus: "confirmed" }, undefined, T0, "pending"],
     ["processed with an error", { err: { x: 1 }, confirmationStatus: "processed" }, undefined, atHorizon, "pending"],
     ["unknown, before the horizon", null, undefined, atHorizon - 1, "pending"],
     ["unknown at the horizon, transaction not read", null, undefined, atHorizon, "pending"],
@@ -258,11 +259,12 @@ describe("waiting for a signature to finalize", () => {
     expect(calls).toHaveLength(4);
     expect(calls[0]).toContain('"searchTransactionHistory":true');
   });
-  it("an error at confirmed or finalized is failed; at processed it keeps polling", async () => {
-    expect(await wait(fakeRpc({ status: { err: { x: 1 }, confirmationStatus: "confirmed" } }).rpc)).toBe("failed");
-    const seen: string[] = ["processed", "finalized"];
-    const { rpc } = fakeRpc({ status: () => ({ err: { x: 1 }, confirmationStatus: seen.shift() ?? "finalized" }) });
+  it("an error is failed only at finalized (a receipt is discarded on it); at processed or confirmed it keeps polling", async () => {
+    expect(await wait(fakeRpc({ status: { err: { x: 1 }, confirmationStatus: "confirmed" } }).rpc)).toBe("timeout");
+    const seen: string[] = ["processed", "confirmed", "finalized"];
+    const { rpc, calls } = fakeRpc({ status: () => ({ err: { x: 1 }, confirmationStatus: seen.shift() ?? "finalized" }) });
     expect(await wait(rpc, 1_000)).toBe("failed");
+    expect(calls).toHaveLength(3);
   });
   it("a status that never arrives is a timeout; an unreadable one is unknown", async () => {
     expect(await wait(fakeRpc({ status: null }).rpc)).toBe("timeout");
@@ -320,20 +322,29 @@ describe("recordOnceFinalized: wait, then one signed record", () => {
       "awaiting_finalization:0", "retry_wait:1", "awaiting_finalization:1", "retry_wait:2", "awaiting_finalization:2", "retry_wait:3", "awaiting_finalization:3",
     ]);
   });
-  it("finalized after a backoff: records then; a server answering 'awaiting finalization' is retried after the next backoff, once the status is read again", async () => {
+  it("finalized after a backoff: records then; a server answering 'awaiting finalization' gets the signed record once more, after the next backoff and read, then the manual retry", async () => {
     const late = harness(["timeout", "finalized"]);
     expect(await late.run()).toBe("recorded");
     expect(late.record).toHaveBeenCalledOnce();
     expect(late.sleeps).toEqual([5_000]);
-    const lagging = harness(["finalized", "finalized", "finalized"], [awaiting(), awaiting(), null]);
+    const lagging = harness(["finalized", "finalized"], [awaiting(), null]);
     expect(await lagging.run()).toBe("recorded");
-    expect(lagging.record).toHaveBeenCalledTimes(3);
-    expect(lagging.sleeps).toEqual([5_000, 15_000]);
-    expect(lagging.waits).toEqual([60_000, 10_000, 10_000]);
-    const stuck = harness(["finalized", "finalized", "finalized", "finalized"], [awaiting(), awaiting(), awaiting(), awaiting()]);
+    expect(lagging.record).toHaveBeenCalledTimes(2);
+    expect(lagging.sleeps).toEqual([5_000]);
+    expect(lagging.waits).toEqual([60_000, 10_000]);
+    // Each signed record is a wallet prompt: at most one more than the first.
+    expect(RECORD_MAX_RETRIES).toBe(1);
+    const stuck = harness(["finalized", "finalized", "finalized"], [awaiting(), awaiting(), awaiting()]);
     expect(await stuck.run()).toBe("not_finalized");
-    expect(stuck.record).toHaveBeenCalledTimes(4);
+    expect(stuck.record).toHaveBeenCalledTimes(2);
+    expect(stuck.sleeps).toEqual([5_000]);
+    // A wait that runs out between the two costs no prompt and keeps its backoffs.
+    const lapsed = harness(["finalized", "timeout", "finalized"], [awaiting(), awaiting()]);
+    expect(await lapsed.run()).toBe("not_finalized");
+    expect(lapsed.record).toHaveBeenCalledTimes(2);
+    expect(lapsed.sleeps).toEqual([5_000, 15_000]);
   });
+
   it("a failed transaction found on a recheck ends the attempt; any other record error is thrown as it is", async () => {
     const h = harness(["timeout", "failed"]);
     expect(await h.run()).toBe("failed");

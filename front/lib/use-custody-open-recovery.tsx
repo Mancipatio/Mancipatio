@@ -65,6 +65,11 @@ const KEPT_MESSAGE: Record<Exclude<CustodyOpenChainState, "never_opened">, strin
 /** What a page's builder hands to the wallet: one instruction, or several. */
 type Prepared = Instruction | readonly Instruction[];
 
+/** One saved approval as this tab saw it: a send that settled, or a signature, makes a new key. */
+function intentKey(intent: CustodyOpenIntent): string {
+  return `${intent.vaultPda}:${intent.createdAt}:${intent.signature ?? ""}:${intent.attemptedAt ?? ""}`;
+}
+
 /**
  * The ids among `requestIds` for which this browser holds a saved approval
  * of `product` by `wallet` on this network (a vault open that was sent, and
@@ -132,7 +137,9 @@ export function useCustodyOpenRecovery(
   const lock = useRef(false),
     latest = useRef<CustodyOpenIntent | null>(null),
     // When this tab's last send gave up: the wallet had returned by then.
-    lastAttemptAt = useRef<number | null>(null);
+    lastAttemptAt = useRef<number | null>(null),
+    // When this tab first saw the approval record it is looking at (by key).
+    observed = useRef<{ key: string; at: number } | null>(null);
   const toast = useToast();
   useEffect(() => {
     const reload = () => {
@@ -170,9 +177,20 @@ export function useCustodyOpenRecovery(
     pending.network === network
       ? pending
       : null;
-  const visibleKey = visible
-    ? `${visible.vaultPda}:${visible.createdAt}:${visible.signature ?? ""}`
-    : null;
+  const visibleKey = visible ? intentKey(visible) : null;
+  /**
+   * The bound this tab adds to checkCustodyOpenIntent (which also ages from
+   * the record's own attemptedAt): when its last send gave up, and when it
+   * first saw this exact record — so an approval whose send settled in a tab
+   * since closed (no attemptedAt saved) is watched here for a full
+   * CUSTODY_OPEN_ABANDON_AFTER_MS before it can count as never opened. A
+   * record that changes (a send settled, a signature arrived) starts over.
+   */
+  function observedSince(key: string): number {
+    if (observed.current?.key !== key)
+      observed.current = { key, at: Date.now() };
+    return Math.max(lastAttemptAt.current ?? 0, observed.current.at);
+  }
   // The network's view of the visible approval, read when it appears and
   // after each attempt; a pending one is read again every RECHECK_MS.
   useEffect(() => {
@@ -182,7 +200,7 @@ export function useCustodyOpenRecovery(
     let timer: ReturnType<typeof setTimeout> | null = null;
     const check = async () => {
       const state = await checkCustodyOpenIntent(rpc, intent, {
-        lastAttemptAt: lastAttemptAt.current,
+        since: observedSince(visibleKey),
       });
       if (cancelled) return;
       setChain({ key: visibleKey, state });
@@ -343,7 +361,7 @@ export function useCustodyOpenRecovery(
       toast.show({ kind: "success", title: "Existing custody vault linked" });
       onSuccess();
     } catch (error) {
-      lastAttemptAt.current = Date.now();
+      // No transaction is sent by a retry: the discard bound is unchanged.
       toast.showError(
         "Approval recording pending",
         error instanceof Error
@@ -357,25 +375,32 @@ export function useCustodyOpenRecovery(
   }
   /**
    * Forgets a saved approval the network shows was never opened — checked
-   * again under the request's lock right before — so the vault can be
-   * opened again. Anything else is kept.
+   * again under the request's lock right before, on the record as storage
+   * holds it THEN (another tab's send, which holds the same lock, may have
+   * stamped or replaced it meanwhile) — so the vault can be opened again.
+   * Anything else is kept.
    */
   async function discard() {
     if (lock.current || !ready || !scope || !visible) return;
-    const intent = visible;
     lock.current = true;
     setBusy(true);
     try {
       await withCustodyOpenLock(scope, async () => {
-        const state = await checkCustodyOpenIntent(rpc, intent, {
-          lastAttemptAt: lastAttemptAt.current,
+        const current = readCustodyOpenIntent(scope);
+        if (!current)
+          throw new Error(
+            "The saved approval is already gone. Reload to continue.",
+          );
+        const state = await checkCustodyOpenIntent(rpc, current, {
+          since: observedSince(intentKey(current)),
         });
         if (state !== "never_opened") throw new Error(KEPT_MESSAGE[state]);
-        if (!forgetCustodyOpenIntent(intent))
+        if (!forgetCustodyOpenIntent(current))
           throw new Error(
             "The saved approval changed in another tab. Reload and check it again.",
           );
       });
+
       latest.current = null;
       setPending(null);
       toast.show({
