@@ -205,6 +205,33 @@ export function sortCustodyQueue<T extends { status: string; created_at: string 
     .map(({ row }) => row);
 }
 
+// ── Request queue refresh (/admin/custody) ──────────────────────────────────
+
+/** What asks for a background read of a queue: its timer, or the tab shown again. */
+export type QueueRefreshReason = "poll" | "visible";
+
+/**
+ * Whether a background refresh of a request queue runs now: never while the
+ * tab is hidden or the page is busy (a transaction, a recording or a dialog
+ * is in progress), never twice within `minGapMs`, and the timer only while a
+ * row is still moving (`live`); a tab shown again refreshes whatever the
+ * rows, so a request made meanwhile appears. The page's useQueuePolling
+ * applies it.
+ */
+export function queueRefreshDue(input: {
+  reason: QueueRefreshReason;
+  visible: boolean;
+  busy: boolean;
+  live: boolean;
+  /** Milliseconds since the last refresh this hook started. */
+  sinceLastMs: number;
+  minGapMs: number;
+}): boolean {
+  if (!input.visible || input.busy) return false;
+  if (input.reason === "poll" && !input.live) return false;
+  return input.sinceLastMs >= input.minGapMs;
+}
+
 // ── Assets (/admin/assets) ──────────────────────────────────────────────────
 
 /** Why `activate_asset` would fail for a row (AR/instructions/activate_asset.rs). */

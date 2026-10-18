@@ -150,8 +150,9 @@ export const CONVERSION_DEADLINE_SHORT_WARNING =
  * An advisory warning for a conversion deadline the program would accept, or
  * null: under MIN_CONVERSION_DEADLINE_DAYS, or past the holder's passport
  * expiry (the burn needs a current passport, so it is refused after that
- * date until the passport is renewed). Null while deliveryDeadlineError
- * reports the value (the error shows instead). Never blocks the open.
+ * date — or already, for a passport that has expired — until the passport
+ * is renewed). Null while deliveryDeadlineError reports the value (the error
+ * shows instead). Never blocks the open.
  */
 export function conversionDeadlineWarning(
   value: string,
@@ -163,8 +164,11 @@ export function conversionDeadlineWarning(
   if (t < nowMs + MIN_CONVERSION_DEADLINE_DAYS * DAY_MS) return CONVERSION_DEADLINE_SHORT_WARNING;
   const expiry = opts.passportExpirySec ?? null;
   if (expiry !== null && expiry > BigInt(0) && Number(expiry) * 1000 < t) {
-    const day = new Date(Number(expiry) * 1000).toISOString().slice(0, 10);
-    return `The holder's passport expires on ${day}, before this deadline: the burn is refused after that date until the passport is renewed.`;
+    const expiryMs = Number(expiry) * 1000;
+    const day = new Date(expiryMs).toISOString().slice(0, 10);
+    return expiryMs <= nowMs
+      ? `The holder's passport expired on ${day}: the burn is refused until the passport is renewed.`
+      : `The holder's passport expires on ${day}, before this deadline: the burn is refused after that date until the passport is renewed.`;
   }
   return null;
 }

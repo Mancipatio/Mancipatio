@@ -5,7 +5,7 @@
 // back, and the open detail is keyed by the vault, not by its position. The
 // custody-entry window (r2g3-14) is shown where the requests are.
 import { describe, expect, it } from "vitest";
-import { custodyPageSource, topLevelFunction } from "./admin-custody-source";
+import { custodyPageSource, topLevelFunction } from "./admin-custody-source.test.helpers";
 
 const page = custodyPageSource();
 const functionSource = (name: string) => topLevelFunction(page, name);
@@ -44,10 +44,16 @@ describe("the custody-entry window (r2g3-14)", () => {
     const queue = functionSource("ConversionRequestsSection");
     expect(queue).toContain("const pauseFlags = usePauseFlags();");
     expect(queue).toContain("isPaused(pauseFlags, PAUSE_CUSTODY_ENTRY)");
-    expect(queue.indexOf("<CustodyEntryWindow paused={entryPaused} />")).toBeLessThan(queue.indexOf("Conversion requests\n"));
+    expect(queue.indexOf("<CustodyEntryWindow\n")).toBeLessThan(queue.indexOf("Conversion requests\n"));
+    expect(queue).toContain("entryOn={conversionOn}");
+    expect(queue).toContain("waiting={entryWaiting}");
     const strip = functionSource("CustodyEntryWindow");
     expect(strip).toContain('href="/admin/platform"');
-    expect(strip).toContain("if (paused === null) return null;");
+    // Hidden while conversion is off; paused with nothing waiting is the idle
+    // state, neutral — never a nudge to resume platform-wide.
+    expect(strip).toContain("if (paused === null || !entryOn) return null;");
+    expect(strip).toContain("const idle = paused && !waiting;");
+    expect(strip).toContain('"border-slate-200 bg-slate-50 text-slate-600"');
     expect(strip).not.toMatch(/getSetPauseFlagsInstruction|tx\.send|recordAudit/);
     expect(page.match(/CUSTODY_ENTRY_PAUSED_HINT/g)).toHaveLength(2);
     // The delivery queue does not read it (no new identifier there).

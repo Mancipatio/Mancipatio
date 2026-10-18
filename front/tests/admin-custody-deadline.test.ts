@@ -49,6 +49,8 @@ describe("conversionDeadlineWarning", () => {
     const nowSec = BigInt(nowMs / 1000);
     expect(conversionDeadlineWarning(at(150), { nowMs, passportExpirySec: nowSec + BigInt(100 * DAY) })).toMatch(/passport expires on 2027-01-06/);
     expect(conversionDeadlineWarning(at(150), { nowMs, passportExpirySec: nowSec + BigInt(200 * DAY) })).toBeNull();
+    // A passport that has already expired is named as such, not as "expires on".
+    expect(conversionDeadlineWarning(at(150), { nowMs, passportExpirySec: nowSec - BigInt(10 * DAY) })).toMatch(/passport expired on 2026-09-18: the burn is refused until the passport is renewed/);
     // No entry (0) or no passport read (null): nothing to warn about.
     expect(conversionDeadlineWarning(at(150), { nowMs, passportExpirySec: BigInt(0) })).toBeNull();
     expect(conversionDeadlineWarning(at(150), { nowMs, passportExpirySec: null })).toBeNull();
