@@ -32,13 +32,13 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
-| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | pilot: leave unset (off); see "Pilot scope" | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with KYC-only mode off (left before, or in that same build with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`; runbook §20 step 1) and pause bit 0x04 cleared last (runbook §20). It stays unset in a redeploy that leaves KYC-only mode unless that build also carries those Terms ("Leaving KYC-only mode later" step 1). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms, with KYC-only mode off (left before, or in that same build with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`; runbook §21, §20 step 1). It stays unset in a redeploy that leaves KYC-only mode unless that build also carries those Terms ("Leaving KYC-only mode later" step 1). Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | leave unset (off): physical delivery is not offered. Never `true` to let a conversion through (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
 | `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry, alarm, sanctions and fx (automatic EUR rate, 0080) workers refuse every call | `lib/server/retry-worker.ts` |
@@ -106,6 +106,32 @@ switch (`lib/features.ts` `pilotModules`, same spellings and build guard as
 the flags above). **On mainnet a module is off unless its variable reads as
 on; on devnet, testnet and localnet it is on unless it reads as off**
 (`=false` rehearses the pilot scope on devnet).
+
+A module flag ships `true` only together with Terms that offer the module:
+the flag goes into the **same production build** as those Terms, and the
+program's pause bit is cleared only after that build is verified (runbook
+§20 for trading through Manci, §21 for conversion, where 0x08 is cleared
+only for a short window per conversion). Both need KYC-only mode off; a
+module switch goes into Vercel Production before a redeploy only when that
+build carries Terms that offer the module (step 1 of "Leaving KYC-only
+mode later" below). So a module flag stays unset in the redeploy that
+leaves KYC-only mode unless that build also carries those Terms. Either
+leave the mode first, with `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` unset, and set the flag only in
+runbook §20 step 1 for the release that carries the Terms; or leave the
+mode in that same release, with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` set
+together with the flag in §20 step 1. State on 2026-10-18: Vercel Production
+has no module switch set (`NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` were deleted that day), and
+`NEXT_PUBLIC_FEATURE_KYC_ONLY` and `NEXT_PUBLIC_ASSET_CLASSES` are unset:
+the lockdown, equity only, with the chain at 0x7F.
+
+Switching a module off (rollback, incident) never waits for a Terms
+change: a module the Terms offer may have its flag off. To switch trading
+through Manci off: set pause bit 0x04 first (any Admin, `/admin/platform`;
+the program then refuses direct calls too), then set the flag to `false`
+and redeploy. Conversion needs no pause step: 0x08 stays set outside its
+windows.
 
 | Module | Variable | Entry routes that answer 403 when off | On-chain entries refused before the wallet (`MODULE_FLOWS`) | Pages |
 |---|---|---|---|---|
@@ -260,7 +286,8 @@ On-chain, the program's pause flags remain the authority, and this switch
 does not change them. **The lockdown needs 0x7F on-chain** (every pause
 bit; any Admin sets bits on Admin → Platform, before or with the release;
 runbook §8, "Pause mask by mode"). The chain held the pilot's 0x7E on
-2026-10-10, and 0x7F is the target: at 0x7E, 0x01 (onboarding) is clear, and
+2026-10-10, and 0x7F is the target, read back on 2026-10-18 (runbook §20
+shows the read): at 0x7E, 0x01 (onboarding) is clear, and
 `register_issuer` (permissionless while 0x01 is clear) and a KYB-verified
 issuer's `create_asset`, `add_share_class` and
 `initialize_share_class_mint` are stopped only by this UI and client gate,

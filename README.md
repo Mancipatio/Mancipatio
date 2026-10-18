@@ -23,14 +23,17 @@ day the site (<https://www.manci.io>) went public.
 | `transfer_hook` | `GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy` | `724cb70bd672698e39c28005e5dc99084cb50ec13e5363b2ffe26b33e294fbf6` |
 
 - **Verified builds**: both programs are verified against that release
-  (OtterSec's remote verification; status at
-  `https://verify.osec.io/status/<program address>`). The `.so` files come
-  from the reproducible build in `.github/workflows/verifiable-build.yml`
-  and can be checked with `solana-verify verify-from-repo` against this
+  with `solana-verify` (OtterSec's remote verification; status at
+  `https://verify.osec.io/status/<program address>`). The hashes in the
+  table are the release's `hashes.txt`. The `.so` files come from the
+  reproducible build in `.github/workflows/verifiable-build.yml` and can
+  be checked with `solana-verify verify-from-repo` against this
   repository (`--mount-path program`).
 - **Upgrade authority**: a Squads vault
-  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`); upgrades follow the
-  runbook (§9).
+  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`), currently a 1-of-1
+  multisig with no time lock, so a single key can upgrade the programs
+  (both programs' authority read back as that vault on 2026-10-18);
+  upgrades follow the runbook (§9).
 - **Devnet** runs the same program addresses with identical bytecode.
 - **Not audited**: the programs have had internal security reviews and
   automated testing only; no independent external audit has been
