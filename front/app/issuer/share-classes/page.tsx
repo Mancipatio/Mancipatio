@@ -47,7 +47,7 @@ import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { SkeletonTable } from "@/components/skeleton";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
-import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { CONVERSION_TARGET_LABEL, UNLINKED_TARGET_LABEL, classKey, hasMarkerShape, unlinkedMarkerKeys } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 const TOKEN_2022_ADDRESS =
@@ -103,6 +103,10 @@ export default function MyShareClassesPage() {
   const [assetPdaMap, setAssetPdaMap] = useState<Map<string, Asset>>(new Map());
   // The conversion marker (C2): labelled, never offered a mint.
   const conversionTargets = useConversionTargets(data?.shareClasses);
+  // The markers nothing converts into yet (a key without the Conversion
+  // permission left them behind): synchronous, so the first render never
+  // shows them as "Pending mint" (lib/conversion-target).
+  const unlinked = useMemo(() => unlinkedMarkerKeys(data?.shareClasses ?? []), [data]);
   const [showAdd, setShowAdd] = useState(false);
   const [selectedSc, setSelectedSc] = useState<{
     sc: ShareClass;
@@ -225,7 +229,7 @@ export default function MyShareClassesPage() {
       ) : rows.length === 0 ? (
         <Empty />
       ) : (
-        <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="mt-8 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -242,7 +246,9 @@ export default function MyShareClassesPage() {
             <tbody className="divide-y divide-slate-100">
               {rows.map((sc, i) => {
                 const asset = assetPdaMap.get(sc.asset.toString());
-                const status = conversionTargets.has(classKey(sc))
+                const status = unlinked.has(classKey(sc))
+                  ? UNLINKED_TARGET_LABEL
+                  : conversionTargets.has(classKey(sc))
                   ? CONVERSION_TARGET_LABEL
                   : sc.supplyLocked
                     ? "Locked"
@@ -276,6 +282,7 @@ export default function MyShareClassesPage() {
           asset={selectedSc.asset}
           scPda={selectedSc.scPda as Address}
           conversionTarget={conversionTargets.has(classKey(selectedSc.sc))}
+          unlinked={unlinked.has(classKey(selectedSc.sc))}
           onRefresh={refresh}
           onClose={() => setSelectedSc(null)}
         />
@@ -360,6 +367,7 @@ function ShareClassActions({
   asset,
   scPda,
   conversionTarget,
+  unlinked,
   onRefresh,
   onClose,
 }: {
@@ -368,6 +376,8 @@ function ShareClassActions({
   scPda: Address;
   /** The conversion marker (C2): no mint is ever created for it. */
   conversionTarget: boolean;
+  /** The marker before class #0 points at it (unlinkedMarkerKeys). */
+  unlinked: boolean;
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -492,16 +502,17 @@ function ShareClassActions({
         {/*
           Mint initialization and treasury minting require a current issuer capability or global Admin proof; the issuer always signs.
         */}
-        {conversionTarget && !sc.mintInitialized && (
+        {(conversionTarget || unlinked) && !sc.mintInitialized && (
           <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-            <p className="font-medium text-slate-800">{CONVERSION_TARGET_LABEL}</p>
+            <p className="font-medium text-slate-800">{unlinked ? UNLINKED_TARGET_LABEL : CONVERSION_TARGET_LABEL}</p>
             <p className="mt-1 text-[13px]">
-              Capped at 0: holders of your token convert into this class (into the company share itself). It never holds
-              tokens, so it has no mint — creating one would break your token&apos;s setup.
+              {unlinked
+                ? "Capped at 0, so it never holds tokens and needs no mint. Holders can ask to convert once class #0 is linked to it: that needs the Conversion permission from the Super Admin, then Tokenize → Continue (1 wallet signature)."
+                : "Capped at 0: holders of your token convert into this class (into the company share itself). It never holds tokens, so it has no mint — creating one would break your token's setup."}
             </p>
           </div>
         )}
-        {!conversionTarget && !canMint && !sc.supplyLocked && (
+        {!conversionTarget && !hasMarkerShape(sc) && !canMint && !sc.supplyLocked && (
           <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
             {!sc.mintInitialized ? (
               <>
@@ -545,7 +556,7 @@ function ShareClassActions({
           </div>
         )}
 
-        {!conversionTarget && canMint && !sc.mintInitialized && (
+        {!conversionTarget && !hasMarkerShape(sc) && canMint && !sc.mintInitialized && (
           <button
             type="button"
             disabled={tx.isSending}

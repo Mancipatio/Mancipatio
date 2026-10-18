@@ -18,12 +18,22 @@ on:
       - "front/**"
       - "program/**"
       - ".github/workflows/front-ci.yml"
+      # tests/docs-ci-*.test.ts read these (README status, pause-mask docs, the release guard)
+      - "README.md"
+      - "ops/**"
+      - "scripts/**"
+      - ".github/workflows/release-guard.yml"
   pull_request:
     branches: [main]
     paths:
       - "front/**"
       - "program/**"
       - ".github/workflows/front-ci.yml"
+      # tests/docs-ci-*.test.ts read these (README status, pause-mask docs, the release guard)
+      - "README.md"
+      - "ops/**"
+      - "scripts/**"
+      - ".github/workflows/release-guard.yml"
   # Weekly, so a newly published advisory against an unchanged lockfile is
   # seen. Only the audit job runs on the schedule.
   schedule:

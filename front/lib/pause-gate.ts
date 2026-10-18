@@ -44,8 +44,10 @@
 // Enforcement stays on-chain (the pause) and on the server (the module
 // routes). This is a display gate: the pause read is cached for a few
 // seconds and fails OPEN (a failed read lets the transaction go on to the
-// program, which is the authority). Exits never read the flags, so only the
-// instructions below are ever held back.
+// program, which is the authority). The flags are read only for an
+// instruction with a pause flow (hasPauseFlow): exits and the custody
+// recordings never read them, so only the instructions below are ever held
+// back.
 //
 // Called for every wallet transaction from lib/verified-solana-client.ts
 // (prepare and prepareAndSend, before any wallet prompt); pages that want to
@@ -278,9 +280,19 @@ export function pausedInstruction(
 export const PAYOUT_MODULES_OFF_MESSAGE =
   "Startup raises, yield routing and Rights-Token issuances and milestones (the payout modules) are switched off on Manci. Nothing was sent to your wallet.";
 
-/** The user-facing refusal for a paused bit (the program's own wording, plus the area). */
+/**
+ * The refusal for the custody entry (0x08): on mainnet the bit is set
+ * between conversions and cleared only for a request's own window (the
+ * conversion runbook), so a deposit or a new escrow outside it meets a
+ * closed window, not an emergency.
+ */
+export const CUSTODY_ENTRY_CLOSED_MESSAGE =
+  "Custody entry is closed: deposits and new escrows open only while Manci opens the window for your request. Nothing was sent to your wallet. Ask Manci to open it, then try again.";
+
+/** The user-facing refusal for a paused bit (the program's own wording, plus the area; the payout modules and the custody window in their own words). */
 export function pausedFlowMessage(bit: number): string {
   if (bit === PAUSE_PAYOUT_MODULES) return PAYOUT_MODULES_OFF_MESSAGE;
+  if (bit === PAUSE_CUSTODY_ENTRY) return CUSTODY_ENTRY_CLOSED_MESSAGE;
   const flag = PAUSE_FLAGS.find((f) => f.bit === bit);
   const area = flag ? `${flag.label} is paused on Manci (emergency pause). ` : "Manci has temporarily paused this action (emergency pause). ";
   return `${area}Nothing was sent to your wallet. ${PAUSE_EXITS_OPEN}`;
@@ -501,17 +513,28 @@ export function clearPauseFlagsCache(): void {
 }
 
 /**
+ * Whether any instruction of `instructions` has a pause flow (pauseMaskFor
+ * is not 0): only then is there anything the flags could hold back, and
+ * only then does the gate read them. Instructions of other programs, and
+ * ones this program does not recognize, have none.
+ */
+export function hasPauseFlow(instructions: readonly InstructionLike[]): boolean {
+  return registryInstructions(instructions).some(({ instruction }) => pauseMaskFor(instruction) !== 0);
+}
+
+/**
  * Throws PausedFlowError when one of `instructions` is held back by the
  * current pause flags; resolves otherwise, including when the flags could
- * not be read (fail open: the program is the authority).
+ * not be read (fail open: the program is the authority). Reads nothing for
+ * a transaction without a pause flow (an exit, a custody recording, another
+ * program's instructions).
  */
 export async function assertInstructionsNotPaused(
   rpc: unknown,
   instructions: readonly InstructionLike[],
   opts: { read?: PlatformReader; now?: number } = {},
 ): Promise<void> {
-  const gated = instructions.some((ix) => ix.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS);
-  if (!gated) return;
+  if (!hasPauseFlow(instructions)) return;
   const flags = await readPauseFlags(rpc, opts);
   if (flags === null || flags === 0) return;
   const hit = pausedInstruction(flags, instructions);

@@ -98,10 +98,12 @@ explicitly on or off.
 
 ### Pilot scope (module switches)
 
-The mainnet pilot is closed and narrow: primary sales of one issuer's
-Mature class in USDC. Every other product module has a switch
-(`lib/features.ts` `pilotModules`, same spellings and build guard as the
-flags above). **On mainnet a module is off unless its variable reads as
+The Terms in force decide what is offered, and while KYC-only mode is on
+(the mainnet default; "KYC-only mode and offered asset classes" below) only
+sign-in and verification are open, whatever the switches below say. Outside
+the mode, primary sales are the core and every other product module has a
+switch (`lib/features.ts` `pilotModules`, same spellings and build guard as
+the flags above). **On mainnet a module is off unless its variable reads as
 on; on devnet, testnet and localnet it is on unless it reads as off**
 (`=false` rehearses the pilot scope on devnet).
 
@@ -127,11 +129,24 @@ called from `lib/verified-solana-client.ts`). A conversion and a delivery
 open the same DeliveryEscrow on-chain, so the conversion approval declares
 its purpose (`withGateFacts`) and is gated by the conversion switch alone:
 `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` is the only module switch
-conversions need (delivery stays off). It is not the only prerequisite:
-the Terms in force must offer conversion and the program's 0x08 pause
-(custody entry) must be cleared for the open (runbook §8, "Pilot pause
-mask"). The program itself still accepts an on-chain entry unless a pause
-bit is set, which is why the pilot also keeps 0x1c paused (runbook §8).
+conversions need (delivery stays off). It is not the only prerequisite. On
+mainnet KYC-only mode must be off as well (`NEXT_PUBLIC_FEATURE_KYC_ONLY=false`;
+both values are build-time, so set both before one Redeploy). While the
+mode is on it overrides every module switch: `/api/conversion/create`
+answers 403, the approval's `open_custody_vault` is refused as a module
+entry (`MODULE_FLOWS`; every module reads off) and the holder's
+`deposit_to_custody_vault` before the wallet (`KYC_ONLY_FLOWS`). Leaving
+the mode also reopens primary sales and issuance on the platform side, so
+it is the owner's decision ("Leaving KYC-only mode later" below); keep 0x01
+and 0x02 set on-chain if those stay closed. The Terms in force must offer
+conversion. And the program's 0x08 pause (custody entry) must be clear for
+**both** the vault open and the holder's deposit (`open_custody_vault` and
+`deposit_to_custody_vault` both check it): the conversion window is the
+mode's mask minus 0x08 (runbook §8, "Pause mask by mode"), and any Admin
+sets 0x08 again once the deposit has landed. "Confirm conversion" (trigger
+and realize, the burn) reads no pause bit and stays open in KYC-only mode.
+The program itself accepts an on-chain entry unless its pause bit is set,
+which is why every bit stays set between windows (0x7F, runbook §8).
 With delivery off, `/admin/custody` still lets the wallet that opened a
 delivery vault finish recording it ("Finish recording approval", no
 transaction). Exits of existing positions stay open everywhere
@@ -144,8 +159,9 @@ payout schedules (`/api/payout-schedules/*`: reminders, no money moves) and
 payout-vault snapshots (`/api/payout-snapshots/*`: the Startup payout
 vault's vote and yield snapshots, which exist only under `STARTUP_RAISES`,
 and a vault vote protects holders). The switches are the platform's scope;
-the program's pause bits are the on-chain one (runbook: which bits the
-pilot keeps set), and `lib/pause-gate.ts` reads those before a wallet signs.
+the program's pause bits are the on-chain one (runbook §8, "Pause mask by
+mode": which bits each mode keeps set), and `lib/pause-gate.ts` reads those
+before a wallet signs.
 
 ### Geoblocking
 
@@ -242,8 +258,9 @@ areas leave the menus (`KYC_ONLY_NAV_PREFIXES`).
 
 On-chain, the program's pause flags remain the authority, and this switch
 does not change them. **The lockdown needs 0x7F on-chain** (every pause
-bit, set on Admin → Platform by the Super Admin, before or with the
-release). With the pilot's 0x7E, 0x01 (onboarding) is clear, and
+bit; any Admin sets bits on Admin → Platform, before or with the release;
+runbook §8, "Pause mask by mode"). The chain held the pilot's 0x7E on
+2026-10-10, and 0x7F is the target: at 0x7E, 0x01 (onboarding) is clear, and
 `register_issuer` (permissionless while 0x01 is clear) and a KYB-verified
 issuer's `create_asset`, `add_share_class` and
 `initialize_share_class_mint` are stopped only by this UI and client gate,
@@ -254,26 +271,43 @@ the KYC registry instructions (approve, revoke, registry authority) never
 read the pause flags.
 
 After the release (post-deploy check): Admin → Platform shows 0x7F; the
-home page shows one Equity tile, the "More asset classes coming later"
-tile, and no Primary sales tab, stat or "Create a raise"; the sidebar has
-no Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
+home page (`components/market-overview.tsx`, equity only) has no "Explore
+by asset class" section and no class tiles (they render only with more
+than one offered class), no "More asset classes" / "Coming later" tile
+(the layout before 2026-10-16), no Primary sales tab, stat or "Create a
+raise", and no link to `/marketplace/launchpad` or `/apply`; its "Know
+what you own" card links "Read the equity guide"
+(`tests/asset-classes.test.ts`, "mainnet default"); the sidebar has no
+Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
 "Paused."; `/verify`, `/login`, `/account` and `/portfolio` work;
-`/admin/kyc`, `/admin/clients` and `/admin/platform` work; `/markets/types`
-shows Equity only. `/admin/custody` leaves the admin menu while nothing
-waits there (every module reads off in the mode); open it by URL to record
-an existing conversion.
+`/admin/kyc`, `/admin/clients` and `/admin/platform` work;
+`/markets/types` shows Equity only. `/admin/custody` leaves the admin menu
+while nothing waits there (every module reads off in the mode); open it by
+URL to record an existing conversion.
 
 Leaving KYC-only mode later:
 1. Confirm that the Terms in force offer what reopens.
-2. Clear the matching pause bits on Admin → Platform (Super Admin), e.g.
-   0x02 for primary sales and 0x01 for issuer onboarding.
-3. In Vercel Production set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and
-   Redeploy (the value is build-time).
-4. Module switches then apply as their own variables say (unset = off on
-   mainnet), so set `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` (and the
-   others) as decided before step 3.
-5. Verify: "Primary sales" is back in the sidebar and
-   `/marketplace/launchpad` shows no notice.
+2. In Vercel Production set the module switches as decided, before the
+   redeploy: once the mode is off they apply as their own variables say
+   (unset = off on mainnet), `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION`
+   included.
+3. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy (both
+   values are build-time).
+4. Verify: "Primary sales" is back in the sidebar and
+   `/marketplace/launchpad` shows no "Paused." notice. Its amber "Primary
+   sales are paused" banner (`components/runtime-pause-notice.tsx`) stays
+   while 0x02 is set: expected until a sale window clears 0x02 (step 5);
+   it is not a reason to redeploy, roll back or clear the bit early.
+5. Only then, as each window starts, clear the pause bits the new mode's
+   row allows (runbook §8, "Pause mask by mode"; the Super Admin clears):
+   0x01 for an issuer or asset set-up and 0x08 for a conversion's open and
+   deposit, each set again right after the step; 0x02 only for a sale
+   window or a direct mint, never as a steady state. A bit cleared before
+   the redeploy leaves its instructions permissionless on-chain while the
+   old build's gate is only a display gate (`register_issuer` with 0x01
+   clear), so no bit is cleared ahead of the build.
+6. Update the Status paragraph of `README.md` (the KYC-only line) in the
+   same change.
 
 To return to the lockdown, delete the variable (or set `true`) and
 Redeploy. To rehearse on devnet, set `true` on the devnet or Preview

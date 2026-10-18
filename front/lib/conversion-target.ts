@@ -7,14 +7,23 @@
 // its mint (a mint would turn it into a "foreign" class 1 and break the
 // tokenize flow's resume).
 //
+// A marker made by a key WITHOUT the Conversion permission is "unlinked"
+// (lib/tokenize-shares conversionMarkerState): class 1 has the shape, but
+// class 0 points nowhere yet — the link comes from Tokenize → Continue once
+// the Super Admin grants Conversion. It is a target all the same: hidden from
+// the public lists and never offered a mint (unlinkedMarkerKeys, no PDA
+// needed), and the views say it is not linked yet (UNLINKED_TARGET_LABEL).
+//
 // Only marker-shaped classes are candidates, so the PDA derivations stay few.
 // Node-safe (no React, no browser API): tests/conversion-target.test.ts.
 import type { Address } from "@solana/kit";
 import type { ShareClass } from "@/lib/generated/asset_registry";
 import { findShareClassPda } from "@/lib/pdas";
-import { isMarkerClass } from "@/lib/tokenize-shares";
+import { CLASS_INDEX, MARKER_CLASS_INDEX, isMarkerClass } from "@/lib/tokenize-shares";
 
 export const CONVERSION_TARGET_LABEL = "Conversion target";
+/** The marker before class 0 is linked to it (set_convertible_to needs the Conversion permission). */
+export const UNLINKED_TARGET_LABEL = "Conversion target (not linked yet)";
 
 type ClassLike = Pick<
   ShareClass,
@@ -41,15 +50,35 @@ export function hasMarkerShape(sc: Omit<ClassLike, "asset" | "classIndex" | "con
 }
 
 /**
+ * The marker classes nothing converts into YET: class 1 with the marker's
+ * shape whose class 0, in the list, has no conversion target — what a key
+ * without the Conversion permission leaves behind (conversionMarkerState
+ * "unlinked"). A class 0 that points elsewhere, a marker at another index or
+ * a class 0 missing from the list do not count. Synchronous: no PDA.
+ */
+export function unlinkedMarkerKeys(classes: readonly ClassLike[]): Set<string> {
+  const out = new Set<string>();
+  const sc0ByAsset = new Map<string, ClassLike>();
+  for (const sc of classes) if (sc.classIndex === CLASS_INDEX) sc0ByAsset.set(sc.asset.toString(), sc);
+  for (const sc of classes) {
+    if (sc.classIndex !== MARKER_CLASS_INDEX || !hasMarkerShape(sc)) continue;
+    const sc0 = sc0ByAsset.get(sc.asset.toString());
+    if (sc0 && sc0.convertibleTo.__option === "None") out.add(classKey(sc));
+  }
+  return out;
+}
+
+/**
  * The classes (by classKey) that are conversion targets: marker-shaped AND
- * the `convertible_to` of another class of the same asset. `pdaOf` derives a
- * class's address (injected in tests).
+ * the `convertible_to` of another class of the same asset (linked), plus
+ * the unlinked markers of unlinkedMarkerKeys. `pdaOf` derives a class's
+ * address (injected in tests).
  */
 export async function conversionTargetKeys(
   classes: readonly ClassLike[],
   pdaOf: (asset: Address, classIndex: number) => Promise<Address> = findShareClassPda,
 ): Promise<Set<string>> {
-  const out = new Set<string>();
+  const out = unlinkedMarkerKeys(classes);
   const candidates = classes.filter(hasMarkerShape);
   if (candidates.length === 0) return out;
   const targets = new Set<string>();

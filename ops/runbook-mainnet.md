@@ -375,7 +375,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
+| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The launch mode's mask (§8, "Pause mask by mode") is set on `/admin/platform` and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: first, Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -748,7 +748,7 @@ order:
   in the company example: Onboarding, Primary issuance, Issuer proceeds),
   one area at a time in the PauseFlagsPanel. Not "Resume everything": it
   clears all six emergency areas (and bit 7), which would open the areas
-  the pilot keeps closed (then set 0x1c again, §8). No tool or button ever
+  the pilot keeps closed (then restore the mode's mask, §8). No tool or button ever
   clears the payout modules (0x40) with anything else: the program refuses
   a clear mask that mixes 0x40 with other bits (6154), and 0x40 stays set
   on mainnet (D2). `chain:bootstrap` checks `pauseFlags & unpauseMask = 0`
@@ -931,29 +931,54 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   its ProgramData and System, so an extra account cannot turn into a transfer
   destination. The preconditions list each program, its PDA and each
   transfer: check them before approving. Import, approve, execute.
-- **Pilot pause mask (8.5).** On mainnet (Terms clause 2), *Trading through
-  Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10) stay
-  paused, flags **0x1c**, for as long as their module switches are off
-  (`ops/env-vars.md`, "Pilot scope"), and the payout modules (0x40) stay
-  off for good on mainnet (D2). With `unpauseMask: 35` (0x23) S6 already
-  left them set: the Platform reads **0x5c**. Otherwise set them on
-  **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area (any Admin
-  may SET bits; only the Super Admin clears them). The program refuses those
-  flows, and the front says so before any wallet opens
+- **Pause mask by mode (8.5).** `Platform.pause_flags`
+  (`front/lib/pause-flags.ts`): 0x01 Onboarding (`register_issuer`,
+  `create_asset`, `add_share_class`, `initialize_share_class_mint`), 0x02
+  Primary issuance (`open_sale`, `buy`, `mint_to_treasury`), 0x04 Trading
+  through Manci (OTC offers and deals), 0x08 Custody entry
+  (`open_custody_vault` and `deposit_to_custody_vault`), 0x10 Distributions,
+  0x20 Issuer proceeds (`close_sale`, payout tranches, founder yield), 0x40
+  Payout modules (off for good on mainnet, D2). Any Admin SETS bits on
+  **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area; only the
+  Super Admin CLEARS them, and 0x40 only in a call of its own (6154). The
+  mask follows the mode in force, and every window returns to the steady
+  state:
+
+  | Mode | Mask | Who clears what, and what sets it again |
+  |---|---|---|
+  | **KYC-only lockdown** (the mainnet default: `ops/env-vars.md` "KYC-only mode", `lib/features.ts` `kycOnly`), and the steady state between windows | **0x7F** | every bit set; any Admin sets 0x01 to reach it. The chain held the pilot's 0x7E on 2026-10-10 (0x01 clear: `register_issuer` permissionless); 0x7F is the target |
+  | Issuer or asset set-up (KYC-only off) | 0x7E | the Super Admin clears 0x01 for the set-up; any Admin sets it again right after |
+  | Direct mint (`mint_to_treasury`; KYC-only off) | 0x7D | the Super Admin clears 0x02; the mint transaction sets 0x02 again itself (`lib/treasury-mint.ts` `repause`) |
+  | Public sale window (KYC-only off) | 0x7D | the Super Admin clears 0x02 with "Reopen primary issuance" after the pre-clear check (`/admin/launchpad`); any Admin sets 0x02 again when the window ends (`onchain:primary-open-idle`, §15, fires after an hour with no sale taking buys) |
+  | Collecting proceeds (`close_sale`) | 0x5F | the Super Admin clears 0x20 only for the close; "End and collect" sets 0x20 (and 0x02) again with its `repause` mask |
+  | Conversion window | the mode's mask minus 0x08 | only for the vault open and the holder's deposit; any Admin sets 0x08 again right after the deposit. Trigger, realize and return read no pause bit. Needs KYC-only off, `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and Terms that offer conversion (`ops/env-vars.md`, "Pilot scope") |
+  | Trading through Manci (KYC-only off) | the mode's mask minus 0x04 | cleared last, once the Terms offer it and `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true`, which the mode overrides while it is on (`moduleEnabled`); 0x04 cleared earlier would leave the OTC entries permissionless on-chain behind a display gate |
+
+  The mainnet role map has `unpauseMask` 1, so S6 left 0x7E; the 0x23
+  arithmetic of §5 (S6) is the company example. On mainnet never use
+  "Resume everything" or `chain:emergency unpause all` (both clear 0xBF:
+  the six emergency areas and bit 7); resume per area, only the bits the
+  current row keeps clear. If it was pressed anyway (the Platform reads
+  0x40): "Pause everything" at once, then the Super Admin clears only the
+  row's bits. Check: `/admin/platform` shows the row's mask. The program
+  refuses the paused flows, and the front says so before any wallet opens
   (`front/lib/pause-gate.ts`). Governance, vesting-series creation and
   custody-vault types read no pause bit of their own; the module switches
   hide them and the wallet path refuses them before the wallet opens
-  (`MODULE_FLOWS` in the same file). After an incident's "Resume
-  everything" (which never clears 0x40), set 0x1c again. Check:
-  `/admin/platform` shows exactly those three areas and the payout modules
-  paused (`0x5c`) **before the first sale opens** (D10). The Terms of
+  (`MODULE_FLOWS` in the same file). Inventory: at 0x7F with `unpauseMask`
+  1, a `pre-handover` or `handed-over` inventory reports `paused` as a
+  blocker (`scripts/chain/lib/inventory.ts`; `unpauseMask` cannot be 0,
+  `role-map.ts`). In KYC-only mode that blocker is expected: run it with
+  `CHAIN_HANDOVER_WHILE_PAUSED=1`, which reports it as info; the "0
+  blockers" of §6 and §7 refer to handover day only. The Terms of
   2026-10-03 say conversion into company shares is not available yet and,
   once the Operator switches it on, is available where the issuer offers it
-  (with KYC; clauses 2 and 12). Switching it on needs
-  `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and clearing 0x08, and
-  on-chain 0x08 also opens delivery entry, which the Terms keep switched off
-  (its module switch stays off): put the wording of that to counsel, and
-  publish Terms that no longer say "not available yet", before either step.
+  (with KYC; clauses 2 and 12). Switching it on needs KYC-only mode off,
+  `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and the 0x08 window above
+  (the open and the deposit), and on-chain 0x08 also opens delivery entry,
+  which the Terms keep switched off (its module switch stays off): put the
+  wording of that to counsel, and publish Terms that no longer say "not
+  available yet", before either step.
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage (the destination from
   the role map or its device, never from a transaction history: §1,
@@ -1231,7 +1256,7 @@ CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=
 | `CHAIN_EMERGENCY_OP` | Inputs | Signer (checked on-chain) | Notes |
 |---|---|---|---|
 | `pause` | `CHAIN_PAUSE_BITS`: `all` (0x7f), or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, `payout-modules`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
-| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, and on mainnet only with `CHAIN_ENABLE_PAYOUT_MODULES=<the signing SA>`, the recorded D2 owner decision after a vote of at least 7 days, never an incident step) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154); the tool refuses a mainnet clear of 0x40 without the override, and `chain:squads-export` `registry-ix set_pause_flags` without `"confirmPayoutModules": "<multisig>"`. While the bootstrap window is open (bit 7, before S5c) any clear closes it for good and puts every later A3 and X1 behind 48 hours: the tool refuses it without `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1` (recorded as `closeBootstrapOverride`); the bootstrap closes the window with `chain:accept` (S5c, §5) |
+| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, and on mainnet only with `CHAIN_ENABLE_PAYOUT_MODULES=<the signing SA>`, the recorded D2 owner decision after a vote of at least 7 days, never an incident step) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154); the tool refuses a mainnet clear of 0x40 without the override, and `chain:squads-export` `registry-ix set_pause_flags` without `"confirmPayoutModules": "<multisig>"`. While the bootstrap window is open (bit 7, before S5c) any clear closes it for good and puts every later A3 and X1 behind 48 hours: the tool refuses it without `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1` (recorded as `closeBootstrapOverride`); the bootstrap closes the window with `chain:accept` (S5c, §5). On mainnet name the areas of the §8 row, never `all` (it clears the six areas and bit 7) |
 | `block`, `unblock` | `CHAIN_WALLET` | the BA | an off-curve wallet (an escrow PDA) needs `CHAIN_CONFIRM_WALLET=<same>`: blocking it stops exits from it |
 | `hook-mode` | `CHAIN_MINT`, `CHAIN_HOOK_MODE=open` or `kyc-gated`, `CHAIN_KYC_REGISTRY` (kyc-gated only, a live registry) | the BA | Open lets any wallet receive the class; KycGated only live passports of that registry |
 | `freeze-issuer` | `CHAIN_ISSUER` (the Issuer PDA), `CHAIN_FREEZE_REASON_SHA256` (sha256 of the trimmed case-file reason, as `/admin/issuers` hashes it: `printf %s "<reason>" \| shasum -a 256`) | any Admin or the SA | D1: stops that issuer's sales and proceeds exits (6143); a second freeze is a no-op; only the SA lifts it, never this tool (§11 "Issuer proceeds freeze") |
@@ -1341,8 +1366,8 @@ itself (48 hours, cancellable by the upgrade authority).
      live.
   6. The new super admin reviews every change made during the compromise:
      Admin records (remove the attacker's), the treasury, sale approvals,
-     KYB decisions, issuer freezes, pause bits (set 0x40 and the pilot mask
-     again); revoke passports issued since the compromise; unblock wallets
+     KYB decisions, issuer freezes, pause bits (set 0x40 and the mode's
+     mask, §8, again); revoke passports issued since the compromise; unblock wallets
      the attacker blocked and restore clawed-back units through the issuer;
      cancel leftover proposals; rotate the KYC registry (or replace it,
      below).
@@ -2605,6 +2630,35 @@ else the most recently observed one, which reservations refuse as
 the rate it was made at with its source (`auto: median of … (ECB <date>: …)`
 or the manual source), and booking never uses a newer one.
 
+#### Releasing the front to mainnet
+
+The mainnet Vercel project (`manci-mainnet`) builds only its production
+branch `release/mainnet` (Ignored Build Step: only production), so a merge
+to `main` deploys devnet and never touches mainnet. Every front release is a
+fast-forward of that branch: `release/mainnet` is pushed from the tip of
+`main` (`ops/release-checklist.md`), never cherry-picked and never from a
+feature branch. Before the push, from the repository root,
+`RELEASE_GUARD_STRICT=1 bash scripts/check-release-ancestry.sh <sha>`
+checks the candidate: it must contain `origin/main` and carry nothing that
+is not on `main`. A push refused as non-fast-forward means that
+`release/mainnet` carries commits `main` lacks (the script run without an
+argument lists them as `::warning::`): merge `origin/release/mainnet` into
+`main` through a PR and start again at the check; never `--force`. After
+the push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
+runs the same script against the pushed commit: red means the live site is
+missing commits of `main`, as on 2026-10-15, when a push from a branch that
+had diverged before #78 left the KYC-only lockdown out of the release
+branch. GitHub reads a push workflow from the pushed commit, so a commit
+from a branch created before the workflow was merged runs no guard at all
+(exactly that shape): a missing run is a fault, and the pre-push check is
+the defence. A manual run (workflow_dispatch) checks the branch tip, and a
+re-run the commit pushed then, against the current `origin/main`, so it is
+red whenever `main` has unreleased commits: the next release's work, not a
+fault of the live one. A migration the new front needs is applied to the
+mainnet project before the push ("Apply migration 0080" below shows the
+order); a migration that needs the new front FIRST goes the other way round
+("Apply migration 0082" below).
+
 #### Apply migration 0080
 
 Apply 0080 to each network's database BEFORE a front that carries the
@@ -2615,11 +2669,9 @@ the order:
 
 1. **devnet 0080, then merge #53.** `main` deploys the devnet project, so
    the merge itself is the devnet front deploy;
-2. **mainnet 0080, then fast-forward `release/mainnet`** to that `main`.
-   The mainnet Vercel project (`manci-mainnet`) builds only its production
-   branch `release/mainnet` (Ignored Build Step: only production), so the
-   merge to `main` does not touch mainnet, and the fast-forward is the
-   mainnet front deploy;
+2. **mainnet 0080, then fast-forward `release/mainnet`** to that `main`
+   ("Releasing the front to mainnet" above): the merge to `main` does not
+   touch mainnet, and the fast-forward is the mainnet front deploy;
 3. then, at §0A D10, the super admin's fresh manual USDC fallback, and only
    after it the fx scheduler ("Install, prove, enable" below).
 
@@ -2764,6 +2816,79 @@ from about 5 minutes after the off switch):
 rate is fresh a stale manual row raises neither (`fx-fallback` reports it
 instead), and `fx-expiring` is about a manual rate only.
 
+#### Apply migration 0082
+
+The other order. 0082 (`resell_listings`: the browser roles read ACTIVE
+listings only, so a matched, withdrawn or removed post and its seller
+contact are private) goes to each network's database only AFTER the front
+that reads the seller's own history (`/portfolio/listings`) and the admin
+board (`/admin/resell`) through the signed `/api/resell/list` (service
+role, which RLS does not touch) is live on that network. Applied before
+it, the seller loses their matched, withdrawn and removed rows and
+`/admin/resell` loses every non-active row and with it the Restore button;
+applied after, nothing is lost at any moment. The public board and every
+write are the same before and after. Which push builds which front decides
+the order:
+
+1. **merge the front to `main`, then devnet 0082.** `main` deploys the
+   devnet project, so the merge is the devnet front deploy: apply once the
+   devnet deployment is READY on a commit that carries
+   `front/app/api/resell/list/route.ts`;
+2. **fast-forward `release/mainnet` to that `main`, then mainnet 0082**
+   ("Releasing the front to mainnet" above): apply once the production
+   deployment is READY on the release commit.
+
+Idempotent and no data change: every policy on the table is dropped, the
+one read policy recreated and the grants restated (contacts and notes stay
+for Restore and as evidence). The file is frozen at sha256
+`f5045cb8a1d85e1cb52946ee5ca0a63ae5b30bb19a2fff496494178558e837a2`
+(`shasum -a 256 supabase/migrations/0082_resell_listings_public_scope.sql`
+first). Devnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0082
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0082_resell_listings_public_scope.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0082','resell_listings_public_scope') on conflict (version) do nothing"
+MANCI_TARGET=devnet bash scripts/db.sh -c "select (select string_agg(policyname||'|'||cmd||'|'||roles::text||'|'||qual, ' ; ' order by policyname) from pg_policies where schemaname='public' and tablename='resell_listings') as policies, (select relrowsecurity from pg_class where oid='public.resell_listings'::regclass) as rls, has_table_privilege('anon','public.resell_listings','SELECT') as anon_reads, has_table_privilege('service_role','public.resell_listings','UPDATE') as service_writes, (select version from supabase_migrations.schema_migrations where version='0082') as recorded"
+MANCI_TARGET=devnet bash scripts/db.sh -c "set role anon; select count(*) filter (where status <> 'active') as hidden_rows_visible, count(*) as board_rows from public.resell_listings"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Mainnet: the same with `MANCI_ALLOW_MAINNET=1` (`backup.sh` needs it too;
+its mainnet dump is schema-only, PITR is the restore point):
+
+```
+export MANCI_ALLOW_MAINNET=1
+bash scripts/ops/backup.sh mainnet pre-0082
+MANCI_TARGET=mainnet bash scripts/db.sh -f supabase/migrations/0082_resell_listings_public_scope.sql
+MANCI_TARGET=mainnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0082','resell_listings_public_scope') on conflict (version) do nothing"
+MANCI_TARGET=mainnet bash scripts/db.sh -c "select (select string_agg(policyname||'|'||cmd||'|'||roles::text||'|'||qual, ' ; ' order by policyname) from pg_policies where schemaname='public' and tablename='resell_listings') as policies, (select relrowsecurity from pg_class where oid='public.resell_listings'::regclass) as rls, has_table_privilege('anon','public.resell_listings','SELECT') as anon_reads, has_table_privilege('service_role','public.resell_listings','UPDATE') as service_writes, (select version from supabase_migrations.schema_migrations where version='0082') as recorded"
+MANCI_TARGET=mainnet bash scripts/db.sh -c "set role anon; select count(*) filter (where status <> 'active') as hidden_rows_visible, count(*) as board_rows from public.resell_listings"
+MANCI_TARGET=mainnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+unset MANCI_ALLOW_MAINNET
+```
+
+Pass: `resell_listings_active_read|SELECT|{anon,authenticated}|(status = 'active'::text) | t | t | t | 0082`,
+then `0 | <the public board's size>` (the anon role sees no non-active
+row), and the identity preflight still shows `tables_without_guard` `[]`
+and `defaults_not_dynamic` `{}`. Then, signed in as a seller with a
+withdrawn post, `/portfolio/listings` still lists it; on `/admin/resell`
+the removed rows and their Restore button are still there; the public board
+`/markets/resell` is unchanged. The insert is `on conflict (version) do
+nothing` and 0082 itself is re-runnable, so re-running the block is
+harmless.
+
+Rollback: an Instant Rollback of the front to a deployment before
+`/api/resell/list` while 0082 is applied brings the loss above back (the
+old pages read through the anon client). Reopen the read FIRST, then roll
+back, and re-apply 0082 once the new front is back:
+
+```
+MANCI_TARGET=<t> bash scripts/db.sh -c "drop policy if exists resell_listings_active_read on public.resell_listings; create policy \"resell_listings anon read\" on public.resell_listings for select using (true)"
+```
+
+(0025's policy; mainnet with `MANCI_ALLOW_MAINNET=1`.)
+
 
 ### Responses
 
@@ -2772,6 +2897,7 @@ instead), and `fx-expiring` is about a manual rate only.
 | `onchain:program-upgrade` critical | Confirm a Squads proposal you expected (§9). Unexpected: incident (§11), pause (§11), rotate keys. |
 | `onchain:treasury`, `onchain:platform-admin` accept, `onchain:blocklist-authority` accept | Compare with the signer matrix; unexpected = compromised key, §11. |
 | `onchain:pause` critical (unpause) | Only the super admin clears; confirm who and why. |
+| `onchain:primary-open-idle` (`primary-open-idle`, high on mainnet, low elsewhere) | Primary issuance (0x02) has been clear for over an hour with no sale able to take a buy: the window ended, the sale sold out or closed, its issuer is frozen, or 0x02 was cleared and never used. Any Admin sets 0x02 again ("End and collect" on `/admin/launchpad` while closing the sale, else the PauseFlagsPanel on `/admin/platform`), back to the §8 row's mask; it clears once 0x02 is set or a sale takes buys again. |
 | `onchain:issuer-permissions` critical (mint bit) | Check the issuer's KYB and the approval record. |
 | `ledger:over-cap` critical | The chain acted past the limit; legal review, and stop new approvals for the subject. |
 | `ledger:unreserved-mint` | Re-value the mint on the Raise limits page if its value is above the floor. |

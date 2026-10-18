@@ -214,7 +214,14 @@ async function startSession(session: WalletSession): Promise<boolean> {
   return promise;
 }
 
-async function postEnvelope<T>(path: string, body: unknown): Promise<{ status: number; ok: boolean; data?: T; error?: string }> {
+type EnvelopeFailure = { status: number; ok: false; error: string; code?: string };
+
+/** The server's error with its machine-readable code (when it sent one) kept on the Error. */
+function envelopeError(result: { error?: string; code?: string }): Error {
+  return Object.assign(new Error(result.error), result.code ? { code: result.code } : {});
+}
+
+async function postEnvelope<T>(path: string, body: unknown): Promise<{ status: number; ok: true; data: T } | EnvelopeFailure> {
   const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -231,7 +238,7 @@ async function postEnvelope<T>(path: string, body: unknown): Promise<{ status: n
   // A maintenance refusal is typed (callers keep its wording) and shows the banner.
   if (json?.code === MAINTENANCE_CODE) throw maintenanceRefusal(json.message, detectNetwork());
   if (!res.ok || !json || json.ok !== true) {
-    return { status: res.status, ok: false, error: json?.error ?? `Request failed (${res.status} ${res.statusText})` };
+    return { status: res.status, ok: false, error: json?.error ?? `Request failed (${res.status} ${res.statusText})`, code: json?.code };
   }
   return { status: res.status, ok: true, data: json.data as T };
 }
@@ -251,7 +258,7 @@ export async function postSignedRequest<T = unknown>(path: string, body: SiwsReq
     throw new Error("Signed requests must stay on the app origin");
   }
   const result = await postEnvelope<T>(path, body);
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) throw envelopeError(result);
   return result.data as T;
 }
 
@@ -312,7 +319,7 @@ async function sessionOnlyRead<T>(
     saveHint(null);
     throw new WalletSessionRequiredError("The wallet session expired");
   }
-  throw new Error(result.error);
+  throw envelopeError(result);
 }
 
 /** Sign and POST to a same-origin API; mutations still need semantic idempotency.
@@ -346,13 +353,13 @@ export async function signedFetch<T = unknown>(
     if (ready) {
       const result = await postEnvelope<T>(path, { payload: unsignedPayload(session, action, params), session: true });
       if (result.ok) return result.data as T;
-      if (result.status !== 401) throw new Error(result.error);
+      if (result.status !== 401) throw envelopeError(result);
       // Session expired or rejected server-side: forget it and sign this one.
       saveHint(null);
     }
   }
   const body = await createSignedRequest(session, action, params);
   const result = await postEnvelope<T>(path, body);
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) throw envelopeError(result);
   return result.data as T;
 }

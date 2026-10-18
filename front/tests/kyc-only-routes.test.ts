@@ -405,8 +405,8 @@ describe("every API route is classified", () => {
     "vesting/beneficiaries": "read",
   };
   const MIXED: Record<string, "gated" | "admin" | OpenReason> = {
-    // Read: the issuer's own rows (an admin reads all).
-    "issuer-profiles/read": "read", "profiles/read": "read", "otc/list": "read", "sale-requests/list": "read", "spvs/capacity": "read",
+    // Read: the caller's own rows — an issuer's profiles, a party's OTC requests, a seller's listings (an admin reads all).
+    "issuer-profiles/read": "read", "profiles/read": "read", "otc/list": "read", "resell/list": "read", "sale-requests/list": "read", "spvs/capacity": "read",
     // Purchase recovery: the sale's issuer records a buy that already landed.
     "launchpad/commitment-status": "recording",
     // The issuer withdraws its request, or records a sale its key opened (open_sale is refused before the wallet).

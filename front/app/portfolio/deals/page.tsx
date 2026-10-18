@@ -65,6 +65,32 @@ function fmtCountdown(expiresAt: bigint, nowMs: number): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+/** How long a declined request stays in the party view. */
+const DECLINED_REQUEST_DAYS = 30;
+
+/**
+ * The requests the platform declined without opening an escrow: status
+ * `cancelled` with no deal recorded (a cancelled deal keeps its deal_pda and
+ * already shows as Cancelled in the table). `updated_at` is stamped at the
+ * decline by the otc_requests_touch trigger (0024); rows older than `days`
+ * are left out. Newest first. Pure and module-private (a page module exports
+ * only its page); exercised as source in
+ * tests/otc-mobile-state-page-helpers.test.ts.
+ */
+function recentlyDeclinedRequests<
+  T extends Pick<OtcRequest, "status" | "deal_pda" | "updated_at">,
+>(requests: readonly T[], nowMs: number, days = DECLINED_REQUEST_DAYS): T[] {
+  const cutoff = nowMs - days * 86_400_000;
+  return requests
+    .filter(
+      (r) =>
+        r.status === "cancelled" &&
+        r.deal_pda === null &&
+        Date.parse(r.updated_at) >= cutoff,
+    )
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+}
+
 export default function MyDealsPage() {
   const conn = useWalletConnection();
   const client = useSolanaClient();
@@ -187,6 +213,14 @@ export default function MyDealsPage() {
   const pendingRequests = useMemo(
     () => (requests ?? []).filter((r) => r.status === "requested"),
     [requests],
+  );
+
+  // Declined by the platform: the card would otherwise just vanish from
+  // "Waiting for the platform" (the decline notice is generic; the admin's
+  // reason is not sent and is not returned to the parties).
+  const declinedRequests = useMemo(
+    () => recentlyDeclinedRequests(requests ?? [], nowMs),
+    [requests, nowMs],
   );
 
   /** The permissive owner check (exits and the seller's leg); throws, never guesses. */
@@ -342,7 +376,7 @@ export default function MyDealsPage() {
         <p className="mt-8 text-sm text-red-600">Failed to load.</p>
       ) : deals === null || requests === null ? (
         <div className="mt-8">
-          <SkeletonTable rows={3} cols={6} />
+          <SkeletonTable rows={3} cols={5} />
         </div>
       ) : (
         <>
@@ -383,7 +417,47 @@ export default function MyDealsPage() {
             </section>
           )}
 
-          {sortedDeals.length === 0 && pendingRequests.length === 0 ? (
+          {declinedRequests.length > 0 && (
+            <section className="mt-8">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Declined by the platform
+              </h2>
+              <div className="mt-3 space-y-2">
+                {declinedRequests.map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-slate-300 bg-white px-4 py-3"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">
+                        {r.asset_label || shortAddr(r.mint)} ·{" "}
+                        {r.buyer_wallet === wallet.toString()
+                          ? "you are the buyer"
+                          : "you are the seller"}
+                      </p>
+                      <p className="mt-0.5 font-mono text-[11px] text-slate-500">
+                        {String(r.amount)} units for {formatPaymentForDisplay(BigInt(r.price), r.payment_mint, detectNetwork())} · with{" "}
+                        {shortAddr(
+                          r.buyer_wallet === wallet.toString()
+                            ? r.seller_wallet
+                            : r.buyer_wallet,
+                        )}{" "}
+                        · declined {new Date(r.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500">
+                      Declined by the platform — no escrow was opened, nothing
+                      was deposited
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {sortedDeals.length === 0 &&
+          pendingRequests.length === 0 &&
+          declinedRequests.length === 0 ? (
             <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
               <p className="text-sm text-slate-600">
                 No OTC escrow deals yet. Request one from a holder post on the{" "}
@@ -398,7 +472,7 @@ export default function MyDealsPage() {
               <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                 On-chain deals
               </h2>
-              <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+              <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
                 <table className="w-full text-sm">
                   <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                     <tr>
@@ -409,9 +483,6 @@ export default function MyDealsPage() {
                       <th className="px-4 py-3 font-medium">Deposits</th>
                       <th className="px-4 py-3 font-medium">Expires</th>
                       <th className="px-4 py-3 font-medium">Status</th>
-                      <th className="px-4 py-3 text-right font-medium">
-                        Actions
-                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -449,6 +520,53 @@ export default function MyDealsPage() {
                             <p className="mt-0.5 font-mono text-[11px] text-slate-400">
                               pay mint {shortAddr(deal.paymentMint.toString())}
                             </p>
+                            {/* Actions sit under the deal, not in a trailing column, so a
+                                party on a phone reaches them without horizontal scrolling. */}
+                            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
+                              {tradingOn && isOpen && !expired && !isBuyer && !deal.assetDeposited && (
+                                <button
+                                  type="button"
+                                  disabled={tx.isSending}
+                                  onClick={() =>
+                                    setConfirmAction({ kind: "asset", row })
+                                  }
+                                  className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                                >
+                                  Deposit asset
+                                </button>
+                              )}
+                              {tradingOn && isOpen && !expired && isBuyer && !deal.paymentDeposited && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={tx.isSending || !!paymentMissing}
+                                    onClick={() =>
+                                      setConfirmAction({ kind: "payment", row })
+                                    }
+                                    className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                                  >
+                                    Deposit payment
+                                  </button>
+                                  {paymentMissing && (
+                                    <p className="max-w-[260px] basis-full text-[11px] leading-snug text-amber-700">
+                                      {paymentMissing}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                              {expired && (
+                                <button
+                                  type="button"
+                                  disabled={tx.isSending}
+                                  onClick={() =>
+                                    setConfirmAction({ kind: "expire", row })
+                                  }
+                                  className="text-amber-700 underline-offset-2 hover:underline disabled:opacity-50"
+                                >
+                                  Refund expired deal
+                                </button>
+                              )}
+                            </div>
                           </td>
                           <td className="px-4 py-3 text-right font-mono text-xs">
                             <p>{String(deal.amount)} units</p>
@@ -504,54 +622,6 @@ export default function MyDealsPage() {
                               <span className="ml-2 text-[11px] text-slate-500">
                                 closed (rent reclaimed)
                               </span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-right text-xs">
-                            {tradingOn && isOpen && !expired && !isBuyer && !deal.assetDeposited && (
-                              <button
-                                type="button"
-                                disabled={tx.isSending}
-                                onClick={() =>
-                                  setConfirmAction({ kind: "asset", row })
-                                }
-                                className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                              >
-                                Deposit asset
-                              </button>
-                            )}
-                            {tradingOn && isOpen && !expired && isBuyer && !deal.paymentDeposited && (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={tx.isSending || !!paymentMissing}
-                                  onClick={() =>
-                                    setConfirmAction({ kind: "payment", row })
-                                  }
-                                  className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                                >
-                                  Deposit payment
-                                </button>
-                                {paymentMissing && (
-                                  <p className="mt-1 max-w-[220px] text-[11px] leading-snug text-amber-700">
-                                    {paymentMissing}
-                                  </p>
-                                )}
-                              </>
-                            )}
-                            {expired && (
-                              <button
-                                type="button"
-                                disabled={tx.isSending}
-                                onClick={() =>
-                                  setConfirmAction({ kind: "expire", row })
-                                }
-                                className="text-amber-700 underline-offset-2 hover:underline disabled:opacity-50"
-                              >
-                                Refund expired deal
-                              </button>
-                            )}
-                            {!isOpen && (
-                              <span className="text-slate-400">—</span>
                             )}
                           </td>
                         </tr>

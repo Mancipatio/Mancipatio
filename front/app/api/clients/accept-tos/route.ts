@@ -19,6 +19,7 @@ import {
   assertBase58Wallet,
   assertUuid,
   insertNote,
+  isAccountOwnedDossier,
   requireClientToken,
 } from "../_helpers";
 
@@ -51,7 +52,7 @@ export async function POST(request: Request) {
     const walletStr = client.wallet;
     // A dossier owned by a wallet-less (email/Google) account accepts through
     // its token alone; a wallet dossier still binds acceptance to that wallet.
-    const accountOwned = !walletStr && !!client.account_id;
+    const accountOwned = isAccountOwnedDossier(client);
     if (!accountOwned && (!walletStr || (requestedWallet !== null && requestedWallet !== walletStr))) {
       throw new SiwsError(401, "Link this invitation's wallet before accepting Terms");
     }

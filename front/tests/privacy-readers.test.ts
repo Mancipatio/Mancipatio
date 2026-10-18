@@ -26,9 +26,12 @@ import { POST as publicProfiles } from "@/app/api/profiles/public/route";
 import { POST as privateProfiles } from "@/app/api/profiles/read/route";
 import { POST as issuerProfiles } from "@/app/api/issuer-profiles/read/route";
 import { POST as otc } from "@/app/api/otc/list/route";
+import { POST as resell } from "@/app/api/resell/list/route";
+import { POST as moderate } from "@/app/api/resell/moderate/route";
 import { POST as audit } from "@/app/api/audit/list/route";
 import { POST as beneficiaries } from "@/app/api/vesting/beneficiaries/route";
 import { projectPublicAssetProfile, PUBLIC_ASSET_PROFILE_FIELDS, PUBLIC_TOKENIZE_SELECT } from "@/lib/profile-public";
+import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
 
 const WALLET = "11111111111111111111111111111111";
 const OTHER = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -38,8 +41,10 @@ function signed(params: Record<string, unknown>) { mocks.verify.mockResolvedValu
 
 beforeEach(() => {
   vi.clearAllMocks(); mocks.calls.length = 0; mocks.result = { data: [], error: null };
-  const query = Object.fromEntries(["select", "eq", "in", "or", "order", "range"].map((method) => [method, (...args: unknown[]) => { mocks.calls.push([method, ...args]); return query; }])) as Record<string, unknown>;
+  const query = Object.fromEntries(["select", "eq", "neq", "in", "or", "order", "range", "update"].map((method) => [method, (...args: unknown[]) => { mocks.calls.push([method, ...args]); return query; }])) as Record<string, unknown>;
   query.then = (resolve: (result: typeof mocks.result) => unknown) => Promise.resolve(mocks.result).then(resolve);
+  // One row (the first of the result) or none, for the lookup-then-update routes.
+  query.maybeSingle = () => Promise.resolve({ data: mocks.result.data[0] ?? null, error: mocks.result.error });
   mocks.from.mockImplementation((table: string) => { mocks.calls.push(["from", table]); return query; });
   mocks.admin.mockResolvedValue(undefined); mocks.owner.mockResolvedValue(undefined);
   mocks.isAdmin.mockResolvedValue(false); mocks.editor.mockResolvedValue({ id: ID });
@@ -179,5 +184,80 @@ describe("OTC, audit and legacy beneficiary readers", () => {
   it("returns unavailable instead of an empty successful OTC result on database errors", async () => {
     signed({ scope: "mine" }); mocks.result.error = { message: "database paused" };
     expect((await otc(request())).status).toBe(503);
+  });
+});
+
+describe("resell listing reader (0082: a post and its contact are public only while active)", () => {
+  it("binds the seller's own history to the signer, drops the moderation stamps and ignores a supplied different wallet", async () => {
+    signed({ scope: "mine", wallet: OTHER, seller_wallet: OTHER, network: "mainnet" });
+    const res = await resell(request());
+    expect(res.status).toBe(200);
+    expect(mocks.calls).toContainEqual(["from", "resell_listings"]);
+    expect(mocks.calls).toContainEqual(["eq", "seller_wallet", WALLET]);
+    expect(mocks.calls).not.toContainEqual(["eq", "seller_wallet", OTHER]);
+    expect(mocks.calls).toContainEqual(["eq", "network", "devnet"]);
+    expect(mocks.calls).toContainEqual(["range", 0, 99]);
+    // No status filter unless asked: withdrawn, matched and removed rows are the point of this read.
+    expect(mocks.calls.some(([method, column]) => method === "eq" && column === "status")).toBe(false);
+    const select = (mocks.calls.find(([method]) => method === "select")?.[1] as string).split(",");
+    for (const column of ["id", "seller_wallet", "contact", "note", "status", "linked_offer_pda"]) expect(select).toContain(column);
+    expect(select).not.toContain("moderated_by"); expect(select).not.toContain("moderated_at");
+    expect(mocks.admin).not.toHaveBeenCalled();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+  it("the admin board reads every column of every seller, filtered and paged as asked, only after the admin gate", async () => {
+    signed({ scope: "admin", status: "withdrawn", offset: 100 });
+    const res = await resell(request());
+    expect(res.status).toBe(200);
+    expect(mocks.admin).toHaveBeenCalledWith(WALLET);
+    expect(mocks.calls).toContainEqual(["select", "*"]);
+    expect(mocks.calls).toContainEqual(["eq", "status", "withdrawn"]);
+    expect(mocks.calls).toContainEqual(["range", 100, 199]);
+    expect(mocks.calls.some(([method, column]) => method === "eq" && column === "seller_wallet")).toBe(false);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+  it("denies an admin read before any database access when the gate rejects", async () => {
+    signed({ scope: "admin" }); mocks.admin.mockRejectedValue(new SiwsError(403, "Admin required"));
+    expect((await resell(request())).status).toBe(403); expect(mocks.from).not.toHaveBeenCalled();
+  });
+  it("rejects an unsigned read, and an unknown scope, status or page, before touching the table", async () => {
+    mocks.verify.mockRejectedValue(new SiwsError(401, "Signature required"));
+    expect((await resell(request())).status).toBe(401);
+    for (const params of [{}, { scope: "all" }, { scope: "mine", status: "deleted" }, { scope: "mine", offset: -1 }, { scope: "mine", offset: 1.5 }, { scope: "mine", offset: "0" }, { scope: "admin", offset: 1_000_001 }]) {
+      signed(params);
+      expect((await resell(request())).status, JSON.stringify(params)).toBe(400);
+    }
+    expect(mocks.from).not.toHaveBeenCalled();
+  });
+  it("returns unavailable instead of an empty history on database errors", async () => {
+    signed({ scope: "mine" }); mocks.result.error = { message: "database paused" };
+    expect((await resell(request())).status).toBe(503);
+  });
+  it("is a session read like the OTC list: the cookie suffices, no signature prompt per page", () => {
+    expect(SESSION_READ_ACTIONS.has("resell.list")).toBe(true);
+  });
+});
+
+describe("resell moderation never puts a seller's withdrawal back on the board", () => {
+  it("restores a removed listing only, with the condition repeated on the update itself", async () => {
+    signed({ id: ID, action: "restore" }); mocks.result.data = [{ id: ID, status: "removed" }];
+    expect((await moderate(request())).status).toBe(200);
+    expect(mocks.calls.find(([method]) => method === "update")?.[1]).toMatchObject({ status: "active", moderated_by: WALLET });
+    expect(mocks.calls).toContainEqual(["eq", "status", "removed"]);
+  });
+  it.each(["withdrawn", "matched", "active"])("answers 409 for a %s listing and writes nothing", async (status) => {
+    signed({ id: ID, action: "restore" }); mocks.result.data = [{ id: ID, status }];
+    expect((await moderate(request())).status).toBe(409);
+    expect(mocks.calls.some(([method]) => method === "update")).toBe(false);
+  });
+  it("removes a listing that is not removed already (409 otherwise), 404 for an unknown id", async () => {
+    signed({ id: ID, action: "remove" }); mocks.result.data = [{ id: ID, status: "active" }];
+    expect((await moderate(request())).status).toBe(200);
+    expect(mocks.calls).toContainEqual(["neq", "status", "removed"]);
+    mocks.calls.length = 0; mocks.result.data = [{ id: ID, status: "removed" }];
+    expect((await moderate(request())).status).toBe(409);
+    expect(mocks.calls.some(([method]) => method === "update")).toBe(false);
+    mocks.result.data = [];
+    expect((await moderate(request())).status).toBe(404);
   });
 });

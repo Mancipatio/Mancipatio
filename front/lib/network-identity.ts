@@ -2,11 +2,14 @@ import {
   createDefaultRpcTransport,
   createSolanaRpcFromTransport,
   isBlockhash,
+  isSolanaError,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   type GetGenesisHashApi,
   type Rpc,
   type RpcTransport,
 } from "@solana/kit";
 import type { Network } from "@/lib/network";
+import { withRpcReadRetry, type RpcReadRetryOptions } from "@/lib/rpc-retry";
 
 // Canonical genesis values from solana-cluster-type 3.1.0/3.2.0.
 export const CLUSTER_GENESIS_HASHES = {
@@ -47,32 +50,51 @@ export function expectedGenesisHash(
   return configured;
 }
 
+export type NetworkVerifierOptions = {
+  expectedHash?: string;
+  cacheMs?: number;
+  /**
+   * Retry a genesis read the RPC refused for a moment (HTTP 429, a 5xx, no
+   * response: lib/rpc-retry withRpcReadRetry), each attempt with its own
+   * 10 s cut-off; `true` takes the default waits, tests pass their own. Off
+   * by default: the server's verifier reads behind every request and caches
+   * instead; the wallet client (lib/verified-solana-client) turns it on, so
+   * one refused read is not the first thing every send fails on.
+   */
+  retryReads?: boolean | Pick<RpcReadRetryOptions, "delaysMs" | "sleep" | "random">;
+};
+
 /**
  * A verifier belongs to one RPC instance and one expected genesis identity.
- * Concurrent callers share one check (bounded by its own 10 s timeout). A
- * caller's `signal` bounds only that caller's wait: it rejects with the
- * signal's reason when it aborts, and the shared check goes on for the others.
+ * Concurrent callers share one check (bounded by its own 10 s timeout per
+ * read). A caller's `signal` bounds only that caller's wait: it rejects with
+ * the signal's reason when it aborts, and the shared check goes on for the
+ * others.
  */
 export function createNetworkVerifier(
   rpc: Rpc<GetGenesisHashApi>,
   network: Network,
-  options: { expectedHash?: string; cacheMs?: number } = {},
+  options: NetworkVerifierOptions = {},
 ) {
   const expected = expectedGenesisHash(network, options.expectedHash);
   const cacheMs = options.cacheMs ?? 0;
+  const retry = options.retryReads ? (options.retryReads === true ? {} : options.retryReads) : null;
   let verifiedAt: number | null = null;
   let pending: Promise<void> | null = null;
+
+  // A fresh cut-off per attempt.
+  const read = () => rpc.getGenesisHash().send({ abortSignal: AbortSignal.timeout(10_000) });
 
   const check = async () => {
     let actual: string;
     try {
-      actual = await rpc
-        .getGenesisHash()
-        .send({ abortSignal: AbortSignal.timeout(10_000) });
-    } catch {
-      // RPC exceptions can contain URLs/API keys. Return only this safe message.
+      actual = retry ? await withRpcReadRetry(read, retry) : await read();
+    } catch (cause) {
+      // RPC exceptions can contain URLs/API keys. Return only this safe
+      // message; an HTTP status is a number, and says what to do.
+      const status = isSolanaError(cause, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR) ? ` (the RPC answered HTTP ${cause.context.statusCode})` : "";
       throw new NetworkIdentityError(
-        "Cannot verify the Solana network. Check the RPC connection and try again.",
+        `Cannot verify the Solana network${status}. Check the RPC connection and try again.`,
       );
     }
     if (actual !== expected) {

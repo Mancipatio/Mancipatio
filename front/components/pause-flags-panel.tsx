@@ -15,12 +15,14 @@ import {
 } from "@/lib/generated/asset_registry";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useRole } from "@/lib/auth";
+import { kycOnly, moduleEnabled } from "@/lib/features";
 import { useMaintenance } from "@/lib/maintenance-client";
 import {
   CLOSE_BOOTSTRAP_MASKS,
   describePausedAreas,
   formatPauseFlags,
   isBootstrapOpen,
+  PAUSE_CUSTODY_ENTRY,
   PAUSE_EXITS_OPEN,
   PAUSE_FLAGS,
   PAUSE_FLAGS_ALL,
@@ -33,7 +35,10 @@ import {
   pauseRole,
 } from "@/lib/pause-flags";
 import { detectNetwork } from "@/lib/network";
-import { recordAudit } from "@/lib/supabase";
+import { withRpcReadRetry } from "@/lib/rpc-retry";
+import { confirmThenReport } from "@/lib/send-outcome";
+import { waitForSignature, type SignatureOutcome } from "@/lib/simulation-gate";
+import { recordAudit, type AuditStatus } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { useToast } from "@/lib/toast";
@@ -46,6 +51,159 @@ type Pending = {
   title: string;
 };
 
+// ── The send's outcome (pure, node-safe: tests/pause-panel-send.test.ts) ────
+
+/**
+ * How long the panel waits for the network to confirm a `set_pause_flags`
+ * (status reads retried on a refused RPC). `tx.send` returns at submission,
+ * so nothing below is reported before this wait answers.
+ */
+export const PAUSE_CONFIRM_TIMEOUT_MS = 30_000;
+
+export type PauseSendHandlers = {
+  /** Polls the signature until it is confirmed, failed, or the wait runs out (lib/simulation-gate waitForSignature). */
+  wait: () => Promise<SignatureOutcome>;
+  /** Reads `Platform.pause_flags`; called only after the confirmation (null when the read fails). */
+  observe: () => Promise<number | null>;
+  /** Writes the audit row of the outcome; `observed` is given only for a confirmed send. */
+  audit: (
+    status: AuditStatus,
+    detail: { observed?: number | null; error?: string; confirmation?: SignatureOutcome },
+  ) => Promise<unknown>;
+  /** The network confirmed it: the success toast. */
+  confirmed: () => void;
+  /** The network refused it: the flags are unchanged. */
+  failed: () => void;
+  /** Not confirmed within the wait, or the status could not be read: it may still land. */
+  unconfirmed: (outcome: Exclude<SignatureOutcome, "confirmed" | "failed">) => void;
+  /** After the report, whatever the outcome: forget the pre-sign gate's cached flags. */
+  clearCache: () => void;
+  /** Then re-read the host page (its Platform read). */
+  refresh: () => void | Promise<void>;
+  /** The host page could not be re-read: the send's own outcome stands (an info, never a failed send). */
+  refreshFailed: () => void;
+};
+
+/**
+ * A pause or resume is "done" only when the network says so: the success
+ * toast, the audit row (its `observed_after` read AFTER the confirmation) and
+ * the host page's refresh wait for the outcome (lib/send-outcome
+ * confirmThenReport). A refused send is a "failed" row with the signature; an
+ * unconfirmed one a "pending" row. A failed re-read afterwards is not a failed
+ * pause: the outcome already reported stands and the host is told to refresh.
+ */
+export async function settlePauseFlagsSend(h: PauseSendHandlers): Promise<SignatureOutcome> {
+  return confirmThenReport(h.wait, {
+    confirmed: () => {
+      h.confirmed();
+      // Recorded in the background (it never holds the refresh), but read
+      // only now, so observed_after is the state the transaction left.
+      void h
+        .observe()
+        .catch(() => null)
+        .then((observed) => h.audit("success", { observed }))
+        .catch(() => undefined);
+    },
+    failed: () => {
+      h.failed();
+      void h.audit("failed", { error: "refused by the network" }).catch(() => undefined);
+    },
+    unconfirmed: (outcome) => {
+      h.unconfirmed(outcome);
+      void h.audit("pending", { confirmation: outcome }).catch(() => undefined);
+    },
+    settled: async () => {
+      h.clearCache();
+      try {
+        await h.refresh();
+      } catch {
+        h.refreshFailed();
+      }
+    },
+  });
+}
+
+// ── The resume confirmation's copy (pure) ───────────────────────────────────
+
+/** What clearing 0x08 opens on-chain, and when to set it again (ops/runbook-mainnet.md, the conversion window). */
+export const CUSTODY_ENTRY_OPENS =
+  "Opens custody entry: any Admin can open custody vaults (delivery escrows included) and holders can deposit into them. Open it only for a specific conversion request, and close it (Pause custody entry) as soon as the deposit has landed.";
+/** KYC-only mode refuses the vault open and the deposit on this site (lib/pause-gate KYC_ONLY_FLOWS). */
+export const CUSTODY_ENTRY_KYC_ONLY =
+  "KYC-only mode is on: this site refuses the conversion vault open and the holder's deposit, so this only opens the chain to transactions signed outside the site.";
+/** The conversion module is off: this site opens no conversion vault (lib/pause-gate MODULE_FLOWS). */
+export const CUSTODY_ENTRY_CONVERSION_OFF =
+  "Conversion is switched off here: this site will not open a conversion vault (a holder can still deposit into one already open).";
+
+export type ResumeScope = { kycOnly: boolean; conversionOn: boolean };
+
+export type ResumeNotice = {
+  /** The areas this clears, or "nothing paused (it only closes the bootstrap window)". */
+  resumes: string;
+  /** The custody-entry window's sentences; empty unless Custody entry is among the areas. */
+  custody: string[];
+  /** Bit 7 is still open: any clear closes it for good. */
+  bootstrapCloses: boolean;
+  /** More than the one custody window is being lifted: an emergency pause. */
+  incident: boolean;
+  /** The closing sentence(s): the payout modules, the bootstrap window, the incident reminder, the audit log. */
+  closing: string;
+};
+
+/**
+ * The copy of a resume confirmation. A single Custody entry (0x08) resume is
+ * the per-conversion window (runbook steps 5 and 8), not incident recovery:
+ * it says what the bit opens platform-wide and when to close it, and drops
+ * "once the cause of the pause is resolved". The bootstrap sentence appears
+ * only while bit 7 is open.
+ */
+export function resumeNotice(bits: number, flags: number, scope: ResumeScope): ResumeNotice {
+  const resumed = bits & flags & PAUSE_FLAGS_ALL;
+  const custody: string[] = [];
+  if ((resumed & PAUSE_CUSTODY_ENTRY) !== 0) {
+    custody.push(CUSTODY_ENTRY_OPENS);
+    if (scope.kycOnly) custody.push(CUSTODY_ENTRY_KYC_ONLY);
+    else if (!scope.conversionOn) custody.push(CUSTODY_ENTRY_CONVERSION_OFF);
+  }
+  const bootstrapCloses = isBootstrapOpen(flags);
+  const incident = resumed !== PAUSE_CUSTODY_ENTRY;
+  const closing = [
+    "The payout modules stay as they are.",
+    bootstrapCloses ? "The bootstrap window closes for good." : null,
+    incident ? "Resume only once the cause of the pause is resolved." : null,
+    "The reason is recorded in the audit log.",
+  ]
+    .filter((s): s is string => s !== null)
+    .join(" ");
+  return {
+    resumes: describePausedAreas(resumed) || "nothing paused (it only closes the bootstrap window)",
+    custody,
+    bootstrapCloses,
+    incident,
+    closing,
+  };
+}
+
+function ResumeDescription({ bits, flags }: { bits: number; flags: number }) {
+  const notice = resumeNotice(bits, flags, {
+    kycOnly: kycOnly(),
+    conversionOn: moduleEnabled("custodyConversion"),
+  });
+  return (
+    <div className="space-y-2">
+      <p>
+        This resumes: <strong>{notice.resumes}</strong>.
+      </p>
+      {notice.custody.length > 0 && (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[13px] text-amber-900">
+          {notice.custody.join(" ")}
+        </p>
+      )}
+      <p>{notice.closing}</p>
+    </div>
+  );
+}
+
 /**
  * Emergency pause: one row per `Platform.pause_flags` pause bit. Any Admin
  * can pause an area (or everything); only the Super Admin can resume. The
@@ -57,6 +215,10 @@ type Pending = {
  * panel offers it only off mainnet, as its own confirmed action. Bit 7 is the
  * one-way bootstrap window: any resume closes it; the Super Admin can also
  * close it explicitly.
+ *
+ * A change is reported only once the network confirms it (`tx.send` returns
+ * at submission): the buttons stay held until then, so a second click cannot
+ * send the same change twice.
  */
 export function PauseFlagsPanel({
   platform,
@@ -67,11 +229,15 @@ export function PauseFlagsPanel({
 }) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
+  const rpc = client.runtime.rpc;
   const tx = useSendTransaction();
   const role = useRole();
   const toast = useToast();
   const maintenance = useMaintenance();
   const [pending, setPending] = useState<Pending | null>(null);
+  /** Between the submission and the network's answer: the buttons stay held. */
+  const [confirming, setConfirming] = useState(false);
+  const busy = tx.isSending || confirming;
 
   const wallet = conn.wallet?.account.address;
   const flags = platform.pauseFlags;
@@ -88,13 +254,14 @@ export function PauseFlagsPanel({
   const bootstrapOpen = isBootstrapOpen(flags);
 
   /** The flags on chain right after this transaction confirmed (null when
-   *  the read fails; the tx's PauseFlagsChanged event stays authoritative). */
+   *  the read fails; the tx's PauseFlagsChanged event stays authoritative).
+   *  A refused read right after a send (HTTP 429) is retried. */
   async function observedFlags(): Promise<number | null> {
     try {
       const [pda] = await findPlatformPda();
-      const maybe = await fetchMaybePlatform(client.runtime.rpc, pda, {
-        commitment: "confirmed",
-      });
+      const maybe = await withRpcReadRetry((signal) =>
+        fetchMaybePlatform(rpc, pda, { commitment: "confirmed", abortSignal: signal }),
+      );
       return maybe.exists ? maybe.data.pauseFlags : null;
     } catch {
       return null;
@@ -102,14 +269,38 @@ export function PauseFlagsPanel({
   }
 
   async function apply(reason: string) {
-    if (!pending || !wallet || !conn.wallet) return;
+    if (!pending || !wallet || !conn.wallet || confirming) return;
+    const { title } = pending;
     const { setMask, clearMask } =
       pending.action === "bootstrap"
         ? CLOSE_BOOTSTRAP_MASKS
         : pauseMasks(pending.action, pending.bits);
+    const actor = wallet.toString();
     // The panel's cached view: another Admin may have moved the flags since.
-    const metadata = pauseAuditMetadata(setMask, clearMask, flags);
-    const pendingId = toast.showPending(`${pending.title}…`, reason);
+    const audit = (
+      status: AuditStatus,
+      sig: string | null,
+      detail: { observed?: number | null; error?: string; confirmation?: SignatureOutcome } = {},
+    ) =>
+      recordAudit({
+        ix_name: "set_pause_flags",
+        category: "platform",
+        actor_wallet: actor,
+        reason,
+        target_label: title,
+        tx_signature: sig || undefined,
+        status,
+        metadata: {
+          ...pauseAuditMetadata(setMask, clearMask, flags, detail.observed),
+          ...(detail.error === undefined ? {} : { error: detail.error }),
+          ...(detail.confirmation === undefined ? {} : { confirmation: detail.confirmation }),
+        },
+      });
+
+    // 1. The wallet signs and the network takes the transaction. A refusal
+    //    here (the wallet, the pre-sign gate, the preflight) has no signature.
+    let pendingId = toast.showPending(`${title}…`, reason);
+    let sig: string;
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
       const ix = await getSetPauseFlagsInstructionAsync({
@@ -118,41 +309,66 @@ export function PauseFlagsPanel({
         clearMask,
       });
       const result = await tx.send({ instructions: [ix], feePayer: signer });
-      const sig = typeof result === "string" ? result : "";
-      // The pre-sign pause gate (lib/pause-gate.ts) re-reads on the next send.
-      clearPauseFlagsCache();
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: pending.title });
-      const title = pending.title;
-      // Recorded in the background: the confirmed re-read must not hold the
-      // modal open.
-      void observedFlags().then((observed) =>
-        recordAudit({
-          ix_name: "set_pause_flags",
-          category: "platform",
-          actor_wallet: wallet.toString(),
-          reason,
-          target_label: title,
-          tx_signature: sig || undefined,
-          status: "success",
-          metadata: pauseAuditMetadata(setMask, clearMask, flags, observed),
-        }),
-      );
-      setPending(null);
-      await onChanged();
+      sig = typeof result === "string" ? result : "";
     } catch (err) {
       toast.dismiss(pendingId);
       const detail = explainSendError(err);
-      toast.showError(`${pending.title} failed`, detail);
-      void recordAudit({
-        ix_name: "set_pause_flags",
-        category: "platform",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: pending.title,
-        status: "failed",
-        metadata: { ...metadata, error: detail },
+      toast.showError(`${title} failed`, detail);
+      void audit("failed", null, { error: detail });
+      return;
+    }
+
+    // 2. Only the network's confirmation makes it done: the success toast,
+    //    the audit row's observed_after and the page's refresh wait for it
+    //    (settlePauseFlagsSend above). The modal closes at submission; the
+    //    buttons stay held until the outcome.
+    setConfirming(true);
+    setPending(null);
+    toast.dismiss(pendingId);
+    pendingId = toast.showPending(`${title}: waiting for the network to confirm…`, reason);
+    try {
+      await settlePauseFlagsSend({
+        wait: () =>
+          sig
+            ? waitForSignature(rpc, sig, { timeoutMs: PAUSE_CONFIRM_TIMEOUT_MS, retryReads: true })
+            : Promise.resolve<SignatureOutcome>("unknown"),
+        observe: observedFlags,
+        audit: (status, detail) => audit(status, sig, detail),
+        confirmed: () => {
+          toast.dismiss(pendingId);
+          toast.showTx(sig, { title, description: "Confirmed on the network." });
+        },
+        failed: () => {
+          toast.dismiss(pendingId);
+          toast.show({
+            kind: "error",
+            title: `${title} failed on the network`,
+            description:
+              "Your wallet signed it, but the network refused it. The pause flags are unchanged; open the explorer link for details.",
+            signature: sig,
+          });
+        },
+        unconfirmed: () => {
+          toast.dismiss(pendingId);
+          toast.show({
+            kind: "error",
+            title: "Not confirmed yet",
+            description: `${title} was sent, but the network has not confirmed it. Check the explorer link and the flags below (read again now) before acting again.`,
+            signature: sig || undefined,
+          });
+        },
+        // The pre-sign pause gate (lib/pause-gate.ts) re-reads on the next send.
+        clearCache: clearPauseFlagsCache,
+        refresh: onChanged,
+        refreshFailed: () =>
+          void toast.show({
+            kind: "info",
+            title: "Sent; could not re-read the flags",
+            description: `${title} stands as reported. The flags shown may be out of date: refresh the page.`,
+          }),
       });
+    } finally {
+      setConfirming(false);
     }
   }
 
@@ -178,7 +394,7 @@ export function PauseFlagsPanel({
           {controls.pauseEverything && (
             <button
               type="button"
-              disabled={tx.isSending}
+              disabled={busy}
               onClick={() =>
                 setPending({
                   action: "pause",
@@ -194,7 +410,7 @@ export function PauseFlagsPanel({
           {controls.resumeEverything && (
             <button
               type="button"
-              disabled={tx.isSending}
+              disabled={busy}
               onClick={() =>
                 setPending({
                   action: "resume",
@@ -211,7 +427,7 @@ export function PauseFlagsPanel({
           {controls.closeBootstrap && (
             <button
               type="button"
-              disabled={tx.isSending}
+              disabled={busy}
               onClick={() =>
                 setPending({
                   action: "bootstrap",
@@ -257,7 +473,7 @@ export function PauseFlagsPanel({
                 {action === "resume" && (
                   <button
                     type="button"
-                    disabled={tx.isSending}
+                    disabled={busy}
                     onClick={() =>
                       setPending({
                         action: "resume",
@@ -279,7 +495,7 @@ export function PauseFlagsPanel({
                 {action === "pause" && (
                   <button
                     type="button"
-                    disabled={tx.isSending}
+                    disabled={busy}
                     onClick={() =>
                       setPending({
                         action: "pause",
@@ -297,6 +513,12 @@ export function PauseFlagsPanel({
           );
         })}
       </ul>
+
+      {confirming && (
+        <p className="mt-2 text-xs text-slate-500" role="status">
+          Waiting for the network to confirm the last change; the flags above are read again once it has.
+        </p>
+      )}
 
       {maintenance?.enabled && isAdmin && (
         <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900">
@@ -359,19 +581,10 @@ export function PauseFlagsPanel({
                 reason is recorded in the audit log.
               </p>
             ) : (
-              <p>
-                This resumes:{" "}
-                <strong>
-                  {describePausedAreas(pending.bits & flags) ||
-                    "nothing paused (it only closes the bootstrap window)"}
-                </strong>
-                . The payout modules stay as they are, and the bootstrap
-                window closes for good. Resume only once the cause of the
-                pause is resolved. The reason is recorded in the audit log.
-              </p>
+              <ResumeDescription bits={pending.bits} flags={flags} />
             )
           }
-          busy={tx.isSending}
+          busy={busy}
         />
       )}
     </div>

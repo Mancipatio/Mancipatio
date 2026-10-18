@@ -140,7 +140,7 @@ export function VerificationForm({ context }: { context?: "issuer" }) {
       : !actorKey ? <div className="account-connect">
           <section className="account-card account-unlock">
             <h2>Sign in to get verified.</h2>
-            <p>Use your email or Google — no wallet needed. Your verification will cover every wallet you add later.</p>
+            <p>Use your email or Google — no wallet needed. Your verification stays with your account; the investor passport is issued per wallet, to a wallet you link, and a conversion checks the wallet that deposits.</p>
             <Link href={`/login?next=${encodeURIComponent(signInNext)}`} className="account-button account-button--primary">Sign in<IconArrowUpRight size={16} /></Link>
           </section>
           <WalletRequired context="Or connect a wallet that is linked to your account." />

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   address,
@@ -6,14 +8,43 @@ import {
   getBase58Decoder,
 } from "@solana/kit";
 import {
+  awaitCustodyOpenFinalized,
+  checkCustodyOpenIntent,
+  custodySendNeverBroadcast,
+  CUSTODY_OPEN_ABANDON_AFTER_MS,
+  forgetCustodyOpenIntent,
+  isWalletRejection,
+  markCustodyOpenAttempted,
+  NEVER_BROADCAST_ERROR_NAMES,
   openCustodyOnce,
   parseCustodyVaultId,
   readCustodyOpenIntent,
   recordCustodyOpening,
   requireCustodyRequestAmount,
+  WALLET_POLICY_REFUSAL_PREFIX,
+  type CustodyOpenCheckRpc,
   type CustodyOpenIntent,
   type CustodyOpenScope,
 } from "@/lib/custody-open-recovery";
+import {
+  KycOnlyFlowError,
+  ModuleDisabledFlowError,
+  PausedFlowError,
+} from "@/lib/pause-gate";
+import { PAUSE_CUSTODY_ENTRY } from "@/lib/pause-flags";
+import {
+  SimulationRefusedError,
+  SimulationUnavailableError,
+} from "@/lib/simulation-gate";
+import { MaintenanceModeError, MaintenanceUnknownError } from "@/lib/maintenance";
+import { HardwareWalletSigningError } from "@/lib/siws-signing";
+import { OffchainMessageLimitError } from "@/lib/siws-offchain";
+import {
+  PrimaryWalletRequiredError,
+  TransactionWalletChangedError,
+  TransactionWalletPolicyError,
+} from "@/lib/transaction-wallet-policy";
+import { AssetRegistryInstruction } from "@/lib/generated/asset_registry";
 import {
   findPlatformPda,
   getOpenCustodyVaultInstructionAsync,
@@ -101,6 +132,8 @@ describe("custody approval durable intent", () => {
       await expect(openCustodyOnce(input)).rejects.toThrow("database paused");
       const restored = readCustodyOpenIntent(input.scope)!;
       expect(restored.signature).toBe(signature);
+      // Stamped with the moment the send returned: the discard bound every tab ages from.
+      expect(Number.isFinite(Date.parse(restored.attemptedAt ?? ""))).toBe(true);
       // A new consumer after reload sees the durable request and ignores changed form IDs.
       const retry = { ...setup(), scope: input.scope, vaultId: "999" };
       await openCustodyOnce(retry);
@@ -115,6 +148,7 @@ describe("custody approval durable intent", () => {
       expect(retry.send).not.toHaveBeenCalled();
       expect(retry.build).not.toHaveBeenCalled();
       expect(Object.keys(JSON.parse([...entries.values()][0])).sort()).toEqual([
+        "attemptedAt",
         "createdAt",
         "network",
         "product",
@@ -133,6 +167,11 @@ describe("custody approval durable intent", () => {
     input.send.mockRejectedValueOnce(new Error("RPC disconnected"));
     await expect(openCustodyOnce(input)).rejects.toThrow("RPC disconnected");
     expect(readCustodyOpenIntent(scope)?.signature).toBeNull();
+    // Kept, and stamped with the moment the send settled (the wallet had
+    // returned by then): what a reloaded tab or another one ages from.
+    const kept = readCustodyOpenIntent(scope)!;
+    expect(Number.isFinite(Date.parse(kept.attemptedAt ?? ""))).toBe(true);
+    expect(input.onIntent.mock.lastCall?.[0]).toEqual(kept);
     input.link.mockRejectedValueOnce(new Error("finalized vault unavailable"));
     await expect(openCustodyOnce(input)).rejects.toThrow(
       "finalized vault unavailable",
@@ -275,4 +314,431 @@ describe("custody approval durable intent", () => {
     expect(ix.accounts[9].address).toBe((await findPlatformPda())[0]);
     expect(ix.accounts[10].address).toBe(ASSET_REGISTRY_PROGRAM_ADDRESS);
   });
+});
+
+// F006: an intent is saved only once the pre-wallet gates passed, and a send
+// that provably never reached the network takes its intent with it. The
+// retention test above ("retains the exact PDA for an uncertain send") still
+// holds: without `notSent`, or for an error that may have been broadcast, the
+// intent stays — retention is now for uncertain sends only.
+describe("custody approval intent: never-broadcast sends and the preflight", () => {
+  const paused = () =>
+    new PausedFlowError(
+      PAUSE_CUSTODY_ENTRY,
+      AssetRegistryInstruction.OpenCustodyVault,
+    );
+  it("forgets the intent of a send refused before the wallet, so the next approval builds and sends again", async () => {
+    const input = { ...setup(), notSent: custodySendNeverBroadcast };
+    input.send.mockRejectedValueOnce(paused());
+    await expect(openCustodyOnce(input)).rejects.toThrow(
+      "Nothing was sent to your wallet",
+    );
+    expect(readCustodyOpenIntent(scope)).toBeNull();
+    expect(input.onIntent.mock.lastCall?.[0]).toBeNull();
+    // The same inputs again: a fresh build, a fresh send, then the link.
+    await openCustodyOnce(input);
+    expect(input.build).toHaveBeenCalledTimes(2);
+    expect(input.send).toHaveBeenCalledTimes(2);
+    expect(input.link).toHaveBeenCalledOnce();
+    expect(readCustodyOpenIntent(scope)?.signature).toBe(signature);
+  });
+  it("a preflight refusal saves no intent and never calls send", async () => {
+    const input = {
+      ...setup(),
+      preflight: vi.fn(async () => {
+        throw paused();
+      }),
+    };
+    await expect(openCustodyOnce(input)).rejects.toThrow(/Custody entry is closed|paused/);
+    expect(readCustodyOpenIntent(scope)).toBeNull();
+    expect(input.build).toHaveBeenCalledOnce();
+    expect(input.preflight).toHaveBeenCalledWith({ instruction: "public" });
+    expect(input.send).not.toHaveBeenCalled();
+    expect(input.onIntent).not.toHaveBeenCalled();
+  });
+  it("a never-broadcast send leaves alone a record another attempt wrote meanwhile", async () => {
+    for (const change of ["createdAt", "signature"] as const) {
+      entries.clear();
+      const input = { ...setup(), notSent: () => true };
+      input.send.mockImplementationOnce(async () => {
+        const storageKey = [...entries.keys()][0];
+        const current = readCustodyOpenIntent(scope)!;
+        entries.set(
+          storageKey,
+          JSON.stringify(
+            change === "createdAt"
+              ? { ...current, createdAt: new Date(1).toISOString() }
+              : { ...current, signature },
+          ),
+        );
+        throw paused();
+      });
+      await expect(openCustodyOnce(input)).rejects.toThrow(/Custody entry is closed|paused/);
+      const kept = readCustodyOpenIntent(scope)!;
+      expect(kept).not.toBeNull();
+      if (change === "signature") expect(kept.signature).toBe(signature);
+      else expect(kept.createdAt).toBe(new Date(1).toISOString());
+      expect(input.onIntent.mock.lastCall?.[0]).not.toBeNull();
+    }
+  });
+  it("without notSent, or for an error that may have been broadcast, the intent stays", async () => {
+    const input = { ...setup(), notSent: custodySendNeverBroadcast };
+    input.send.mockRejectedValueOnce(new Error("RPC disconnected"));
+    await expect(openCustodyOnce(input)).rejects.toThrow("RPC disconnected");
+    expect(readCustodyOpenIntent(scope)?.signature).toBeNull();
+    expect(input.onIntent.mock.lastCall?.[0]).not.toBeNull();
+  });
+  it("classifies the typed pre-wallet refusals and the wallet's rejection as never broadcast, nothing else", () => {
+    const named = [
+      paused(),
+      new ModuleDisabledFlowError(
+        "custodyConversion",
+        AssetRegistryInstruction.OpenCustodyVault,
+        "devnet",
+      ),
+      new KycOnlyFlowError(AssetRegistryInstruction.DepositToCustodyVault),
+      new SimulationRefusedError({
+        detail: "Step 1 of 1 was refused.",
+        instructionIndex: 0,
+        instructionCount: 1,
+        program: null,
+        code: null,
+        errorName: null,
+        logs: [],
+        err: null,
+      }),
+      new SimulationUnavailableError("devnet", new Error("429")),
+      new MaintenanceModeError("Upgrade"),
+      new MaintenanceUnknownError(),
+      new PrimaryWalletRequiredError(),
+      Object.assign(new Error("Proceeds are frozen"), {
+        name: "GateAccountSetError",
+      }),
+      new TransactionWalletPolicyError("server"),
+      // Raised by the wallet policy's message-signing prompt, before the transaction is offered.
+      new HardwareWalletSigningError("refused"),
+      new OffchainMessageLimitError(10_000),
+    ];
+    const worded = [
+      new Error(
+        `${WALLET_POLICY_REFUSAL_PREFIX}. Approve the wallet verification and try again.`,
+      ),
+      Object.assign(new Error("User rejected the request."), { code: 4001 }),
+      { code: "WALLET_REJECTED", message: "no" },
+      { code: "ACTION_REJECTED" },
+      new Error("User rejected the request"),
+      new Error("User denied transaction signature"),
+      new Error("Transaction cancelled by user"),
+      new Error("Transaction rejected by the user"),
+      // The Ledger's own refusal, on the device.
+      new Error(
+        "Ledger device: Condition of use not satisfied (denied by the user?) (0x6985)",
+      ),
+      // Wrapped by the SDK: found down the cause chain.
+      new Error("Failed to send", { cause: new Error("x", { cause: paused() }) }),
+    ];
+    for (const error of [...named, ...worded])
+      expect(custodySendNeverBroadcast(error), String(error)).toBe(true);
+    for (const error of named)
+      expect(NEVER_BROADCAST_ERROR_NAMES.has(error.name), error.name).toBe(true);
+    const uncertain = [
+      new Error("RPC disconnected"),
+      new Error("Transaction simulation failed: Blockhash not found"),
+      new TransactionWalletChangedError(),
+      new TypeError("Failed to fetch"),
+      null,
+      undefined,
+      "sent",
+      { code: 4002 },
+      // "rejected" without the user as its subject is a node's or a transport's word.
+      new Error("Node rejected the request: rate limited"),
+      new Error("The request was rejected by the RPC endpoint"),
+      new Error("Transaction was not confirmed in 30.00 seconds"),
+    ];
+    for (const error of uncertain)
+      expect(custodySendNeverBroadcast(error), String(error)).toBe(false);
+    expect(isWalletRejection(new Error("Insufficient funds"))).toBe(false);
+    // The wallet-policy wording is matched by its opening words: pin them at the source
+    // (lib/transaction-wallet-policy.ts builds every variant from this constant).
+    expect(
+      readFileSync(join(process.cwd(), "lib/transaction-wallet-policy.ts"), "utf8"),
+    ).toContain(`"${WALLET_POLICY_REFUSAL_PREFIX}"`);
+  });
+});
+
+type FakeStatus =
+  | { err: unknown; confirmationStatus?: string | null }
+  | null;
+function fakeRpc(opts: {
+  /** The vault at a commitment ("finalized" | "confirmed"): present or not. */
+  account?: boolean | ((commitment: string) => boolean);
+  status?: FakeStatus | (() => FakeStatus);
+  fail?: boolean;
+}) {
+  const calls: string[] = [];
+  const rpc = {
+    getAccountInfo: (addr: string, config: { commitment: string }) => ({
+      send: async () => {
+        calls.push(`account:${addr}:${config.commitment}`);
+        if (opts.fail) throw new Error("rpc down");
+        const present =
+          typeof opts.account === "function"
+            ? opts.account(config.commitment)
+            : !!opts.account;
+        return {
+          context: { slot: BigInt(1) },
+          value: present
+            ? {
+                data: ["", "base64"],
+                executable: false,
+                lamports: BigInt(1),
+                owner: key(9),
+                rentEpoch: BigInt(0),
+                space: BigInt(0),
+              }
+            : null,
+        };
+      },
+    }),
+    getSignatureStatuses: (sigs: string[], config: unknown) => ({
+      send: async () => {
+        calls.push(`status:${sigs[0]}:${JSON.stringify(config)}`);
+        const status =
+          typeof opts.status === "function"
+            ? opts.status()
+            : (opts.status ?? null);
+        return { context: { slot: BigInt(1) }, value: [status] };
+      },
+    }),
+  } as unknown as CustodyOpenCheckRpc;
+  return { rpc, calls };
+}
+const vaultPda = key(7);
+const createdAt = new Date(1_700_000_000_000).toISOString();
+const later = 1_700_000_000_000 + CUSTODY_OPEN_ABANDON_AFTER_MS;
+
+describe("a saved approval the network never opened (F006 discard)", () => {
+  it("a vault on the network, even a tombstone, is present: never discardable", async () => {
+    const { rpc, calls } = fakeRpc({ account: true });
+    const intent = { vaultPda, signature: null, createdAt };
+    expect(await checkCustodyOpenIntent(rpc, intent, { now: later })).toBe(
+      "vault_present",
+    );
+    expect(calls).toEqual([`account:${vaultPda}:finalized`]);
+  });
+  it("a vault seen at confirmed but not yet at finalized is pending: never discardable", async () => {
+    const { rpc, calls } = fakeRpc({
+      account: (commitment) => commitment === "confirmed",
+    });
+    expect(
+      await checkCustodyOpenIntent(
+        rpc,
+        { vaultPda, signature, createdAt },
+        { now: later },
+      ),
+    ).toBe("pending");
+    expect(calls).toEqual([
+      `account:${vaultPda}:finalized`,
+      `account:${vaultPda}:confirmed`,
+    ]);
+  });
+  it("no vault and no send result: pending until the bound since the later of creation and the last attempt, then never opened", async () => {
+    const { rpc } = fakeRpc({ account: false });
+    const intent = { vaultPda, signature: null, createdAt };
+    expect(
+      await checkCustodyOpenIntent(rpc, intent, { now: later - 1 }),
+    ).toBe("pending");
+    expect(await checkCustodyOpenIntent(rpc, intent, { now: later })).toBe(
+      "never_opened",
+    );
+    expect(
+      await checkCustodyOpenIntent(rpc, intent, {
+        now: later,
+        since: later - 1,
+      }),
+    ).toBe("pending");
+  });
+  it("a reloaded tab (or another one) ages the bound from the saved attemptedAt, not from an old createdAt", async () => {
+    const { rpc } = fakeRpc({ account: false });
+    // Created long before (the policy prompt stayed open), sent a moment
+    // ago: the transaction may still land.
+    const settled = new Date(later - 1_000).toISOString();
+    const sent = { vaultPda, signature, createdAt, attemptedAt: settled };
+    expect(await checkCustodyOpenIntent(rpc, sent, { now: later })).toBe(
+      "pending",
+    );
+    expect(
+      await checkCustodyOpenIntent(rpc, sent, {
+        now: later - 1_000 + CUSTODY_OPEN_ABANDON_AFTER_MS,
+      }),
+    ).toBe("never_opened");
+    // No attemptedAt (a tab closed mid-send, or a record written before the
+    // field): the tab's own observation window (`since`) is the bound; an
+    // old record nobody watches falls back to its creation.
+    const unstamped = { vaultPda, signature: null, createdAt, attemptedAt: null };
+    expect(
+      await checkCustodyOpenIntent(rpc, unstamped, { now: later, since: later - 1 }),
+    ).toBe("pending");
+    expect(await checkCustodyOpenIntent(rpc, unstamped, { now: later })).toBe(
+      "never_opened",
+    );
+  });
+  it("with a signature: a failed transaction means never opened at once, a running or unknown one is read by the bound", async () => {
+    const intent = { vaultPda, signature, createdAt };
+    const read = async (status: FakeStatus, now: number) => {
+      const { rpc, calls } = fakeRpc({ account: false, status });
+      const state = await checkCustodyOpenIntent(rpc, intent, { now });
+      expect(calls[2]).toContain('"searchTransactionHistory":true');
+      return state;
+    };
+    expect(
+      await read({ err: { x: 1 }, confirmationStatus: "finalized" }, later - 1),
+    ).toBe("never_opened");
+    // An error seen at confirmed waits for finalized before it counts.
+    expect(
+      await read({ err: { x: 1 }, confirmationStatus: "confirmed" }, later),
+    ).toBe("pending");
+    expect(
+      await read({ err: { x: 1 }, confirmationStatus: "processed" }, later),
+    ).toBe("pending");
+    expect(
+      await read({ err: null, confirmationStatus: "confirmed" }, later),
+    ).toBe("pending");
+    expect(await read(null, later - 1)).toBe("pending");
+    expect(await read(null, later)).toBe("never_opened");
+  });
+  it("a network that cannot be read answers unknown", async () => {
+    const { rpc } = fakeRpc({ account: false, fail: true });
+    expect(
+      await checkCustodyOpenIntent(
+        rpc,
+        { vaultPda, signature: null, createdAt },
+        { now: later },
+      ),
+    ).toBe("unknown");
+  });
+  it("forgets only the exact saved approval: a changed or corrupt record stays", async () => {
+    const input = setup();
+    input.send.mockRejectedValueOnce(new Error("RPC disconnected"));
+    await expect(openCustodyOnce(input)).rejects.toThrow("RPC disconnected");
+    const intent = readCustodyOpenIntent(scope)!;
+    expect(forgetCustodyOpenIntent({ ...intent, signature })).toBe(false);
+    expect(
+      forgetCustodyOpenIntent({ ...intent, createdAt: new Date(1).toISOString() }),
+    ).toBe(false);
+    expect(readCustodyOpenIntent(scope)).toEqual(intent);
+    const storageKey = [...entries.keys()][0];
+    const raw = entries.get(storageKey)!;
+    entries.set(storageKey, "broken JSON");
+    expect(forgetCustodyOpenIntent(intent)).toBe(false);
+    expect(entries.get(storageKey)).toBe("broken JSON");
+    entries.set(storageKey, raw);
+    expect(forgetCustodyOpenIntent(intent)).toBe(true);
+    expect(readCustodyOpenIntent(scope)).toBeNull();
+    expect(forgetCustodyOpenIntent(intent)).toBe(false);
+  });
+  it("markCustodyOpenAttempted stamps only the exact saved attempt; the stamp survives the link; a record without it reads as null", async () => {
+    const input = setup();
+    input.send.mockRejectedValueOnce(new Error("RPC disconnected"));
+    await expect(openCustodyOnce(input)).rejects.toThrow("RPC disconnected");
+    const intent = readCustodyOpenIntent(scope)!;
+    const at = new Date(later);
+    expect(markCustodyOpenAttempted({ ...intent, signature }, at)).toBeNull();
+    expect(
+      markCustodyOpenAttempted(
+        { ...intent, createdAt: new Date(1).toISOString() },
+        at,
+      ),
+    ).toBeNull();
+    expect(readCustodyOpenIntent(scope)).toEqual(intent);
+    expect(markCustodyOpenAttempted(intent, at)).toEqual({
+      ...intent,
+      attemptedAt: at.toISOString(),
+    });
+    expect(readCustodyOpenIntent(scope)?.attemptedAt).toBe(at.toISOString());
+    // Never throws: a store that cannot be written answers null.
+    const fail = vi.spyOn(store, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    expect(markCustodyOpenAttempted(intent, new Date(later + 1))).toBeNull();
+    fail.mockRestore();
+    expect(readCustodyOpenIntent(scope)?.attemptedAt).toBe(at.toISOString());
+    // The link keeps the stamp.
+    await openCustodyOnce(input);
+    expect(readCustodyOpenIntent(scope)).toMatchObject({
+      attemptedAt: at.toISOString(),
+      recordedAt: expect.any(String),
+    });
+    // A record written before the field reads as unstamped; a corrupt stamp fails closed.
+    const storageKey = [...entries.keys()][0];
+    const legacy = JSON.parse(entries.get(storageKey)!) as Record<string, unknown>;
+    delete legacy.attemptedAt;
+    entries.set(storageKey, JSON.stringify(legacy));
+    expect(readCustodyOpenIntent(scope)?.attemptedAt).toBeNull();
+    entries.set(storageKey, JSON.stringify({ ...legacy, attemptedAt: "later" }));
+    expect(() => readCustodyOpenIntent(scope)).toThrow("needs review");
+  });
+
+  it("waits for the vault at finalized when the send result is unknown, and for the signature when it is known", async () => {
+    let reads = 0;
+    const appears = fakeRpc({ account: () => ++reads >= 3 });
+    expect(
+      await awaitCustodyOpenFinalized(
+        appears.rpc,
+        { vaultPda, signature: null },
+        { timeoutMs: 1_000, pollMs: 1 },
+      ),
+    ).toBe("finalized");
+    expect(reads).toBe(3);
+    expect(
+      await awaitCustodyOpenFinalized(
+        fakeRpc({ account: false }).rpc,
+        { vaultPda, signature: null },
+        { timeoutMs: 10, pollMs: 2 },
+      ),
+    ).toBe("timeout");
+    expect(
+      await awaitCustodyOpenFinalized(
+        fakeRpc({ account: false, fail: true }).rpc,
+        { vaultPda, signature: null },
+        { timeoutMs: 10, pollMs: 2 },
+      ),
+    ).toBe("unknown");
+    const bySignature = fakeRpc({
+      account: false,
+      status: { err: null, confirmationStatus: "finalized" },
+    });
+    expect(
+      await awaitCustodyOpenFinalized(
+        bySignature.rpc,
+        { vaultPda, signature },
+        { timeoutMs: 10, pollMs: 2 },
+      ),
+    ).toBe("finalized");
+    expect(bySignature.calls.every((c) => c.startsWith("status:"))).toBe(true);
+    // An error counts once finalized; at confirmed the wait goes on.
+    const failed = fakeRpc({
+      account: false,
+      status: { err: { x: 1 }, confirmationStatus: "finalized" },
+    });
+    expect(
+      await awaitCustodyOpenFinalized(
+        failed.rpc,
+        { vaultPda, signature },
+        { timeoutMs: 10, pollMs: 2 },
+      ),
+    ).toBe("failed");
+    const failing = fakeRpc({
+      account: false,
+      status: { err: { x: 1 }, confirmationStatus: "confirmed" },
+    });
+    expect(
+      await awaitCustodyOpenFinalized(
+        failing.rpc,
+        { vaultPda, signature },
+        { timeoutMs: 10, pollMs: 2 },
+      ),
+    ).toBe("timeout");
+  });
+
 });

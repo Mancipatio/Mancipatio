@@ -769,12 +769,50 @@ describe("conversion marker (C2): class 1 capped at 0 that class 0 converts into
         expect(r.metadata).toMatchObject(extra);
       }
     }
-    // The flow writes them after the transaction for the create and every resumed chain step.
+    // The flow writes them after the transaction for the create and every resumed chain step,
+    // from the one signature poll the step itself waits on (never a second poller).
     const flow = src("components/tokenize-shares-flow.tsx");
     expect(flow.match(/void auditTokenizeOutcome\(\{/g)).toHaveLength(2);
     expect(flow).toContain('tokenizeAuditRows(ixs, { actor: wallet.toString(), signature: sig, name: intent.name, step: "create" })');
     expect(flow).toContain("tokenizeAuditRows(sent, { actor: wallet.toString(), signature: sig, name: asset.name, step })");
-    expect(flow.match(/wait: \(\) => waitForSignature\(rpc, sig, \{ timeoutMs: 60_000 \}\)/g)).toHaveLength(2);
+    expect(flow.match(/const confirmation = waitForSignature\(rpc, sig, \{ timeoutMs: 60_000, retryReads: true \}\)/g)).toHaveLength(2);
+    expect(flow.match(/wait: \(\) => confirmation,/g)).toHaveLength(2);
+    expect(flow).not.toMatch(/wait: \(\) => waitForSignature\(/);
+  });
+
+  it("the flow reports a chain step, saves the details and re-reads only after the network confirmed it", () => {
+    // Review: continueResume toasted and re-read right after tx.send (submission). loadResume reads
+    // at `confirmed`, so the same step came back with an enabled button, and a second click failed
+    // the dry run or spent a fee on a transaction the network refuses.
+    const flow = src("components/tokenize-shares-flow.tsx");
+    const resumeFn = flow.slice(flow.indexOf("async function continueResume("), flow.indexOf("// ── Render ──"));
+    const send = resumeFn.indexOf("const sig = await tx.send(");
+    const waiting = resumeFn.indexOf('setWorking("Waiting for the network to confirm it (usually a few seconds)…")');
+    const report = resumeFn.indexOf("await confirmThenReport(() => confirmation");
+    expect(send).toBeGreaterThan(-1);
+    expect(waiting).toBeGreaterThan(send);
+    expect(report).toBeGreaterThan(waiting);
+    expect(resumeFn.indexOf("toast.showTx(sig, { title: what.done })")).toBeGreaterThan(report);
+    expect(resumeFn).toContain('title: "Refused by the network"');
+    expect(resumeFn).toContain('title: "Not confirmed yet"');
+    // Not confirmed: re-read and stop before the details (their `convertible` assumes the link landed).
+    const bail = resumeFn.indexOf('if (outcome !== "confirmed") {');
+    const details = resumeFn.indexOf("if (profileMissing) await saveDetails(");
+    expect(bail).toBeGreaterThan(report);
+    expect(details).toBeGreaterThan(bail);
+    expect(resumeFn.indexOf("await loadResume();", bail)).toBeLessThan(details);
+    expect(resumeFn.lastIndexOf("await loadResume();")).toBeGreaterThan(details);
+
+    const createFn = flow.slice(flow.indexOf("async function create("), flow.indexOf("// ── Continue an unfinished token ──"));
+    const createReport = createFn.indexOf("await confirmThenReport(() => confirmation");
+    expect(createReport).toBeGreaterThan(createFn.indexOf("const sig = await tx.send("));
+    expect(createFn.indexOf('toast.showTx(sig, { title: "Token created" })')).toBeGreaterThan(createReport);
+    // Refused: nothing was created, so no details prompt and no resume link.
+    const refused = createFn.indexOf('if (outcome === "failed") return;');
+    expect(refused).toBeGreaterThan(createReport);
+    expect(createFn.indexOf("await saveDetails(picked.assetPda")).toBeGreaterThan(refused);
+    expect(createFn.lastIndexOf("router.replace(")).toBeGreaterThan(refused);
+    expect(createFn).toContain('title: "Token not created"');
   });
 
   it("the conversion route's requirement is what the marker sets: an on-chain convertible_to", () => {
@@ -1463,5 +1501,30 @@ describe("surfaces", () => {
     expect(flow.indexOf("simulateTokenize(")).toBeLessThan(flow.indexOf("tx.send("));
     expect(flow).toContain("waitForFinalizedAsset(");
     expect(flow).toContain("pickTokenizeAssetId(");
+  });
+
+  it("the Create-asset modal ('Other asset types') signs, waits for finality, then posts the profile — never right after the send", () => {
+    // Review: upsertAssetProfile ran as soon as tx.send returned (submission),
+    // while /api/profiles/upsert reads the asset at `finalized` → "Profile
+    // access denied", and the typed name, summary and facts were lost.
+    const m = src("components/asset-create-modal.tsx");
+    const send = m.indexOf("await tx.send(");
+    const sign = m.indexOf("createSignedRequest(");
+    const wait = m.indexOf("waitForFinalizedAsset(");
+    const post = m.indexOf("postSignedRequest(");
+    expect(sign).toBeGreaterThan(-1);
+    expect(sign).toBeLessThan(wait);
+    expect(wait).toBeLessThan(post);
+    // saveProfile is defined above create(); create() calls it after the send.
+    expect(m.indexOf("await saveProfile(assetPda, row,")).toBeGreaterThan(send);
+    expect(m).not.toContain("upsertAssetProfile(");
+    expect(m).not.toContain("admin console");
+    expect(m).toMatch(/const busy = tx\.isSending \|\| working !== null/);
+    // A refused or failed save keeps the modal open with the typed values and offers the save alone.
+    expect(m).toContain("setPendingProfile({ assetPda, row })");
+    expect(m).toContain('<fieldset disabled={pendingProfile !== null}');
+    expect(m).toContain('{pendingProfile ? "Save profile" : "Create asset"}');
+    expect(m).toContain("Waiting for the network to finalize the asset");
+    for (const variant of ["issuer", "admin"]) expect(m).toMatch(new RegExp(`${variant}:\\s*\\n?\\s*"The asset exists on chain\\.`));
   });
 });

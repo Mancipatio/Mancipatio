@@ -25,7 +25,7 @@ import { listSpvs, spvCapacity, type SpvCapacity, type SpvRow } from "@/lib/spvs
 import { signedUpload } from "@/lib/storage-client";
 import { SkeletonCard } from "@/components/skeleton";
 import { TokenizeChecklist } from "@/components/tokenize-checklist";
-import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { CONVERSION_TARGET_LABEL, UNLINKED_TARGET_LABEL, classKey, unlinkedMarkerKeys } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useToast } from "@/lib/toast";
 import { navHrefVisible } from "@/lib/pilot-scope";
@@ -1297,7 +1297,9 @@ function ShareClassesBlock({
         .sort((a, b) => a.classIndex - b.classIndex),
     [data, assetPda],
   );
-  // The conversion marker (C2) is labelled for what it is, not "pending mint".
+  // The conversion marker (C2) is labelled for what it is, not "pending mint";
+  // one nothing converts into yet says so (synchronous, lib/conversion-target).
+  const unlinked = useMemo(() => unlinkedMarkerKeys(linked), [linked]);
   const conversionTargets = useConversionTargets(linked);
 
   return (
@@ -1345,7 +1347,9 @@ function ShareClassesBlock({
                       : "—"}
                   </td>
                   <td className="px-3 py-2 text-xs">
-                    {conversionTargets.has(classKey(sc))
+                    {unlinked.has(classKey(sc))
+                      ? UNLINKED_TARGET_LABEL
+                      : conversionTargets.has(classKey(sc))
                       ? CONVERSION_TARGET_LABEL
                       : sc.supplyLocked
                         ? "locked"
