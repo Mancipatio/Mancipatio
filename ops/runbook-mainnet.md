@@ -376,7 +376,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
 | D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The launch mode's mask (§8, "Pause mask by mode") is set on `/admin/platform` and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
-| D11 | **Talas 7 go-live**. **Prerequisites**, each noted in the launch-day record, with the documents it rests on filed outside the repository (`~/mancipatio-mainnet/legal/`): (a) trading through Manci is live under its Terms: §20 steps 1–6 done (after leaving KYC-only mode), the Terms version that offers it verified on `/legal/terms` and `/legal/privacy` (§20 step 3) and 0x04 read back clear (§20 step 6), or the owner has recorded that trading stays off at launch (the case on 2026-10-10: the site went public in KYC-only mode, every module off); (b) the owner has recorded which entity public users contract with, and `OPERATORS.mainnet` in `front/lib/legal/operator.ts` (its comment on who users contract with, `governingLaw` and `disputeResolution`) and the Terms in force match it; (c) the public copy listed in §17 that assumes the Serbian offering regime ("Serbian SPV" on `/risks` and elsewhere, the SPV and pledge text on `/legal-structure`, the "Serbian Securities Commission" badges and labels) is dealt with: the public-pages alignment (PR #73) merged and released, or counsel's written clearance of the current copy on file; (d) counsel has reviewed the rendered pages of the Terms version in force (§17 step 4), and the launch-day record notes that review as the `MAINNET_LEGAL_COPY_APPROVED` assertion for that version (the variable is not bound to a version, so it does not carry over to a new one by itself). Then: Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public) and the anonymous checks: `curl -sI https://www.manci.io/` 200, `/api/health` `ok:true` on `mainnet`, `/api/health/alarms` 200, `/.well-known/security.txt` 200, `manci.io` and `mancipatio.io` redirect to `www`. Only then the bypass: (1) `retry-scheduler-status.sql` shows the worker origin `https://www.manci.io` (the retry, alarm, sanctions and fx schedulers all call that one origin from `mancipatio_ops.retry_worker_config`; a `*.vercel.app` origin stays protected and would answer 401 without the bypass); (2) delete the Vault secret `mancipatio_vercel_bypass_mainnet` (Vault UI, never on a command line) and within about 10 minutes re-run `retry-`, `alarm-`, `sanctions-` and `fx-scheduler-status.sql`: each shows new successful runs, `/api/health/alarms` stays 200; (3) revoke the bypass secret in Vercel, remove every local copy, monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce. **Rollback** (protection back on): generate a **new** *Protection Bypass for Automation* secret in Vercel, put it in the Vault as `mancipatio_vercel_bypass_mainnet`, and only then switch protection back to *All Deployments* (in the other order every scheduler call answers 401: the alarms go 503, the sanctions list and the FX rate go stale) | owner + operator | §18 D, §14 step 11 |
+| D11 | **Talas 7 go-live**. **Prerequisites**, each noted in the launch-day record, with the documents it rests on filed outside the repository (`~/mancipatio-mainnet/legal/`): (a) trading through Manci is live under its Terms: §20 steps 1–6 done (after leaving KYC-only mode), the Terms version that offers it verified on `/legal/terms` and `/legal/privacy` (§20 step 3) and 0x04 read back clear (§20 step 6), or the owner has recorded that trading stays off at launch (the case on 2026-10-10: trading off at launch, 0x04 set on-chain); (b) the owner has recorded which entity public users contract with, and `OPERATORS.mainnet` in `front/lib/legal/operator.ts` (its comment on who users contract with, `governingLaw` and `disputeResolution`) and the Terms in force match it; (c) the public copy listed in §17 that assumes the Serbian offering regime ("Serbian SPV" on `/risks` and elsewhere, the SPV and pledge text on `/legal-structure`, the "Serbian Securities Commission" badges and labels) is dealt with: the public-pages alignment (PR #73) merged and released, or counsel's written clearance of the current copy on file; (d) counsel has reviewed the rendered pages of the Terms version in force (§17 step 4), and the launch-day record notes that review as the `MAINNET_LEGAL_COPY_APPROVED` assertion for that version (the variable is not bound to a version, so it does not carry over to a new one by itself). Then: Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public) and the anonymous checks: `curl -sI https://www.manci.io/` 200, `/api/health` `ok:true` on `mainnet`, `/api/health/alarms` 200, `/.well-known/security.txt` 200, `manci.io` and `mancipatio.io` redirect to `www`. Only then the bypass: (1) `retry-scheduler-status.sql` shows the worker origin `https://www.manci.io` (the retry, alarm, sanctions and fx schedulers all call that one origin from `mancipatio_ops.retry_worker_config`; a `*.vercel.app` origin stays protected and would answer 401 without the bypass); (2) delete the Vault secret `mancipatio_vercel_bypass_mainnet` (Vault UI, never on a command line) and within about 10 minutes re-run `retry-`, `alarm-`, `sanctions-` and `fx-scheduler-status.sql`: each shows new successful runs, `/api/health/alarms` stays 200; (3) revoke the bypass secret in Vercel, remove every local copy, monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce. **Rollback** (protection back on): generate a **new** *Protection Bypass for Automation* secret in Vercel, put it in the Vault as `mancipatio_vercel_bypass_mainnet`, and only then switch protection back to *All Deployments* (in the other order every scheduler call answers 401: the alarms go 503, the sanctions list and the FX rate go stale) | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
 The first public user can arrive only after D11. A failure at any step stops
@@ -389,8 +389,9 @@ Manci in §20 (its Terms and flag in one build, then 0x04) and conversion
 into registered ownership in §21, whose holder-facing steps need the
 public site, because the holder signs in, submits KYC and requests the
 conversion on `www.manci.io`. D11 was done on 2026-10-10 with trading off
-(prerequisite (a), second branch): the site went public in KYC-only mode,
-every module off.
+(prerequisite (a), second branch; the Platform read 0x7E). KYC-only mode,
+decided that day, reached `main` with #78 on 2026-10-11 and the live site
+through the releases made from `main` (`README.md` "Status").
 
 ## 1. Roles and budget
 
@@ -3959,9 +3960,18 @@ build runs in KYC-only mode by default (`ops/env-vars.md`, "KYC-only mode
 and offered asset classes"): while it is on, `moduleEnabled` reads every
 module off whatever `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` says, and the
 chain stays at **0x7F** (§8, "Pause mask by mode"; the trading row is the
-mode's mask minus 0x04, cleared last). Leave the mode first, by the steps
-of "Leaving KYC-only mode later" in that file, with this module's flag set
-in Vercel Production before that redeploy (its step 2); then this section.
+mode's mask minus 0x04, cleared last). The mode is left by the steps of
+"Leaving KYC-only mode later" in that file, and this module's flag stays
+unset in the redeploy that leaves the mode unless that build also carries
+the Terms that offer trading (its step 1): a redeploy of the current
+release would ship the flag under Terms that do not. Either (a) leave the
+mode first, with `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` unset, and set the flag only in
+step 1 below, for the release that carries the Terms; or (b) leave the
+mode in that same release, by setting `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`
+together with the flag in step 1 below (steps 4–6 of "Leaving KYC-only
+mode later" then follow step 3 below). The rest of this section applies
+in both cases.
 
 *Trading through Manci* is the secondary module: OTC deals that an Admin
 mediates in escrow (`/portfolio/deals`, `/admin/otc`), offers anyone can
@@ -4065,15 +4075,16 @@ clear.
 1. **Flag** (owner): Vercel → the mainnet project → Settings → Environment
    Variables → Production: `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true`
    (`true`, `1`, `yes`, `on` in any case mean on; `false`, `0`, `no`, `off`
-   or unset mean off on mainnet; any other string fails the build), with
-   `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` already there (the first
-   prerequisite). When conversion ships in the same release, set
-   `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` now too (§21). Leave
-   `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` and the other module flags unset.
-   Do not redeploy on its own: step 2 is the build. Do steps 1 and 2 in one
-   sitting: a build of an older commit in between (a manual redeploy) would
-   ship the flag under the old Terms; if one happens, unset the flag at
-   once.
+   or unset mean off on mainnet; any other string fails the build), and
+   `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`: already there when the mode was
+   left first (option (a) of the first prerequisite), set now, together
+   with the flag, when this release leaves it (option (b)). When conversion
+   ships in the same release, set `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true`
+   now too (§21). Leave `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` and the
+   other module flags unset. Do not redeploy on its own: step 2 is the
+   build. Do steps 1 and 2 in one sitting: a build of an older commit in
+   between (a manual redeploy) would ship the flag under the old Terms; if
+   one happens, unset the flag at once.
 2. **Release** (owner): `ops/release-checklist.md`: the candidate check
    (`RELEASE_GUARD_STRICT=1 bash scripts/check-release-ancestry.sh <sha>`
    from the repository root), then the push of that tip of `main` to
@@ -4136,9 +4147,15 @@ program open to direct calls.
 ## 21. Conversion into registered ownership
 
 **First prerequisite: the platform has left KYC-only mode**
-(`ops/env-vars.md`, "Leaving KYC-only mode later", with
-`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` set in Vercel Production
-before that redeploy, its step 2). While the mode is on,
+(`ops/env-vars.md`, "Leaving KYC-only mode later"). This module's flag
+stays unset in the redeploy that leaves the mode unless that build also
+carries the Terms that offer conversion (its step 1): either leave the
+mode first, with `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` and
+`NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` unset, and set the flag only in
+§20 step 1 for the release that carries the Terms (prerequisite 3 below),
+or leave the mode in that same release, with
+`NEXT_PUBLIC_FEATURE_KYC_ONLY=false` set together with the flag in §20
+step 1. While the mode is on,
 `/api/conversion/create` answers 403, the approval's `open_custody_vault`
 is refused before the wallet as a module entry (`MODULE_FLOWS`) and the
 holder's `deposit_to_custody_vault` by `KYC_ONLY_FLOWS`; only the exits
@@ -4194,7 +4211,7 @@ What the program does:
 1. On `main`, reviewed and merged: a Terms version that offers conversion
    into company shares, with counsel's confirmation of the exact text
    (§17; it may be the same version as §20). The conversion gate is on
-   `main` since #80 (2026-10-18): the admin's conversion open
+   `main` since #72 (2026-10-10): the admin's conversion open
    (`open_custody_vault` of type DeliveryEscrow, sent by *Approve & open
    vault*) declares its purpose (`withGateFacts`) and passes under the
    conversion module while every other DeliveryEscrow open stays under the

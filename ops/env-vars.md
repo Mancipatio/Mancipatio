@@ -32,12 +32,12 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
-| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until KYC-only mode is left ("Leaving KYC-only mode later": set it in Production before that redeploy) and the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with pause bit 0x04 cleared last (runbook §20). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with KYC-only mode off (left before, or in that same build with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`; runbook §20 step 1) and pause bit 0x04 cleared last (runbook §20). It stays unset in a redeploy that leaves KYC-only mode unless that build also carries those Terms ("Leaving KYC-only mode later" step 1). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until KYC-only mode is left ("Leaving KYC-only mode later" step 2: set it in Production before that redeploy) and the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms. Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms, with KYC-only mode off (left before, or in that same build with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`; runbook §21, §20 step 1). It stays unset in a redeploy that leaves KYC-only mode unless that build also carries those Terms ("Leaving KYC-only mode later" step 1). Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | leave unset (off): physical delivery is not offered. Never `true` to let a conversion through (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
@@ -111,9 +111,16 @@ A module flag ships `true` only together with Terms that offer the module:
 the flag goes into the **same production build** as those Terms, and the
 program's pause bit is cleared only after that build is verified (runbook
 §20 for trading through Manci, §21 for conversion, where 0x08 is cleared
-only for a short window per conversion). Both come after leaving KYC-only
-mode ("Leaving KYC-only mode later" below: the switches go into Vercel
-Production before that redeploy). State on 2026-10-18: Vercel Production
+only for a short window per conversion). Both need KYC-only mode off; a
+module switch goes into Vercel Production before a redeploy only when that
+build carries Terms that offer the module (step 1 of "Leaving KYC-only
+mode later" below). So a module flag stays unset in the redeploy that
+leaves KYC-only mode unless that build also carries those Terms. Either
+leave the mode first, with `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` unset, and set the flag only in
+runbook §20 step 1 for the release that carries the Terms; or leave the
+mode in that same release, with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` set
+together with the flag in §20 step 1. State on 2026-10-18: Vercel Production
 has no module switch set (`NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
 `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` were deleted that day), and
 `NEXT_PUBLIC_FEATURE_KYC_ONLY` and `NEXT_PUBLIC_ASSET_CLASSES` are unset:
