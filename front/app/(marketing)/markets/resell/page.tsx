@@ -4,6 +4,7 @@ import { SkeletonTable } from "@/components/skeleton";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { moduleRouteState } from "@/lib/pilot-scope";
 import { ResellBoard } from "./resell-board";
+import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
 
 export const metadata = {
   title: "Resell board · Manci",
@@ -28,6 +29,7 @@ export default function ResellPage() {
       </ButtonRow>
     </PageHeader>
     <Section>
+      <RuntimePauseNotice path="/markets/resell" />
       <Suspense fallback={<SkeletonTable rows={4} cols={6} />}><ResellBoard /></Suspense>
     </Section>
     <Section>

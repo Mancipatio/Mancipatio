@@ -14,7 +14,9 @@ describe("admin area gate (A)", () => {
     const layout = src("app/admin/layout.tsx");
     expect(layout).toContain("<AdminGate>");
     expect(layout).not.toContain('<RequireRole role="admin">');
-    expect(layout).toContain("adminRouteRequirement(item.href)");
+    // The menu entries (their own module) carry the same path table.
+    expect(layout).toContain("<AdminNavGroups groups={ADMIN_MENU} />");
+    expect(src("app/admin/admin-menu.tsx")).toContain("adminRouteRequirement(item.href)");
     const gate = src("components/admin-gate.tsx");
     expect(gate).toContain("adminRouteRequirement(pathname)");
   });

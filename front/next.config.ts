@@ -12,6 +12,7 @@ import {
   type MainnetLegalSlots,
 } from "./lib/legal/readiness";
 import { GEOBLOCK_ENV, parseGeoblockList } from "./lib/geoblock";
+import { ASSET_CLASSES_ENV, ASSET_CLASS_SLUGS, parseAssetClassList } from "./lib/asset-classes"; // import-free, like lib/geoblock.ts
 
 // `next build`'s phase (next/constants PHASE_PRODUCTION_BUILD). Spelled out
 // rather than imported so this file loads no package at config time.
@@ -488,6 +489,8 @@ export const FEATURE_FLAG_NAMES = [
   "NEXT_PUBLIC_FEATURE_VESTING", "NEXT_PUBLIC_FEATURE_RIGHTS",
   "NEXT_PUBLIC_FEATURE_DISTRIBUTIONS", "NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION",
   "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
+  // KYC-only mode (lib/features.ts kycOnly): on on mainnet unless it reads as off.
+  "NEXT_PUBLIC_FEATURE_KYC_ONLY",
 ];
 
 /**
@@ -525,6 +528,20 @@ export function assertBuildGeoblock(phase: string, env: Record<string, string | 
         '(comma-separated ISO 3166 codes, e.g. "KP,IR,CU,SY,UA-43,UA-40"), or to "none" when counsel ' +
         "decided to block none (ops/env-vars.md, Geoblocking).",
     );
+  }
+}
+
+/**
+ * The asset classes Manci offers (lib/asset-classes.ts): any production
+ * build refuses a value that names no class (a typo would silently hide or
+ * show classes). Unset is a decision already made: equity on mainnet, every
+ * class elsewhere.
+ */
+export function assertBuildAssetClasses(phase: string, env: Record<string, string | undefined> = process.env): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const config = parseAssetClassList(env[ASSET_CLASSES_ENV]);
+  if (!config.ok) {
+    throw new Error(`${ASSET_CLASSES_ENV}: ${config.error}. Use "all" or comma-separated classes: ${ASSET_CLASS_SLUGS.join(", ")} (or leave it unset: equity on mainnet, every class elsewhere).`);
   }
 }
 
@@ -693,5 +710,7 @@ export default function config(phase: string): NextConfig {
   assertBuildFeatureFlags(phase);
   // 8.5: counsel's geoblock list (or an explicit "none") on mainnet.
   assertBuildGeoblock(phase);
+  // The offered asset classes: a typo fails the build.
+  assertBuildAssetClasses(phase);
   return nextConfig;
 }

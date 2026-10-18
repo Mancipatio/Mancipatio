@@ -6,15 +6,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findIssuerPda,
   SaleStatus,
+  type Asset,
+  type AssetType,
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { withoutArchived } from "@/lib/archive-client";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
-import type { Asset } from "@/lib/generated/asset_registry";
 import { SkeletonTable } from "@/components/skeleton";
-import { navHrefVisible } from "@/lib/pilot-scope";
+import { assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
+import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
 import { visibleClassCount } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import {
@@ -27,11 +29,10 @@ import {
   SectionHead,
 } from "@/components/mx";
 
-// Derived from ASSET_TYPE_LABEL so the filter always mirrors the on-chain
-// AssetType enum order and covers all 8 categories.
+// Filter choices describe offered products; existing asset records remain readable.
 const TYPE_FILTER = [
   { v: "all", label: "All types" },
-  ...ASSET_TYPE_LABEL.map((label, i) => ({ v: String(i), label })),
+  ...ASSET_TYPES.filter((type) => assetClassOffered(type.slug)).map((type) => ({ v: String(type.enumValue), label: type.title })),
 ];
 
 export default function MarketplacePage() {
@@ -120,24 +121,34 @@ export default function MarketplacePage() {
     };
   }, [data, conversionTargets]);
 
+  // Primary sales paused (KYC-only mode, lib/pilot-scope.ts): no sales count,
+  // card or link, as on the overview.
+  const salesOn = navHrefVisible("/marketplace/launchpad");
+  const statItems = [
+    { k: "Issuers", v: stats?.issuers },
+    { k: "Verified issuers", v: stats?.verifiedIssuers },
+    { k: "Assets", v: stats?.assets },
+    { k: "Share classes", v: stats?.shareClasses },
+    ...(salesOn ? [{ k: "Active sales", v: stats?.activeSales }] : []),
+  ];
+  const marketCards = [
+    { href: "/marketplace/launchpad", title: "Primary sales", body: "Buy share-class units directly from issuers on the launchpad." },
+    { href: "/marketplace/otc", title: "OTC offers", body: "Buy from existing token holders through hook-aware OTC offers." },
+    { href: "/marketplace/governance", title: "Governance", body: "Track active proposals and read snapshot-based outcomes." },
+  ].filter((card) => navHrefVisible(card.href));
+
   return (
     <>
       <PageHeader
         eyebrow="Marketplace"
         title="Discover tokenized assets"
-        lede="Every asset registered on Manci — equity, debt, revenue share, real estate and more — backed by an on-chain custodial flow and a verified issuer."
+        lede={`Browse registered assets and review issuer information and documents${salesOn ? ", and find available primary sales" : ""}${navHrefVisible("/marketplace/otc") ? " and secondary offers" : ""}.`}
       />
 
       {/* Live stats */}
       <Section>
-        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule sm:grid-cols-5">
-          {[
-            { k: "Issuers", v: stats?.issuers },
-            { k: "Verified issuers", v: stats?.verifiedIssuers },
-            { k: "Assets", v: stats?.assets },
-            { k: "Share classes", v: stats?.shareClasses },
-            { k: "Active sales", v: stats?.activeSales },
-          ].map((s) => (
+        <dl className={`grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule ${salesOn ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+          {statItems.map((s) => (
             <div key={s.k} className="bg-mx-surface px-4 py-3.5">
               <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
                 {s.k}
@@ -168,7 +179,9 @@ export default function MarketplacePage() {
             onChange={(e) => setTypeFilter(e.target.value)}
             className="rounded-[3px] border border-mx-rule-strong bg-mx-surface px-3 py-2 text-sm text-mx-ink focus:border-mx-indigo focus:outline-none"
           >
-            {TYPE_FILTER.map((t) => (
+            {/* Offered asset classes only (lib/asset-classes.ts); mapped
+                through the enum, whose order differs from CATEGORY_SLUGS. */}
+            {TYPE_FILTER.filter((t) => t.v === "all" || assetClassOffered(slugForEnum(Number(t.v) as AssetType))).map((t) => (
               <option key={t.v} value={t.v}>
                 {t.label}
               </option>
@@ -256,33 +269,19 @@ export default function MarketplacePage() {
         )}
       </Section>
 
-      {/* Linked sections */}
-      <Section>
-        <SectionHead eyebrow="Trade & track" title="Where the market happens" />
-        <div className="mt-6">
-          <Grid cols={3}>
-            <Card
-              href="/marketplace/launchpad"
-              title="Primary sales"
-              body="Buy share-class units directly from issuers on the launchpad."
-            />
-            {navHrefVisible("/marketplace/otc") && (
-              <Card
-                href="/marketplace/otc"
-                title="OTC offers"
-                body="Buy from existing token holders through hook-aware OTC offers."
-              />
-            )}
-            {navHrefVisible("/marketplace/governance") && (
-              <Card
-                href="/marketplace/governance"
-                title="Governance"
-                body="Track active proposals and read snapshot-based outcomes."
-              />
-            )}
-          </Grid>
-        </div>
-      </Section>
+      {/* Linked sections: only the markets in scope (lib/pilot-scope.ts). */}
+      {marketCards.length > 0 && (
+        <Section>
+          <SectionHead eyebrow="Trade & track" title="Where the market happens" />
+          <div className="mt-6">
+            <Grid cols={3}>
+              {marketCards.map((card) => (
+                <Card key={card.href} href={card.href} title={card.title} body={card.body} />
+              ))}
+            </Grid>
+          </div>
+        </Section>
+      )}
     </>
   );
 }

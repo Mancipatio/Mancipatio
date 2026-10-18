@@ -751,7 +751,7 @@ function SanctionsListPanel() {
               ? status.enforcement === "fail-closed"
                 ? `Screened routes refuse while a list is older than ${status.maxAgeHours} hours or empty (Solana ${status.network}).`
                 : `Solana ${status.network}: an unusable list is only logged; hits are still refused.`
-              : "Checked on every commit, purchase record, OTC request, resell listing, passport and verification."}
+              : "Checked on every commit, purchase record, OTC request, resell listing, conversion request, passport and verification."}
           </p>
         </div>
         <button

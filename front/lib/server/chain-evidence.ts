@@ -60,27 +60,124 @@ function evidenceSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(12_000);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
-async function finalizedTransaction(signature: string, signal?: AbortSignal) {
-  let tx;
-  try {
-    tx = await getServerRpc()
+
+/**
+ * The machine-readable code of AwaitingFinalizationError. The client reads
+ * the message's opening words (lib/chain-record-recovery
+ * isAwaitingFinalizationError) until siwsErrorResponse forwards `code`.
+ */
+export const AWAITING_FINALIZATION_CODE = "awaiting_finalization";
+export const AWAITING_FINALIZATION_MESSAGE = "Awaiting finalization";
+/**
+ * 409, and not a refusal for good: the server's node does not show the
+ * transaction — or the vault state it produced — as finalized yet. The
+ * client keeps its receipt and records again later, without sending
+ * anything again. Every "not yet" of the evidence routes is one of these.
+ */
+export class AwaitingFinalizationError extends SiwsError {
+  readonly code = AWAITING_FINALIZATION_CODE;
+  constructor(detail: string) {
+    super(409, `${AWAITING_FINALIZATION_MESSAGE}: ${detail}`);
+    this.name = "AwaitingFinalizationError";
+  }
+}
+/**
+ * A finalized read that comes back empty is repeated this often, this far
+ * apart (~6 s in all, well inside the routes' maxDuration of 60 s): the
+ * client records once its own node shows finalized, and the server's node
+ * may be a few seconds behind. Only an empty answer is retried; a read
+ * that fails is reported at once. The purchase path passes 0 retries: its
+ * queue's worker comes back later (requirePurchaseEvidence).
+ */
+export const FINALIZED_READ_RETRIES = 3;
+export const FINALIZED_READ_RETRY_DELAY_MS = 2_000;
+export type FinalizedReadOptions = {
+  /** Ends the reads, and the waits between them, when it is aborted. */
+  signal?: AbortSignal;
+  /** How many times an empty finalized read is repeated (default FINALIZED_READ_RETRIES). */
+  retries?: number;
+};
+/** Resolves after `ms`; rejects at once with the signal's reason once it is aborted. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("The wait was aborted"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("The wait was aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+async function readUntilPresent<T>(
+  read: () => Promise<T>,
+  present: (value: T) => boolean,
+  options: FinalizedReadOptions = {},
+): Promise<T> {
+  const retries = options.retries ?? FINALIZED_READ_RETRIES;
+  let value = await read();
+  for (let retry = 0; !present(value) && retry < retries; retry++) {
+    await sleep(FINALIZED_READ_RETRY_DELAY_MS, options.signal);
+    value = await read();
+  }
+  return value;
+}
+/**
+ * The transaction at finalized, read again (`retries`, default
+ * FINALIZED_READ_RETRIES) while the node has nothing; then
+ * AwaitingFinalizationError, worded with whether the node already shows it
+ * as confirmed. 503 when the node cannot be read, or the signal ends the
+ * wait.
+ */
+export async function readFinalizedTransaction(
+  signature: string,
+  options: FinalizedReadOptions = {},
+) {
+  const read = (commitment: "finalized" | "confirmed") =>
+    getServerRpc()
       .getTransaction(toSignature(signature), {
-        commitment: "finalized",
+        commitment,
         encoding: "json",
         maxSupportedTransactionVersion: 0,
       })
-      .send({ abortSignal: evidenceSignal(signal) });
+      .send({ abortSignal: evidenceSignal(options.signal) });
+  let tx;
+  try {
+    tx = await readUntilPresent(
+      () => read("finalized"),
+      (value) => value !== null,
+      options,
+    );
   } catch {
     throw new SiwsError(
       503,
       "Transaction verification unavailable; retry recording without sending funds again",
     );
   }
-  if (!tx)
-    throw new SiwsError(
-      503,
-      "Transaction is not finalized or not yet available; retry recording without sending funds again",
-    );
+  if (tx) return tx;
+  let confirmed = false;
+  try {
+    confirmed = (await read("confirmed")) !== null;
+  } catch {
+    // Worded as not seen yet.
+  }
+  throw new AwaitingFinalizationError(
+    confirmed
+      ? "the transaction is confirmed but not finalized yet (about 13 seconds). Retry recording shortly; do not send it again"
+      : "the network does not show this transaction as finalized yet. Retry recording in about 30 seconds; do not send it again",
+  );
+}
+async function finalizedTransaction(
+  signature: string,
+  options: FinalizedReadOptions = {},
+) {
+  const tx = await readFinalizedTransaction(signature, options);
   if (!tx.meta || tx.meta.err !== null)
     throw new SiwsError(400, "Transaction did not complete successfully");
   return tx as ChainTransaction;
@@ -94,6 +191,18 @@ function proofError(error: unknown): never {
     "On-chain evidence could not be verified; try again",
   );
 }
+/**
+ * The purchase path's "not finalized yet" stays a 503 (the wording from
+ * before the typed 409 existed): the purchase queue
+ * (lib/server/purchase-records.ts processPurchaseJob) marks a job whose
+ * evidence check answered 4xx invalid for good — only pending jobs are
+ * retried by the worker — and the launchpad records a buy right after the
+ * send, so nearly every first record arrives before finalization and must
+ * stay a pending job (202, finished by the worker). The custody routes keep
+ * AwaitingFinalizationError: their client retries, sending nothing again.
+ */
+export const PURCHASE_NOT_FINALIZED_MESSAGE =
+  "Transaction is not finalized or not yet available; retry recording without sending funds again";
 export async function requirePurchaseEvidence(
   signature: string,
   salePda: string,
@@ -103,10 +212,12 @@ export async function requirePurchaseEvidence(
 ) {
   try {
     signal?.throwIfAborted();
-    const tx = await finalizedTransaction(
-      transactionSignature(signature),
+    // One finalized read, no repeats: the queue's worker is the retry, and
+    // the record route answers 202 at once.
+    const tx = await finalizedTransaction(transactionSignature(signature), {
       signal,
-    );
+      retries: 0,
+    });
     signal?.throwIfAborted();
     const sale = await fetchMaybeSale(getServerRpc(), address(salePda), {
       commitment: "finalized",
@@ -172,9 +283,12 @@ export async function requirePurchaseEvidence(
     );
     return { ...proof, asset: shareClass.data.asset.toString() };
   } catch (error) {
+    if (error instanceof AwaitingFinalizationError)
+      throw new SiwsError(503, PURCHASE_NOT_FINALIZED_MESSAGE);
     proofError(error);
   }
 }
+
 
 /** `Pubkey::default()` — the kyc_registry of a vault that pins none. */
 const UNPINNED_REGISTRY = "11111111111111111111111111111111";
@@ -222,18 +336,41 @@ export async function requireRequestVault(
         !/^\d+$/.test(String(row.vault_id)))
     )
       throw new SiwsError(400, "Custody vault ID must be an exact integer");
-    const vault = await fetchMaybeLiveCustodyVault(
-      getServerRpc(),
-      address(row.vault_pda),
-      {
-        commitment: "finalized",
-        minContextSlot,
+    const vaultPda = address(row.vault_pda);
+    const readVault = (commitment: "finalized" | "confirmed") =>
+      fetchMaybeLiveCustodyVault(getServerRpc(), vaultPda, {
+        commitment,
+        minContextSlot: commitment === "finalized" ? minContextSlot : undefined,
         abortSignal: AbortSignal.timeout(12_000),
-      },
-    );
+      });
+    // A vault opened moments ago reaches this node's finalized view a few
+    // seconds after the client's: an absent vault is read again before it
+    // counts as absent (a read bound to a context slot is already decided).
+    const vault =
+      minContextSlot === undefined
+        ? await readUntilPresent(
+            () => readVault("finalized"),
+            (value) => value.exists || value.closed,
+          )
+        : await readVault("finalized");
     if (vault.closed) throw new ClosedCustodyVaultError();
+    if (!vault.exists) {
+      // Not a terms mismatch: the vault is not finalized here yet (or not
+      // visible at all). The client records again later; it must not open
+      // another vault.
+      let confirmed = false;
+      try {
+        confirmed = (await readVault("confirmed")).exists;
+      } catch {
+        // Worded as not seen yet.
+      }
+      throw new AwaitingFinalizationError(
+        confirmed
+          ? "the custody vault is confirmed but not finalized yet (about 13 seconds). Retry recording shortly; do not open another vault"
+          : "the custody vault is not on the network yet. If it was just opened, retry recording in about 30 seconds; do not open another vault",
+      );
+    }
     if (
-      !vault.exists ||
       vault.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
       vault.data.shareClass !== row.share_class_pda ||
       vault.data.mint !== row.mint ||

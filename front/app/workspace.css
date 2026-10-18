@@ -1,5 +1,5 @@
 /* App workspace: dark navigation, quiet surfaces and green transactional accents. */
-[data-app] { --app-ink:#192b2a; --app-muted:#657267; --app-green:#147d64; --app-line:#e2e9e6; color:var(--app-ink); font-size:14px; }
+[data-app] { --app-ink:#192b2a; --app-muted:#657267; --app-green:#147d64; --app-line:#e2e9e6; --app-menu-bg:#dcefe2; --app-menu-line:#bfdac9; color:var(--app-ink); font-size:14px; }
 .app-shell { min-height:100vh; background:#f6f8f7; }
 .app-shell button,.app-shell a,.app-shell input,.app-shell select { -webkit-tap-highlight-color:transparent; }
 .app-shell button { cursor:pointer; }
@@ -34,18 +34,20 @@
 .app-sidebar-foot>a { display:flex; align-items:center; justify-content:center; background:#fff; color:var(--app-green); font-size:12px; font-weight:600; padding:9px 12px; border-radius:6px; box-shadow:0 1px 2px #00000033; transition:background .15s; }
 .app-sidebar-foot>a:hover { background:#e8f5ee; }
 .app-sidebar-foot>a:focus-visible { outline:2px solid #c8eaa9; outline-offset:2px; }
+.app-sidebar-foot>a+a { margin-top:-12px; }
+.app-follow-x-side { gap:8px; }
 .app-sidebar-foot>span { color:#87a398; display:flex; align-items:center; gap:7px; font-size:10px; }
 .app-sidebar-foot i { width:5px; height:5px; border-radius:50%; background:#86d3a9; }
 .app-body { position:relative; margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
-.app-topbar { display:none; height:60px; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:#fff; border-bottom:1px solid var(--app-line); }
+.app-topbar { display:none; height:60px; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:var(--app-menu-bg); border-bottom:1px solid var(--app-menu-line); }
 .app-breadcrumb,.app-topbar-actions { display:flex; align-items:center; gap:15px; font-size:12px; }
 .app-breadcrumb-root { color:#657267; }
 .app-breadcrumb-separator { color:#ccd3cf; }
 .app-topbar-actions { gap:18px; }
-.app-account { border-left:1px solid var(--app-line); padding-left:18px; }
+.app-account { display:flex; align-items:center; gap:10px; border-left:1px solid var(--app-line); padding-left:18px; }
 .app-content { padding:31px 32px 24px; flex:1; min-width:0; width:100%; max-width:1660px; margin:0 auto; outline:none; }
 .app-content.app-content--overview { padding-top:22px; }
-.app-floating-account { position:absolute; top:22px; right:32px; z-index:20; }
+.app-floating-account { position:absolute; top:22px; right:32px; z-index:20; display:flex; align-items:center; gap:9px; }
 .app-section-tabs ~ .app-floating-account, .app-floating-account:has(~ .app-section-tabs) { top:7px; }
 .overview-account { display:flex; align-items:center; }
 .app-content--portfolio>main,.app-content--issuer>main { width:100%; min-width:0; }
@@ -91,9 +93,10 @@
 @media(max-width:480px) {
   .app-admin-menu nav.is-open { grid-template-columns:minmax(0,1fr); }
 }
-.app-section-tabs { padding:0 250px 0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
-.app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:var(--app-muted); white-space:nowrap; }
-.app-section-tabs>a.is-active { border-color:var(--app-green); color:var(--app-green); }
+.app-section-tabs { padding:0 250px 0 32px; background:var(--app-menu-bg); border-bottom:1px solid var(--app-menu-line); display:flex; gap:23px; overflow-x:auto; }
+.app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:#365748; white-space:nowrap; }
+.app-section-tabs>a:hover { color:#12634b; }
+.app-section-tabs>a.is-active { border-color:#12634b; color:#12634b; font-weight:600; }
 .app-footer { padding:18px 32px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
 .app-footer>div { display:flex; flex-wrap:wrap; gap:8px 21px; }
 .app-footer-dot { margin:0 7px; }
@@ -245,3 +248,10 @@
 @media(prefers-reduced-motion:reduce) { [data-app] *,[data-app] *::before,[data-app] *::after { animation:none!important; transition:none!important; } }
 @media(max-width:1250px) { .app-floating-account { right:23px; } .app-section-tabs { padding-left:23px; } }
 @media(max-width:760px) { .app-topbar { display:flex; } .app-floating-account,.overview-account { display:none; } .app-section-tabs { padding:0 17px; } }
+/* Offered asset classes (lib/asset-classes.ts): fewer tiles than the eight,
+   then the non-interactive "More asset classes / Coming later" tile. Last in
+   the file so it overrides the media rules above; two columns on phones. */
+.overview-categories--few { grid-template-columns:repeat(auto-fill,minmax(170px,230px)); }
+.overview-category--later { cursor:default; background:transparent; border-style:dashed; color:#657267; }
+.overview-category--later:hover { background:transparent; border-color:var(--app-line); }
+@media(max-width:760px) { .overview-categories--few { grid-template-columns:repeat(2,minmax(0,1fr)); } }

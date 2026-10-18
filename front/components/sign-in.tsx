@@ -3,26 +3,28 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { WalletButton } from "@/app/wallet-button";
 import { IconArrowUpRight, IconCheck } from "@/components/icons";
 import { TurnstileWidget } from "@/components/turnstile-widget";
-import { completeEmailSignIn, startEmailSignIn, startGoogleSignIn, useSignedInAccount } from "@/lib/account-login";
+import { completeEmailSignIn, signedInAccountSnapshot, startEmailSignIn, startGoogleSignIn, useSignedInAccount } from "@/lib/account-login";
 import { TURNSTILE_ACTIONS, turnstileSiteKey } from "@/lib/turnstile";
-
-const SAFE_NEXT = /^\/(account|verify|apply|portfolio|marketplace)(\/[A-Za-z0-9/_-]*)?(\?[A-Za-z0-9=&_/-]*)?$/;
-
-function safeNext(value: string | null) {
-  return value && SAFE_NEXT.test(value) ? value : "/account";
-}
+import { detectNetwork } from "@/lib/network";
+import { safeLoginNext, signInWithWallet } from "@/lib/wallet-login";
+import { WalletSessionRequiredError } from "@/lib/siws-client";
 
 export function SignIn() {
   const router = useRouter();
   const search = useSearchParams();
-  const next = safeNext(search.get("next"));
+  const next = safeLoginNext(search.get("next"));
   const signedIn = useSignedInAccount();
+  const conn = useWalletConnection();
+  const client = useSolanaClient();
+  const mounted = useRef(false);
+  const walletInFlight = useRef(false);
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"email" | "google" | null>(null);
+  const [busy, setBusy] = useState<"email" | "google" | "wallet" | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Turnstile (only when this build has a site key): the current single-use
   // token, and a counter that remounts the widget for a new one after a send.
@@ -31,8 +33,39 @@ export function SignIn() {
   const [challengeRound, setChallengeRound] = useState(0);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
     if (signedIn.status === "signed_in") router.replace(next);
   }, [signedIn.status, next, router]);
+
+  async function walletSignIn() {
+    const session = conn.wallet;
+    const accountState = signedInAccountSnapshot();
+    if (!session || walletInFlight.current || accountState.status !== "signed_out") return;
+    const network = detectNetwork();
+    const isCurrent = () => {
+      const current = client.store.getState().wallet;
+      return mounted.current && detectNetwork() === network && signedInAccountSnapshot() === accountState &&
+        current.status === "connected" && current.session === session;
+    };
+    walletInFlight.current = true;
+    setBusy("wallet");
+    setError(null);
+    try {
+      await signInWithWallet(session, isCurrent);
+      if (isCurrent()) router.replace(next);
+    } catch (e) {
+      if (isCurrent()) setError(e instanceof WalletSessionRequiredError
+        ? "Wallet sign-in was not completed. Approve the message in your wallet to continue."
+        : e instanceof Error ? e.message : "Could not sign in with your wallet. Please try again.");
+    } finally {
+      walletInFlight.current = false;
+      if (mounted.current) setBusy(null);
+    }
+  }
 
   async function sendLink(event: FormEvent) {
     event.preventDefault();
@@ -71,7 +104,7 @@ export function SignIn() {
 
   return <div className="account-page verify-page">
     <header className="account-heading">
-      <div><p className="account-eyebrow">WELCOME</p><h1>Sign in<span>.</span></h1><p>Create your account or sign in with email or Google. No wallet needed to get started — add wallets whenever you are ready.</p></div>
+      <div><p className="account-eyebrow">WELCOME</p><h1>Sign in<span>.</span></h1><p>Create your account or sign in with email, Google or a wallet. No wallet is needed for email or Google sign-in.</p></div>
     </header>
     <section className="account-card">
       {error && <p className="account-notice account-notice--error" role="alert">{error}</p>}
@@ -103,6 +136,17 @@ export function SignIn() {
       </button>
       <div className="sign-in-divider"><span>or use a wallet</span></div>
       <WalletButton />
+      {conn.connected && conn.wallet && <div className="account-form-actions" style={{ marginTop: 14 }}>
+        <button type="button" className="account-button account-button--primary" onClick={() => void walletSignIn()}
+          disabled={busy !== null || signedIn.status !== "signed_out" || !conn.wallet.signMessage}>
+          {busy === "wallet" ? "Waiting for wallet…" : "Sign in with wallet"}<IconArrowUpRight size={15} />
+        </button>
+      </div>}
+      <p className="account-field-help" style={{ marginTop: 10 }}>
+        {conn.connected && conn.wallet && !conn.wallet.signMessage
+          ? "This wallet does not support message signing. Connect a wallet that does to sign in."
+          : "Connect your wallet, then approve a message to sign in. No transaction or network fee."}
+      </p>
       <p className="account-field-help" style={{ marginTop: 16 }}>
         By continuing you agree to the <Link href="/legal/terms" className="account-text-button">Terms of Service</Link> and the <Link href="/legal/privacy" className="account-text-button">Privacy Policy</Link>.
       </p>
@@ -128,7 +172,7 @@ export function EmailSignInLanding() {
     // Drop the one-time token from the address bar and history.
     window.history.replaceState(null, "", "/login/email");
     let next = "/account";
-    try { next = safeNext(window.sessionStorage.getItem("manci:login-next")); window.sessionStorage.removeItem("manci:login-next"); } catch { /* optional */ }
+    try { next = safeLoginNext(window.sessionStorage.getItem("manci:login-next")); window.sessionStorage.removeItem("manci:login-next"); } catch { /* optional */ }
     completeEmailSignIn(token).then(() => router.replace(next))
       .catch((e) => setError(e instanceof Error ? e.message : "This sign-in link is invalid or expired."));
   }, [token, router]);

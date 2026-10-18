@@ -6,11 +6,12 @@ import {
   Section,
   TextLink,
 } from "@/components/mx";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Quick answers — Manci",
   description:
-    "Find the right guide for buying, verification, token documents, vesting and issuing on Manci.",
+    `Find the right guide for buying, verification, token documents, ${navHrefVisible("/portfolio/vesting") ? "vesting " : ""}and issuing on Manci.`,
 };
 
 const QUESTIONS = [
@@ -24,14 +25,14 @@ const QUESTIONS = [
   {
     question: "What does a particular token give me?",
     answer:
-      "Read the documents attached to that issuance. The instrument comparison explains the categories; an issuance's own documents describe its specific terms.",
+      "Read the documents attached to that issuance. The asset guide explains the available instrument; an issuance's own documents describe its specific terms.",
     href: MX_ROUTES.whitepapers,
     link: "Find token documents",
   },
   {
     question: "Do I need to verify my identity to buy tokens?",
     answer:
-      "No. Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class requires an approved investor passport for the receiving wallet.",
+      `Buying tokens does not require identity verification unless the class is KYC-gated. Buying or receiving a KYC-gated class requires an approved investor passport for the receiving wallet.${navHrefVisible("/portfolio/conversion") ? " Converting tokens into company shares requires KYC." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
     href: MX_ROUTES.security,
     link: "Verification and transfer rules",
   },
@@ -41,6 +42,12 @@ const QUESTIONS = [
       "The OTC guide explains creating, funding and filling an offer, with a direct link to the trading screen.",
     href: "/solutions/otc",
     link: "OTC trading guide",
+  },
+  {
+    question: "Can I convert tokens I own into company shares?",
+    answer: "Verified holders can request conversion for eligible holdings. Review the issuance terms and track the request in Portfolio; ownership of a token does not complete the legal conversion by itself.",
+    href: "/portfolio/conversion",
+    link: "Token conversion",
   },
   {
     question: "Where do I check my vesting?",
@@ -90,7 +97,8 @@ export default function FaqPage() {
       />
       <Section>
         <Grid cols={2}>
-          {QUESTIONS.map((item) => (
+          {/* No answer that points into a module switched off on this network (lib/pilot-scope.ts). */}
+          {QUESTIONS.filter((item) => navHrefVisible(item.href)).map((item) => (
             <Card key={item.question} title={item.question} body={item.answer}>
               <p className="mt-4">
                 <TextLink href={item.href}>{item.link} →</TextLink>

@@ -30,13 +30,24 @@
 // proposals and votes, issuances, series, distributions, custody vaults).
 // What finishes, closes or pays out what already exists (cancels, expiries,
 // claims, withdrawals, the batches of an existing distribution) is in no
-// module, like the exits of a pause.
+// module, like the exits of a pause. Where the instruction data cannot tell
+// two modules apart (a conversion and a delivery open the same
+// DeliveryEscrow), the page that builds the instruction declares what it is
+// for (withGateFacts), and the gate reads that declaration.
+//
+// KYC-only mode (lib/features.ts kycOnly) refuses more on top of the
+// modules: KYC_ONLY_FLOWS below lists the entries of primary sales and
+// issuance (no module switch of their own) and the follow-up entries into
+// what a module started. It is read first, and only while the mode is on, so
+// with the mode off the scope check is exactly MODULE_FLOWS.
 //
 // Enforcement stays on-chain (the pause) and on the server (the module
 // routes). This is a display gate: the pause read is cached for a few
 // seconds and fails OPEN (a failed read lets the transaction go on to the
-// program, which is the authority). Exits never read the flags, so only the
-// instructions below are ever held back.
+// program, which is the authority). The flags are read only for an
+// instruction with a pause flow (hasPauseFlow): exits and the custody
+// recordings never read them, so only the instructions below are ever held
+// back.
 //
 // Called for every wallet transaction from lib/verified-solana-client.ts
 // (prepare and prepareAndSend, before any wallet prompt); pages that want to
@@ -45,6 +56,8 @@
 
 import type { Address } from "@solana/kit";
 import {
+  kycOnly,
+  KYC_ONLY_MESSAGE,
   moduleDisabledMessage,
   moduleEnabled,
   type PilotModule,
@@ -78,13 +91,47 @@ import {
 const Ix = AssetRegistryInstruction;
 
 /**
+ * What a custody vault open is for, when the vault type alone cannot say.
+ * Conversion into company shares and physical delivery both open a
+ * DeliveryEscrow with BurnAndAttest (ConversionPending is retired on-chain:
+ * VaultTypeRetired, 6142), so the instruction data is the same for both. The
+ * page that builds a conversion open declares it (withGateFacts); a
+ * DeliveryEscrow open without that declaration is a delivery.
+ */
+export type CustodyPurpose = "conversion";
+
+/**
  * What a conditional check may look at: the instruction's data (null when a
  * page asks about an instruction it has not built yet), and facts a page
- * knows about the accounts the instruction will name (the sale's raise type).
- * A field is added here when a new conditional check needs it.
+ * knows about the accounts the instruction will name (the sale's raise type)
+ * or about what the instruction is for (a custody vault's purpose). A field
+ * is added here when a new conditional check needs it.
  */
-export type GateFacts = { raiseType?: RaiseType };
+export type GateFacts = { raiseType?: RaiseType; custodyPurpose?: CustodyPurpose };
 export type GateSubject = { data: Uint8Array | null; facts: GateFacts };
+
+/** Facts a page declared about one instruction object (withGateFacts). */
+const DECLARED_FACTS = new WeakMap<object, GateFacts>();
+
+/**
+ * Declares `facts` about `instruction` for the gates in this file, which
+ * read them when the transaction goes through lib/verified-solana-client.ts.
+ * Returns the same instruction, so a builder's result can be wrapped where
+ * it is built. The declaration belongs to this object: a copy of the
+ * instruction carries none and is gated as if nothing had been declared.
+ * Display gate only, like the rest of this file: the program and the
+ * server routes stay the authority.
+ */
+export function withGateFacts<T extends object>(instruction: T, facts: GateFacts): T {
+  DECLARED_FACTS.set(instruction, { ...DECLARED_FACTS.get(instruction), ...facts });
+  return instruction;
+}
+
+/** The facts declared about `instruction` (none: {}). */
+export function declaredGateFacts(instruction: object): GateFacts {
+  return DECLARED_FACTS.get(instruction) ?? {};
+}
+
 /** true: held back; false: not; null: cannot tell here (the program decides). */
 export type GateCondition = (subject: GateSubject) => boolean | null;
 
@@ -195,16 +242,16 @@ export function heldBit(
 
 type InstructionLike = { programAddress: Address | string; data?: Uint8Array | ArrayLike<number> };
 
-/** Each instruction of this program in `instructions`, identified, with its data. */
-function registryInstructions(
-  instructions: readonly InstructionLike[],
-): { instruction: AssetRegistryInstruction; data: Uint8Array }[] {
-  const out: { instruction: AssetRegistryInstruction; data: Uint8Array }[] = [];
+type RegistryInstruction = { instruction: AssetRegistryInstruction; data: Uint8Array; declared: GateFacts };
+
+/** Each instruction of this program in `instructions`, identified, with its data and declared facts. */
+function registryInstructions(instructions: readonly InstructionLike[]): RegistryInstruction[] {
+  const out: RegistryInstruction[] = [];
   for (const ix of instructions) {
     if (ix.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || !ix.data) continue;
     const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(ix.data);
     try {
-      out.push({ instruction: identifyAssetRegistryInstruction(data), data });
+      out.push({ instruction: identifyAssetRegistryInstruction(data), data, declared: declaredGateFacts(ix) });
     } catch {
       // Not an instruction of this program version: the program decides.
     }
@@ -222,8 +269,8 @@ export function pausedInstruction(
   instructions: readonly InstructionLike[],
   facts: GateFacts = {},
 ): { instruction: AssetRegistryInstruction; bit: number } | null {
-  for (const { instruction, data } of registryInstructions(instructions)) {
-    const bit = heldBit(flags, instruction, { data, facts });
+  for (const { instruction, data, declared } of registryInstructions(instructions)) {
+    const bit = heldBit(flags, instruction, { data, facts: { ...facts, ...declared } });
     if (bit !== null) return { instruction, bit };
   }
   return null;
@@ -233,9 +280,19 @@ export function pausedInstruction(
 export const PAYOUT_MODULES_OFF_MESSAGE =
   "Startup raises, yield routing and Rights-Token issuances and milestones (the payout modules) are switched off on Manci. Nothing was sent to your wallet.";
 
-/** The user-facing refusal for a paused bit (the program's own wording, plus the area). */
+/**
+ * The refusal for the custody entry (0x08): on mainnet the bit is set
+ * between conversions and cleared only for a request's own window (the
+ * conversion runbook), so a deposit or a new escrow outside it meets a
+ * closed window, not an emergency.
+ */
+export const CUSTODY_ENTRY_CLOSED_MESSAGE =
+  "Custody entry is closed: deposits and new escrows open only while Manci opens the window for your request. Nothing was sent to your wallet. Ask Manci to open it, then try again.";
+
+/** The user-facing refusal for a paused bit (the program's own wording, plus the area; the payout modules and the custody window in their own words). */
 export function pausedFlowMessage(bit: number): string {
   if (bit === PAUSE_PAYOUT_MODULES) return PAYOUT_MODULES_OFF_MESSAGE;
+  if (bit === PAUSE_CUSTODY_ENTRY) return CUSTODY_ENTRY_CLOSED_MESSAGE;
   const flag = PAUSE_FLAGS.find((f) => f.bit === bit);
   const area = flag ? `${flag.label} is paused on Manci (emergency pause). ` : "Manci has temporarily paused this action (emergency pause). ";
   return `${area}Nothing was sent to your wallet. ${PAUSE_EXITS_OPEN}`;
@@ -272,6 +329,18 @@ const vaultOfType = (type: VaultType): GateCondition => ({ data }) => {
   }
 };
 
+/**
+ * A DeliveryEscrow open whose declared purpose is (or is not) a conversion
+ * (null: the data could not be read). The admin's approval of a conversion
+ * request declares "conversion" (/admin/custody ApproveConversionModal);
+ * every other DeliveryEscrow open is a physical delivery.
+ */
+const deliveryEscrowFor = (conversion: boolean): GateCondition => (subject) => {
+  const escrow = vaultOfType(VaultType.DeliveryEscrow)(subject);
+  if (escrow !== true) return escrow;
+  return (subject.facts.custodyPurpose === "conversion") === conversion;
+};
+
 /** Module switch → the instructions that start its activity. The one place to add a module's entry. */
 export const MODULE_FLOWS: readonly ModuleFlow[] = [
   {
@@ -282,8 +351,12 @@ export const MODULE_FLOWS: readonly ModuleFlow[] = [
   { module: "vesting", instructions: [Ix.CreateVestingSeries] },
   { module: "rights", instructions: [Ix.CreateRightsIssuance] },
   { module: "distributions", instructions: [Ix.CreateDistribution, Ix.RouteYield] },
-  { module: "custodyConversion", instructions: [Ix.OpenCustodyVault], when: vaultOfType(VaultType.ConversionPending) },
-  { module: "custodyDelivery", instructions: [Ix.OpenCustodyVault], when: vaultOfType(VaultType.DeliveryEscrow) },
+  // Conversion and delivery escrows are the same on-chain (DeliveryEscrow,
+  // BurnAndAttest); the declared purpose tells them apart. A ConversionPending
+  // open is in no module: the program refuses it (VaultTypeRetired, 6142),
+  // and the simulation gate shows that refusal before the wallet opens.
+  { module: "custodyConversion", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(true) },
+  { module: "custodyDelivery", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(false) },
 ];
 
 /** The switched-off module that holds `instruction` back for `subject`, or null. */
@@ -300,13 +373,17 @@ export function heldModule(
   return null;
 }
 
-/** The first instruction a switched-off module holds back, as { instruction, module }, or null. */
+/**
+ * The first instruction a switched-off module holds back, as { instruction,
+ * module }, or null. Each instruction is judged with the facts declared
+ * about it (withGateFacts).
+ */
 export function outOfScopeInstruction(
   instructions: readonly InstructionLike[],
   network: Network = detectNetwork(),
 ): { instruction: AssetRegistryInstruction; module: PilotModule } | null {
-  for (const { instruction, data } of registryInstructions(instructions)) {
-    const held = heldModule(instruction, { data, facts: {} }, network);
+  for (const { instruction, data, declared } of registryInstructions(instructions)) {
+    const held = heldModule(instruction, { data, facts: declared }, network);
     if (held) return { instruction, module: held };
   }
   return null;
@@ -324,11 +401,60 @@ export class ModuleDisabledFlowError extends Error {
   }
 }
 
-/** Throws ModuleDisabledFlowError when an instruction belongs to a switched-off module. No chain read. */
+// ── KYC-only mode: the on-chain entries it refuses on top of the modules ──
+
+/**
+ * While KYC-only mode is on (lib/features.ts kycOnly) every module is off,
+ * so MODULE_FLOWS above refuses its entries already; these are refused too:
+ * primary sales and issuance (no module switch; on-chain only PAUSE_PRIMARY
+ * 0x02 and PAUSE_ONBOARDING 0x01 stop them) and the follow-up entries into
+ * what a module started (a custody deposit, a vesting series' positions, its
+ * finalization and its escrow deposit). Like MODULE_FLOWS it has no wallet
+ * context: an admin's open_sale, mint_to_treasury, register_issuer,
+ * create_asset or share-class set-up is refused as well while the mode is
+ * on. Never listed: exits, the KYC registry (approve/revoke holder, registry
+ * authority), KYB decisions, the pause, custody recording
+ * (trigger/realize/return/revert), clawback, share-class configuration
+ * (set_convertible_to, update_mint_metadata), and the obligations of what
+ * exists (approve_vesting_tranche, post_update, cast_vault_vote).
+ */
+export const KYC_ONLY_FLOWS: readonly AssetRegistryInstruction[] = [
+  Ix.Buy, Ix.OpenSale, Ix.MintToTreasury,
+  Ix.RegisterIssuer, Ix.CreateAsset, Ix.AddShareClass, Ix.InitializeShareClassMint,
+  Ix.DepositToCustodyVault, Ix.AddVestingPosition, Ix.FinalizeVestingSeries, Ix.DepositToVestingEscrow,
+];
+
+/** The first instruction KYC-only mode refuses, or null (always null while the mode is off). */
+export function kycOnlyInstruction(
+  instructions: readonly InstructionLike[],
+  network: Network = detectNetwork(),
+): AssetRegistryInstruction | null {
+  if (!kycOnly(network)) return null;
+  for (const { instruction } of registryInstructions(instructions)) if (KYC_ONLY_FLOWS.includes(instruction)) return instruction;
+  return null;
+}
+
+/** Thrown before any wallet prompt for an entry KYC-only mode pauses. */
+export class KycOnlyFlowError extends Error {
+  readonly instruction: AssetRegistryInstruction;
+  constructor(instruction: AssetRegistryInstruction) {
+    super(`${KYC_ONLY_MESSAGE} Nothing was sent to your wallet.`);
+    this.name = "KycOnlyFlowError";
+    this.instruction = instruction;
+  }
+}
+
+/**
+ * Throws KycOnlyFlowError for an entry KYC-only mode pauses, then
+ * ModuleDisabledFlowError when an instruction belongs to a switched-off
+ * module. No chain read.
+ */
 export function assertInstructionsInScope(
   instructions: readonly InstructionLike[],
   network: Network = detectNetwork(),
 ): void {
+  const locked = kycOnlyInstruction(instructions, network);
+  if (locked !== null) throw new KycOnlyFlowError(locked);
   const hit = outOfScopeInstruction(instructions, network);
   if (hit) throw new ModuleDisabledFlowError(hit.module, hit.instruction, network);
 }
@@ -387,17 +513,28 @@ export function clearPauseFlagsCache(): void {
 }
 
 /**
+ * Whether any instruction of `instructions` has a pause flow (pauseMaskFor
+ * is not 0): only then is there anything the flags could hold back, and
+ * only then does the gate read them. Instructions of other programs, and
+ * ones this program does not recognize, have none.
+ */
+export function hasPauseFlow(instructions: readonly InstructionLike[]): boolean {
+  return registryInstructions(instructions).some(({ instruction }) => pauseMaskFor(instruction) !== 0);
+}
+
+/**
  * Throws PausedFlowError when one of `instructions` is held back by the
  * current pause flags; resolves otherwise, including when the flags could
- * not be read (fail open: the program is the authority).
+ * not be read (fail open: the program is the authority). Reads nothing for
+ * a transaction without a pause flow (an exit, a custody recording, another
+ * program's instructions).
  */
 export async function assertInstructionsNotPaused(
   rpc: unknown,
   instructions: readonly InstructionLike[],
   opts: { read?: PlatformReader; now?: number } = {},
 ): Promise<void> {
-  const gated = instructions.some((ix) => ix.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS);
-  if (!gated) return;
+  if (!hasPauseFlow(instructions)) return;
   const flags = await readPauseFlags(rpc, opts);
   if (flags === null || flags === 0) return;
   const hit = pausedInstruction(flags, instructions);

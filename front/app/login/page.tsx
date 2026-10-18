@@ -5,7 +5,7 @@ import { SignIn } from "@/components/sign-in";
 
 export const metadata: Metadata = {
   title: "Sign in · Manci",
-  description: "Sign in to Manci with your email or Google. No wallet needed to get started.",
+  description: "Sign in to Manci with email, Google or a wallet. No wallet needed for email or Google sign-in.",
 };
 
 export default function LoginPage() {

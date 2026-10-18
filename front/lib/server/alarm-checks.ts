@@ -78,6 +78,11 @@
 // Platform's first indexed transaction (Day D is over, S5c was forgotten).
 // The half of chain:inventory's rule that needs the role map (the final
 // Super Admin holds the platform) stays in chain:inventory.
+// custody-entry-open (high on mainnet, low elsewhere): Custody entry (bit
+// 0x08) is clear, which opens every custody vault open and deposit
+// platform-wide, for longer than its window: 30 minutes with no custody step
+// waiting, 2 hours while a holder's deposit or an approval is due
+// (custodyEntryOpenReport, beside primary-open-idle for 0x02).
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -112,7 +117,7 @@
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
+import { ASSET_REGISTRY_PROGRAM_ADDRESS, VaultState, VaultType } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
 import { defaultPaymentMint, paymentMintLabel } from "@/lib/payment-mints";
@@ -125,7 +130,9 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
-import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
+import {
+  EMERGENCY_PAUSE_BITS, PAUSE_CUSTODY_ENTRY, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags,
+} from "@/lib/pause-flags";
 import { isLiveSale, saleBuyState } from "@/lib/sale-liveness";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
@@ -639,6 +646,90 @@ export async function primaryIdleReport(sb: SupabaseClient, network: Network, si
   }
   return { ...base, state: "hold", evidence,
     summary: `Primary issuance (0x02) is open with ${idleText} for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
+}
+
+/** custody-entry-open: how long Custody entry (0x08) may stay open with no custody step waiting before it fails. */
+export const CUSTODY_ENTRY_IDLE_MAX_MS = 30 * 60_000;
+/** …and while a custody step is due (a request before its deposit, a DeliveryEscrow awaiting one). */
+export const CUSTODY_ENTRY_WAIT_MAX_MS = 2 * 3_600_000;
+/** The request statuses between the request and the holder's deposit: the steps the window is open for. */
+const CUSTODY_WAITING_STATUSES: readonly string[] = ["requested", "approved", "vault_opened"];
+
+/**
+ * custody-entry-open (the conversion window, runbook steps 5 and 8; high on
+ * mainnet, low elsewhere): Custody entry (bit 0x08) is global — while it is
+ * clear every Admin can open custody vaults of any type (delivery escrows
+ * included: open_custody_vault checks only the bit and an Admin record) and
+ * every delivery-escrow beneficiary can deposit — so it is cleared only for
+ * one conversion's vault open and deposit, and set again as soon as the
+ * deposit has landed (the burn, a cancel or a return never needs it). Clear
+ * for more than CUSTODY_ENTRY_IDLE_MAX_MS with nothing waiting fails; while
+ * a custody step is due (a conversion or delivery request in requested,
+ * approved or vault_opened, or a mirrored Active DeliveryEscrow with no
+ * deposit yet) it may stay open CUSTODY_ENTRY_WAIT_MAX_MS. "Open since" is
+ * the last indexed set_pause_flags that cleared 0x08 (the onchain:pause
+ * alert's evidence.clear_mask), else the Platform mirror row's updated_at,
+ * as primaryIdleReport does. Pass while 0x08 is set (nothing else is read);
+ * hold while no Platform is mirrored; null when the mirror cannot be read.
+ * Counts only: no wallet, PDA or amount reaches the evidence.
+ */
+export async function custodyEntryOpenReport(sb: SupabaseClient, network: Network, signal: AbortSignal, now = Date.now()): Promise<Report | null> {
+  const base = {
+    check: "custody-entry-open",
+    severity: (network === "mainnet" ? "high" : "low") as Severity,
+    category: "onchain" as const,
+    source: "onchain:custody-entry-open",
+  };
+  const platform = await sb.from("platforms").select("pause_flags,updated_at").eq("network", network)
+    .abortSignal(dbSignal(signal)).maybeSingle();
+  if (platform.error) return null;
+  const row = platform.data as { pause_flags?: number | null; updated_at?: string | null } | null;
+  const flags = row?.pause_flags;
+  if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
+  if ((flags & PAUSE_CUSTODY_ENTRY) !== 0) {
+    return { ...base, state: "pass", summary: "Custody entry is closed (0x08 set)", evidence: { pause_flags: flags } };
+  }
+  const [clears, vaults, conversions, deliveries] = await Promise.all([
+    sb.from("compliance_alerts").select("created_at,evidence").eq("network", network).eq("source", "onchain:pause")
+      .order("created_at", { ascending: false }).limit(20).abortSignal(dbSignal(signal)),
+    sb.from("custody_vaults").select("deposited").eq("network", network).eq("vault_type", VaultType.DeliveryEscrow)
+      .eq("state", VaultState.Active).limit(500).abortSignal(dbSignal(signal)),
+    sb.from("conversion_requests").select("id", { count: "exact", head: true }).eq("network", network)
+      .in("status", CUSTODY_WAITING_STATUSES).abortSignal(dbSignal(signal)),
+    sb.from("delivery_requests").select("id", { count: "exact", head: true }).eq("network", network)
+      .in("status", CUSTODY_WAITING_STATUSES).abortSignal(dbSignal(signal)),
+  ]);
+  // A read that fails: the check could not run (never a silent pass).
+  if (clears.error || vaults.error || conversions.error || deliveries.error) return null;
+  const lastClear = ((clears.data ?? []) as { created_at?: string; evidence?: { clear_mask?: unknown } | null }[])
+    .filter((a) => (Number(a.evidence?.clear_mask ?? 0) & PAUSE_CUSTODY_ENTRY) !== 0)
+    .map((a) => Date.parse(a.created_at ?? ""))
+    .find((t) => Number.isFinite(t));
+  const fallback = Date.parse(row?.updated_at ?? "");
+  const since = lastClear ?? (Number.isFinite(fallback) ? fallback : null);
+  const minutes = since === null ? null : Math.max(0, Math.floor((now - since) / 60_000));
+  // A vault whose deposit column cannot be read counts as awaiting its deposit (the column is NOT NULL).
+  const awaiting = ((vaults.data ?? []) as { deposited?: unknown }[]).filter((v) => {
+    const deposited = mirrorBigint(v.deposited);
+    return deposited === null || deposited === BigInt(0);
+  }).length;
+  const requests = (conversions.count ?? 0) + (deliveries.count ?? 0);
+  const limit = awaiting + requests > 0 ? CUSTODY_ENTRY_WAIT_MAX_MS : CUSTODY_ENTRY_IDLE_MAX_MS;
+  const evidence = {
+    pause_flags: flags,
+    open_since: since === null ? null : new Date(since).toISOString(),
+    minutes_open: minutes,
+    vaults_awaiting_deposit: awaiting,
+    requests_waiting: requests,
+  };
+  const what = `${awaiting} vault${awaiting === 1 ? "" : "s"} awaiting a deposit, ${requests} request${requests === 1 ? "" : "s"} waiting`;
+  const duration = minutes === null ? "an unknown time" : `${minutes} minutes`;
+  if (since === null || now - since > limit) {
+    return { ...base, state: "fail", evidence,
+      summary: `Custody entry (0x08) has been open for ${duration} (${what}): every Admin can open custody vaults (delivery escrows included) and every delivery-escrow beneficiary can deposit. Any Admin sets it again: /admin/platform → Custody entry → Pause` };
+  }
+  return { ...base, state: "hold", evidence,
+    summary: `Custody entry (0x08) has been open for ${duration} (${what}; fails after ${limit / 60_000})` };
 }
 
 /** Day D (runbook §0A, §4-§5) runs inside the bootstrap window: bootstrap-open fails once it is older than this (K1.11). */
@@ -1288,6 +1379,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => payoutModulesReport(sb, network, signal));
   await collect(() => bootstrapOpenReport(sb, network, signal, now));
   await collect(() => primaryIdleReport(sb, network, signal, now));
+  await collect(() => custodyEntryOpenReport(sb, network, signal, now));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,

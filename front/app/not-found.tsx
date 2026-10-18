@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Not found — Manci",
@@ -34,12 +35,15 @@ export default function NotFound() {
           >
             Marketplace
           </Link>
-          <Link
-            href="/issuer/onboarding"
-            className="rounded-lg border border-slate-300 px-4 py-2 text-slate-700 hover:border-slate-400"
-          >
-            Become an issuer
-          </Link>
+          {/* Not while issuance is paused (KYC-only mode, lib/pilot-scope.ts). */}
+          {navHrefVisible("/issuer/onboarding") && (
+            <Link
+              href="/issuer/onboarding"
+              className="rounded-lg border border-slate-300 px-4 py-2 text-slate-700 hover:border-slate-400"
+            >
+              Become an issuer
+            </Link>
+          )}
         </div>
       </div>
     </main>

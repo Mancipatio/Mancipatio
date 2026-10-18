@@ -16,6 +16,7 @@ import {
 } from "@solana-program/token-2022";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  fetchMaybeOffer,
   findAssetPda,
   getCancelOfferInstructionAsync,
   getCreateOfferInstructionAsync,
@@ -76,6 +77,78 @@ type ShareClassRef = {
   asset: Asset;
 };
 
+// ── Maker offer order ────────────────────────────────────────────────────────
+// Pure, no RPC; module-private because a page module exports only its page
+// (the natural home is lib/offer-order.ts). Exercised as source in
+// tests/otc-mobile-state-page-helpers.test.ts.
+
+/** `${shareClass}-${offerId}`: the key the page keys PDAs and archive merges by. */
+function offerKey(o: Pick<Offer, "shareClass" | "offerId">): string {
+  return `${o.shareClass.toString()}-${String(o.offerId)}`;
+}
+
+/** A row of the maker's table: a live offer, or an archived (rent-reclaimed) one. */
+type MakerOfferRow = {
+  offer: Offer;
+  closed: boolean;
+  /** Archive time of a closed row (indexer_closed_rows.closed_at), when known. */
+  closedAt?: string | null;
+};
+
+type MakerOfferRank = 0 | 1 | 2 | 3;
+
+/**
+ * Maker-side order of an offer: whatever still needs the maker's hand comes
+ * first. Offer ids come from randomAccountId, so they carry no age — "newest
+ * first" by id landed a new offer at a random row.
+ *   0  Open and not fully funded (Fund escrow is waiting)
+ *   1  Open and fully funded (takeable)
+ *   2  Filled, Cancelled or Expired, not archived (rent can be reclaimed)
+ *   3  archived (closed), including a stale-Open archive row
+ */
+function makerOfferRank(row: {
+  offer: Pick<Offer, "status" | "amount" | "deposited">;
+  closed: boolean;
+}): MakerOfferRank {
+  if (row.closed) return 3;
+  if (row.offer.status !== OfferStatus.Open) return 2;
+  return remainingDeposit(row.offer.amount, row.offer.deposited) > BigInt(0)
+    ? 0
+    : 1;
+}
+
+/**
+ * The pinned row (the offer just created in this session) first, then by
+ * rank; archived rows newest closedAt first (null last); remaining ties by
+ * offer id descending, so the order is stable between refreshes.
+ */
+function sortMakerOffers<T extends MakerOfferRow>(
+  rows: readonly T[],
+  pinnedKey: string | null,
+): T[] {
+  return rows.slice().sort((a, b) => {
+    if (pinnedKey !== null) {
+      const ap = offerKey(a.offer) === pinnedKey;
+      const bp = offerKey(b.offer) === pinnedKey;
+      if (ap !== bp) return ap ? -1 : 1;
+    }
+    const ra = makerOfferRank(a);
+    const rb = makerOfferRank(b);
+    if (ra !== rb) return ra - rb;
+    if (ra === 3) {
+      const ca = a.closedAt ?? null;
+      const cb = b.closedAt ?? null;
+      if (ca !== cb) {
+        if (ca === null) return 1;
+        if (cb === null) return -1;
+        return ca < cb ? 1 : -1;
+      }
+    }
+    if (a.offer.offerId === b.offer.offerId) return 0;
+    return a.offer.offerId < b.offer.offerId ? 1 : -1;
+  });
+}
+
 export default function MyOffersPage() {
   const conn = useWalletConnection();
   const client = useSolanaClient();
@@ -91,6 +164,10 @@ export default function MyOffersPage() {
   const tradingOn = moduleEnabled("secondaryTrading");
   const [confirmCancel, setConfirmCancel] = useState<Offer | null>(null);
   const [fundTarget, setFundTarget] = useState<Offer | null>(null);
+  // The offer created in this session, read back from the chain: pinned to
+  // the first row (the mirror can lag by about a minute) so the maker finds
+  // it and funds its escrow without hunting through the table.
+  const [justCreated, setJustCreated] = useState<Offer | null>(null);
   const [myShareClasses, setMyShareClasses] = useState<ShareClassRef[]>([]);
   const [shareClassByMint, setShareClassByMint] = useState<
     Map<string, ShareClass>
@@ -201,19 +278,28 @@ export default function MyOffersPage() {
 
   const myOffers = useMemo(() => {
     if (!data || !wallet) return [];
-    const live = data.offers
+    const live: MakerOfferRow[] = data.offers
       .filter((o) => o.maker.toString() === wallet.toString())
       .map((o) => ({ offer: o, closed: false }));
-    const liveKeys = new Set(
-      live.map((o) => `${o.offer.shareClass}-${o.offer.offerId}`),
+    const liveKeys = new Set(live.map((r) => offerKey(r.offer)));
+    // The chain-read row fills the gap until the indexed row appears; the
+    // indexed row then wins (as in mergeableArchivedOffers).
+    if (
+      justCreated &&
+      justCreated.maker.toString() === wallet.toString() &&
+      !liveKeys.has(offerKey(justCreated))
+    ) {
+      live.push({ offer: justCreated, closed: false });
+      liveKeys.add(offerKey(justCreated));
+    }
+    const closed: MakerOfferRow[] = closedOffers
+      .filter((r) => !liveKeys.has(offerKey(r.data)))
+      .map((r) => ({ offer: r.data, closed: true, closedAt: r.closedAt }));
+    return sortMakerOffers(
+      [...live, ...closed],
+      justCreated ? offerKey(justCreated) : null,
     );
-    const closed = closedOffers
-      .filter((r) => !liveKeys.has(`${r.data.shareClass}-${r.data.offerId}`))
-      .map((r) => ({ offer: r.data, closed: true }));
-    return [...live, ...closed].sort((a, b) =>
-      Number(b.offer.offerId - a.offer.offerId),
-    );
-  }, [data, wallet, closedOffers]);
+  }, [data, wallet, closedOffers, justCreated]);
 
   /**
    * Returns a terminal offer's rent to the maker (2D). Always its OWN
@@ -424,7 +510,7 @@ export default function MyOffersPage() {
           tradingOn={tradingOn}
         />
       ) : (
-        <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="mt-8 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -433,11 +519,12 @@ export default function MyOffersPage() {
                 <th className="px-4 py-3 text-right font-medium">Deposited</th>
                 <th className="px-4 py-3 text-right font-medium">Price</th>
                 <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {myOffers.map(({ offer: o, closed }, i) => {
+              {myOffers.map(({ offer: o, closed }) => {
+                const pinned =
+                  justCreated !== null && offerKey(o) === offerKey(justCreated);
                 // 2D: an archived row can keep a stale Open status (the
                 // terminal step and the reclaim were indexed together); a
                 // tombstoned offer is never open.
@@ -459,14 +546,83 @@ export default function MyOffersPage() {
                 const remaining = remainingDeposit(o.amount, o.deposited);
                 const fullyFunded = remaining === BigInt(0);
                 return (
-                  <tr key={i} className="text-slate-700">
+                  <tr
+                    key={offerKey(o)}
+                    className={
+                      pinned ? "bg-brand-50/40 text-slate-700" : "text-slate-700"
+                    }
+                  >
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">
                         {asset?.name ?? "—"}
                       </p>
                       <p className="mt-0.5 font-mono text-[11px] text-slate-500">
                         offer #{String(o.offerId)} · {asset?.assetId ?? "—"}
+                        {pinned && (
+                          <span
+                            className="ml-2 rounded-full border border-brand-200 bg-brand-50 px-1.5 text-[10px] font-semibold text-brand-900"
+                            title="Just created — fund its escrow so it can be taken."
+                          >
+                            New
+                          </span>
+                        )}
                       </p>
+                      {/* Actions sit under the offer, not in a trailing column, so a
+                          maker on a phone reaches them without horizontal scrolling. */}
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
+                        {!closed && o.status !== OfferStatus.Open && (
+                          <button
+                            type="button"
+                            disabled={tx.isSending || reclaim !== "reclaimable"}
+                            onClick={() => void reclaimRent(o)}
+                            title={
+                              reclaim === "escrow-not-empty"
+                                ? "The escrow still holds tokens (a withheld surplus or dust), so its rent cannot be reclaimed."
+                                : reclaim === "unknown"
+                                  ? "The escrow balance could not be read. Reload and try again."
+                                  : "Closes the empty escrow and returns the rent to you."
+                            }
+                            className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                          >
+                            Reclaim rent
+                          </button>
+                        )}
+                        {!closed && o.status === OfferStatus.Open && (
+                          <>
+                            {tradingOn && offerPda && (
+                              <Link
+                                href={`/marketplace/otc/${offerPda}`}
+                                className="text-slate-600 underline-offset-2 hover:underline"
+                              >
+                                Take →
+                              </Link>
+                            )}
+                            {tradingOn && (
+                              <button
+                                type="button"
+                                disabled={tx.isSending || fullyFunded}
+                                onClick={() => setFundTarget(o)}
+                                title={
+                                  fullyFunded
+                                    ? "The escrow already holds the full offer amount."
+                                    : undefined
+                                }
+                                className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                              >
+                                Fund escrow
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={tx.isSending}
+                              onClick={() => setConfirmCancel(o)}
+                              className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
                       {String(o.amount)}
@@ -505,60 +661,6 @@ export default function MyOffersPage() {
                         </span>
                       )}
                     </td>
-                    <td className="space-x-3 px-4 py-3 text-right text-xs">
-                      {!closed && o.status !== OfferStatus.Open && (
-                        <button
-                          type="button"
-                          disabled={tx.isSending || reclaim !== "reclaimable"}
-                          onClick={() => void reclaimRent(o)}
-                          title={
-                            reclaim === "escrow-not-empty"
-                              ? "The escrow still holds tokens (a withheld surplus or dust), so its rent cannot be reclaimed."
-                              : reclaim === "unknown"
-                                ? "The escrow balance could not be read. Reload and try again."
-                                : "Closes the empty escrow and returns the rent to you."
-                          }
-                          className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                        >
-                          Reclaim rent
-                        </button>
-                      )}
-                      {!closed && o.status === OfferStatus.Open && (
-                        <>
-                          {tradingOn && offerPda && (
-                            <Link
-                              href={`/marketplace/otc/${offerPda}`}
-                              className="text-slate-600 underline-offset-2 hover:underline"
-                            >
-                              Take →
-                            </Link>
-                          )}
-                          {tradingOn && (
-                            <button
-                              type="button"
-                              disabled={tx.isSending || fullyFunded}
-                              onClick={() => setFundTarget(o)}
-                              title={
-                                fullyFunded
-                                  ? "The escrow already holds the full offer amount."
-                                  : undefined
-                              }
-                              className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                            >
-                              Fund escrow
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            disabled={tx.isSending}
-                            onClick={() => setConfirmCancel(o)}
-                            className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      )}
-                    </td>
                   </tr>
                 );
               })}
@@ -571,9 +673,10 @@ export default function MyOffersPage() {
         <CreateOfferModal
           myShareClasses={myShareClasses}
           onClose={() => setShowCreate(false)}
-          onSuccess={() => {
-            void refresh();
+          onSuccess={(created) => {
+            setJustCreated(created);
             setShowCreate(false);
+            void refresh();
           }}
         />
       )}
@@ -720,7 +823,8 @@ function CreateOfferModal({
 }: {
   myShareClasses: ShareClassRef[];
   onClose: () => void;
-  onSuccess: () => void;
+  /** The created offer as read back from the chain, or null when that read failed. */
+  onSuccess: (created: Offer | null) => void;
 }) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
@@ -782,7 +886,19 @@ function CreateOfferModal({
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig ?? "", { title: "Offer created" });
-      onSuccess();
+      // Read the new offer back (confirmed) so the table shows it before the
+      // mirror catches up. Its own catch: a failed read must never report a
+      // created offer as "Failed to create offer".
+      const created = await findOfferPda(
+        selectedRef.pda as Address,
+        BigInt(offerId || "0"),
+      )
+        .then((pda) =>
+          fetchMaybeOffer(client.runtime.rpc, pda, { commitment: "confirmed" }),
+        )
+        .then((account) => (account.exists ? account.data : null))
+        .catch(() => null);
+      onSuccess(created);
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to create offer", explainSendError(err));

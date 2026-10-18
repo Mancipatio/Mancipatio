@@ -12,7 +12,6 @@ import {
   AssetStatus,
   fetchMaybeAdmin,
   findAdminRecordPda,
-  findAssetPda,
   findIssuerPda,
   getActivateAssetInstructionAsync,
   KybStatus,
@@ -42,7 +41,18 @@ import { looksLikeTokenizeAsset } from "@/lib/tokenize-shares";
 import { ArchiveDialog } from "@/components/archive-dialog";
 import { useArchivedSet } from "@/lib/archive-client";
 import { isWithdrawn } from "@/lib/archive";
+import { withAssetAddresses } from "@/lib/asset-links";
 import { useRole } from "@/lib/auth";
+
+/**
+ * The key an asset goes by in the maps below: issuer PDA + assetId, the
+ * asset PDA's own seeds. Two issuers may register the same assetId
+ * (lib/asset-links), so a map by the bare ID would give both rows one PDA —
+ * and Manage, Activate and Archive would target the other issuer's asset.
+ */
+function assetKey(a: Pick<Asset, "issuer" | "assetId">): string {
+  return `${a.issuer}:${a.assetId}`;
+}
 
 // "ready": drafts an admin can activate now — the Assets menu count.
 type StatusFilter = "all" | "ready" | "draft" | "active" | "frozen" | "wound-down";
@@ -116,7 +126,7 @@ function AssetsOps() {
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [issuerPdaMap, setIssuerPdaMap] = useState<Map<string, Issuer>>(new Map());
-  // assetId → asset PDA; asset PDA → off-chain profile.
+  // (issuer, assetId) → asset PDA (assetKey); asset PDA → off-chain profile.
   const [pdaMap, setPdaMap] = useState<Map<string, string>>(new Map());
   const [profileMap, setProfileMap] = useState<Map<string, AssetProfile>>(
     new Map(),
@@ -151,14 +161,11 @@ function AssetsOps() {
         }
         if (isCancelled?.()) return;
         setIssuerPdaMap(m);
-        // Derive asset PDAs (for detail links + profile join).
+        // Derive asset PDAs (for detail links + profile join), one per
+        // (issuer, assetId): two issuers' assets under the same ID stay apart.
         const pm = new Map<string, string>();
-        for (const a of network.assets) {
-          const [pda] = await findAssetPda({
-            issuer: a.issuer,
-            assetId: a.assetId,
-          });
-          pm.set(a.assetId, pda.toString());
+        for (const { asset: a, address } of await withAssetAddresses(network.assets)) {
+          pm.set(assetKey(a), address);
         }
         if (isCancelled?.()) return;
         setPdaMap(pm);
@@ -259,12 +266,14 @@ function AssetsOps() {
       // so refresh() may still report the asset as Draft — patch the
       // confirmed on-chain status locally so the Activate button does not
       // reappear and invite a doomed second activation (AssetNotDraft).
+      // Matched by issuer AND assetId: another issuer's asset under the same
+      // ID stays a Draft with its own Activate button.
       setData((prev) =>
         prev
           ? {
               ...prev,
               assets: prev.assets.map((a) =>
-                a.assetId === asset.assetId
+                a.issuer === asset.issuer && a.assetId === asset.assetId
                   ? { ...a, status: AssetStatus.Active }
                   : a,
               ),
@@ -292,7 +301,7 @@ function AssetsOps() {
     const q = query.trim().toLowerCase();
     return data.assets
       .map((asset) => {
-        const assetPda = pdaMap.get(asset.assetId) ?? null;
+        const assetPda = pdaMap.get(assetKey(asset)) ?? null;
         const profile = assetPda ? profileMap.get(assetPda) : undefined;
         // Category = off-chain profile if present, else derived from on-chain type.
         const category = (profile?.category ??
@@ -343,7 +352,7 @@ function AssetsOps() {
   const archivedCount = useMemo(() => {
     if (!data || !archivedSet) return 0;
     return data.assets.filter((a) => {
-      const pda = pdaMap.get(a.assetId) ?? null;
+      const pda = pdaMap.get(assetKey(a)) ?? null;
       return profileMap.get(pda ?? "")?.status === "archived" || isWithdrawn(archivedSet, pda, a.issuer.toString());
     }).length;
   }, [data, archivedSet, pdaMap, profileMap]);
@@ -370,7 +379,7 @@ function AssetsOps() {
         !asset.symbolPrefix.toLowerCase().includes(q)
       )
         continue;
-      const assetPda = pdaMap.get(asset.assetId);
+      const assetPda = pdaMap.get(assetKey(asset));
       const profile = assetPda ? profileMap.get(assetPda) : undefined;
       const category = profile?.category ?? slugForEnum(asset.assetType);
       counts[category] = (counts[category] ?? 0) + 1;
@@ -466,7 +475,7 @@ function AssetsOps() {
       </div>
 
       {data === null ? (
-        <SkeletonTable rows={5} cols={6} />
+        <SkeletonTable rows={5} cols={5} />
       ) : rows.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
           <p className="text-sm text-slate-600">
@@ -485,7 +494,7 @@ function AssetsOps() {
           )}
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -494,7 +503,6 @@ function AssetsOps() {
                 <th className="px-4 py-3 font-medium">Issuer</th>
                 <th className="px-4 py-3 text-right font-medium">Classes</th>
                 <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 text-right font-medium">Manage</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -529,25 +537,9 @@ function AssetsOps() {
                       <p className="mt-0.5 text-xs text-slate-500">
                         {asset.assetId} · {asset.symbolPrefix}
                       </p>
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">{categoryLabel}</td>
-                    <td className="px-4 py-3 text-slate-700">
-                      {issuer ? fromBytes32(issuer.legalEntityId) : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono text-slate-700">
-                      {asset.shareClassesCount}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
-                          STATUS_BADGE[asset.status] ?? STATUS_BADGE[0]
-                        }`}
-                      >
-                        {ASSET_STATUS_LABEL[asset.status] ?? "?"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-3">
+                      {/* Actions sit under the asset, not in a trailing column, so an
+                          operator on a phone reaches them without horizontal scrolling. */}
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                         {asset.status === AssetStatus.Draft && assetPda && (
                           <button
                             type="button"
@@ -592,7 +584,27 @@ function AssetsOps() {
                         ) : (
                           <span className="text-xs text-slate-400">…</span>
                         )}
+                        {/* Why Activate is disabled, as text: a title tooltip never shows on a touch screen. */}
+                        {asset.status === AssetStatus.Draft && assetPda && blockHint && (
+                          <span className="basis-full text-[11px] text-slate-500">{blockHint}</span>
+                        )}
                       </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{categoryLabel}</td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {issuer ? fromBytes32(issuer.legalEntityId) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-slate-700">
+                      {asset.shareClassesCount}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                          STATUS_BADGE[asset.status] ?? STATUS_BADGE[0]
+                        }`}
+                      >
+                        {ASSET_STATUS_LABEL[asset.status] ?? "?"}
+                      </span>
                     </td>
                   </tr>
                 );

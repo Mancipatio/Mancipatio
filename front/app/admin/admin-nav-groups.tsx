@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 import { useRole } from "@/lib/auth";
 import { adminRouteAllows, type Capability } from "@/lib/role-resolution";
 import { useAdminBadges } from "@/components/admin-badges-context";
+import type { BadgeView } from "@/lib/admin-badges";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { AdminNav } from "./admin-nav";
 
 export type AdminNavItem = {
@@ -16,11 +18,21 @@ export type AdminNavItem = {
 
 export type AdminNavGroup = { label: string | null; items: AdminNavItem[] };
 
+/** A known count above zero; the "•" of an unread count does not keep an entry. */
+function somethingWaits(badge: BadgeView | null): boolean {
+  return badge !== null && badge.text !== "•";
+}
+
 /**
  * The admin menu, filtered to the pages the connected wallet may open
  * (the same table as the AdminGate) — an operator role sees only its own
  * pages, and a group with no visible page is hidden. Each item carries the
  * count of what waits for this wallet on its page (AdminBadgesProvider).
+ *
+ * Pilot scope (lib/pilot-scope.ts): the page of a module switched off on this
+ * network leaves the menu, unless something waits there for this wallet (an
+ * existing request, deal or schedule to cancel, refund, finalize or pay out).
+ * Its URL keeps working, with the module notice.
  */
 export function AdminNavGroups({ groups }: { groups: AdminNavGroup[] }) {
   const { capabilities } = useRole({ kyc: true });
@@ -30,7 +42,8 @@ export function AdminNavGroups({ groups }: { groups: AdminNavGroup[] }) {
       {groups.map((group, index) => {
         const items = group.items
           .filter((item) => adminRouteAllows(item.href, capabilities))
-          .map((item) => ({ ...item, badge: badges.view(item.href) }));
+          .map((item) => ({ ...item, badge: badges.view(item.href) }))
+          .filter((item) => somethingWaits(item.badge) || navHrefVisible(item.href));
         if (items.length === 0) return null;
         return (
           <div key={group.label ?? `group-${index}`} className="app-admin-nav-group">

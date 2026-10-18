@@ -2,26 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { features } from "@/lib/features";
+import { navHrefVisible } from "@/lib/pilot-scope";
+import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 
 type Item = { href: string; label: string };
 
-const NAV: Item[] = [
-  { href: "/issuer", label: "Overview" },
-  { href: "/issuer/assets", label: "My assets" },
-  { href: "/issuer/share-classes", label: "My share classes" },
-  { href: "/issuer/launchpad", label: "My sales" },
-  { href: "/issuer/payouts", label: "Payout vaults" },
-  { href: "/issuer/vesting", label: "Vesting" },
-  { href: "/issuer/vesting-series", label: "Vesting series" },
-  ...(features().issuerRotation ? [{ href: "/issuer/rotation", label: "Authority key" }] : []),
-];
+const NAV: Item[] = ISSUER_WORKFLOW_TABS.map(([href, label]) => ({ href, label }));
 
 export function IssuerNav() {
   const path = usePathname();
   return (
     <>
-      {NAV.map((item) => {
+      {NAV.filter((item) => navHrefVisible(item.href)).map((item) => {
         const active =
           item.href === "/issuer"
             ? path === "/issuer"

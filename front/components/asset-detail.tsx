@@ -25,9 +25,11 @@ import { listSpvs, spvCapacity, type SpvCapacity, type SpvRow } from "@/lib/spvs
 import { signedUpload } from "@/lib/storage-client";
 import { SkeletonCard } from "@/components/skeleton";
 import { TokenizeChecklist } from "@/components/tokenize-checklist";
-import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { CONVERSION_TARGET_LABEL, UNLINKED_TARGET_LABEL, classKey, unlinkedMarkerKeys } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useToast } from "@/lib/toast";
+import { navHrefVisible } from "@/lib/pilot-scope";
+import { scopeEnabled } from "@/lib/features";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import {
   assetTypeBySlug,
@@ -386,11 +388,16 @@ export function AssetDetail({
   const typeRecord = category ? assetTypeBySlug(category) : undefined;
   const canEdit =
     variant === "admin" || profile === null || profile.status === "draft";
+  // KYC-only mode (lib/features.ts): an issuer's edit or publish is an
+  // issuance entry (api/profiles/upsert answers 403); Unpublish (a take-down)
+  // stays. The admin variant is unaffected.
+  const issuerEntriesOn = variant === "admin" || scopeEnabled("issuance");
   const displayName = profile?.display_name || asset.name;
   const issuerLegalId = issuer ? fromBytes32(issuer.legalEntityId) : null;
 
-  // Lifecycle shortcuts: deep-link into the management surfaces for this asset.
-  const shortcuts =
+  // Lifecycle shortcuts: deep-link into the management surfaces for this asset
+  // (none into a module switched off on this network, lib/pilot-scope.ts).
+  const shortcuts = (
     variant === "admin"
       ? [
           { href: "/admin/share-classes", label: "Share classes" },
@@ -402,7 +409,8 @@ export function AssetDetail({
           { href: "/issuer/share-classes", label: "Share classes" },
           { href: "/issuer/launchpad", label: "Launchpad" },
           { href: "/issuer/vesting", label: "Vesting" },
-        ];
+        ]
+  ).filter(({ href }) => navHrefVisible(href));
 
   return (
     <div className="mt-4">
@@ -475,7 +483,7 @@ export function AssetDetail({
           </p>
           {!editing && (
             <div className="flex items-center gap-2">
-              {profile && (variant === "admin" || ownedByMe) && (
+              {profile && (variant === "admin" || ownedByMe) && (profile.is_published || issuerEntriesOn) && (
                 <button
                   type="button"
                   disabled={publishing}
@@ -498,7 +506,7 @@ export function AssetDetail({
                       : "Publish"}
                 </button>
               )}
-              {canEdit && (
+              {canEdit && issuerEntriesOn && (
                 <button
                   type="button"
                   onClick={openEdit}
@@ -610,7 +618,7 @@ export function AssetDetail({
         ) : profile === null ? (
           <p className="mt-4 text-sm text-slate-500">
             No off-chain product profile yet.
-            {canEdit ? " Use Edit to add display details and category facts." : ""}
+            {canEdit && issuerEntriesOn ? " Use Edit to add display details and category facts." : ""}
           </p>
         ) : (
           <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
@@ -672,6 +680,7 @@ export function AssetDetail({
           the issuer variant already early-returns when the asset isn't theirs) */}
       <WhitepaperCard
         variant={variant}
+        editable={issuerEntriesOn}
         assetPda={id}
         issuerPda={asset.issuer.toString()}
         category={category}
@@ -733,6 +742,7 @@ export function AssetDetail({
  *  publishes the submitted form information on the public asset page. */
 function WhitepaperCard({
   variant,
+  editable,
   assetPda,
   issuerPda,
   category,
@@ -740,6 +750,8 @@ function WhitepaperCard({
   onSaved,
 }: {
   variant: Variant;
+  /** False for the issuer while issuance is paused (KYC-only mode): read-only, no inputs or Save. */
+  editable: boolean;
   assetPda: string;
   issuerPda: string;
   category: CategorySlug | null;
@@ -1033,7 +1045,8 @@ function WhitepaperCard({
         )}
       </dl>
 
-      {/* Edit form */}
+      {/* Edit form (none while issuance is paused for the issuer: KYC-only mode) */}
+      {editable && (<>
       <div className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2">
         <label className="block">
           <span className={labelSpan}>Upload whitepaper (PDF / DOCX)</span>
@@ -1263,6 +1276,7 @@ function WhitepaperCard({
           {saving ? "Saving…" : "Save whitepaper & disclosure"}
         </button>
       </div>
+      </>)}
     </section>
   );
 }
@@ -1283,7 +1297,9 @@ function ShareClassesBlock({
         .sort((a, b) => a.classIndex - b.classIndex),
     [data, assetPda],
   );
-  // The conversion marker (C2) is labelled for what it is, not "pending mint".
+  // The conversion marker (C2) is labelled for what it is, not "pending mint";
+  // one nothing converts into yet says so (synchronous, lib/conversion-target).
+  const unlinked = useMemo(() => unlinkedMarkerKeys(linked), [linked]);
   const conversionTargets = useConversionTargets(linked);
 
   return (
@@ -1331,7 +1347,9 @@ function ShareClassesBlock({
                       : "—"}
                   </td>
                   <td className="px-3 py-2 text-xs">
-                    {conversionTargets.has(classKey(sc))
+                    {unlinked.has(classKey(sc))
+                      ? UNLINKED_TARGET_LABEL
+                      : conversionTargets.has(classKey(sc))
                       ? CONVERSION_TARGET_LABEL
                       : sc.supplyLocked
                         ? "locked"

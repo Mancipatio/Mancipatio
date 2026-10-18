@@ -12,6 +12,8 @@
 // a wallet the account adds later files a passport request only for an
 // investor (api/account/wallets/attach).
 // Verification itself stays a compliance decision in the admin console.
+// KYC-only mode (lib/features.ts kycOnly) keeps both requests open: a
+// person's KYC and a company's KYB are the verification the mode takes.
 
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";

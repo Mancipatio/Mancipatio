@@ -32,12 +32,12 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
-| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with pause bit 0x04 cleared last (runbook §20). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | unset (off) until KYC-only mode is left ("Leaving KYC-only mode later": set it in Production before that redeploy) and the Terms in force offer trading through Manci; then `true` in the **same production build** as those Terms, with pause bit 0x04 cleared last (runbook §20). Rollback: set 0x04 first, then `false` and a redeploy | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms. Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until KYC-only mode is left ("Leaving KYC-only mode later" step 2: set it in Production before that redeploy) and the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms. Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | leave unset (off): physical delivery is not offered. Never `true` to let a conversion through (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
@@ -61,12 +61,14 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `GOOGLE_CLIENT_SECRET` | Secret | of that client | set | Google sign-in off | `lib/server/account-google.ts` |
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
 | `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
-| `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy and sell routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
+| `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy, sell and conversion-request routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
 | `GEOBLOCK_COUNTRIES` | Server, build + runtime | **counsel's list** (guard): ISO 3166 codes `KP,IR,CU,SY,UA-43,…`, or `none` written down on purpose; see "Geoblocking" | optional (unset blocks nothing) | Mainnet build refused; at runtime mainnet transactional routes answer 451 | `lib/geoblock.ts`, `proxy.ts` |
-| `SANCTIONS_SCREENING` | Server, runtime | leave unset: mainnet always refuses the screened routes (commit, purchase record, OTC request, resell listing, passport, verification) while the OFAC SDN list is older than 3 days, empty or unreadable (503) | `enforce` only to rehearse that on devnet | Off mainnet an unusable list is only logged; a hit is refused on every network | `lib/server/sanctions.ts` |
+| `SANCTIONS_SCREENING` | Server, runtime | leave unset: mainnet always refuses the screened routes (commit, purchase record, OTC request, resell listing, conversion request, passport, verification) while the OFAC SDN list is older than 3 days, empty or unreadable (503) | `enforce` only to rehearse that on devnet | Off mainnet an unusable list is only logged; a hit is refused on every network | `lib/server/sanctions.ts` |
 | `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` only after counsel reviewed the rendered mainnet pages (guard; runbook §17) | — | Mainnet build refused | `next.config.ts` |
 | `MAINNET_LICENSE_NOT_REQUIRED` | Build | `true` **only** on counsel's written opinion that no licence is needed, while `OPERATORS.mainnet.licence` is null; refused together with a recorded licence (guard; runbook §17) | — | Mainnet build refused while no licence is recorded | `lib/legal/readiness.ts` |
 | `MAINNET_OPS_WAIVERS` | Build | empty; see below | — | Every operations guard applies | `next.config.ts` |
+| `NEXT_PUBLIC_FEATURE_KYC_ONLY` | Public, build | **leave unset** (KYC-only mode on); `false` only when leaving the mode; see "KYC-only mode" | unset = off; `true` rehearses the mode | Mainnet: on (fail closed); elsewhere: off | `lib/features.ts` `kycOnly` |
+| `NEXT_PUBLIC_ASSET_CLASSES` | Public, build | leave unset (equity) | unset (all) | Mainnet: `equity`; elsewhere: every class | `lib/asset-classes.ts`, `lib/pilot-scope.ts` |
 | `VERCEL`, `VERCEL_ENV`, `VERCEL_GIT_COMMIT_SHA`, `NODE_ENV` | Platform | set by Vercel | set by Vercel | — | build guards, `/api/health` commit |
 
 ### Mainnet operations guards and waivers
@@ -96,20 +98,29 @@ explicitly on or off.
 
 ### Pilot scope (module switches)
 
-On mainnet the Terms in force decide which modules are offered. Primary
-sales in USDC are the base. Trading through Manci and conversion into
-company shares are switched on only once a Terms version that offers them
-is live: the flag goes into the **same production build** as those Terms,
-and the program's pause bit is cleared only after that build is verified
-(runbook §20 for trading, §21 for conversion, where 0x08 is cleared only
-for a short window per conversion). Every module other than primary sales
-has a switch (`lib/features.ts` `pilotModules`, same spellings and build
-guard as the flags above). **On mainnet a module is off unless its
-variable reads as on; on devnet, testnet and localnet it is on unless it
-reads as off** (`=false` rehearses the mainnet scope on devnet).
+The Terms in force decide what is offered, and while KYC-only mode is on
+(the mainnet default; "KYC-only mode and offered asset classes" below) only
+sign-in and verification are open, whatever the switches below say. Outside
+the mode, primary sales are the core and every other product module has a
+switch (`lib/features.ts` `pilotModules`, same spellings and build guard as
+the flags above). **On mainnet a module is off unless its variable reads as
+on; on devnet, testnet and localnet it is on unless it reads as off**
+(`=false` rehearses the pilot scope on devnet).
+
+A module flag ships `true` only together with Terms that offer the module:
+the flag goes into the **same production build** as those Terms, and the
+program's pause bit is cleared only after that build is verified (runbook
+§20 for trading through Manci, §21 for conversion, where 0x08 is cleared
+only for a short window per conversion). Both come after leaving KYC-only
+mode ("Leaving KYC-only mode later" below: the switches go into Vercel
+Production before that redeploy). State on 2026-10-18: Vercel Production
+has no module switch set (`NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` were deleted that day), and
+`NEXT_PUBLIC_FEATURE_KYC_ONLY` and `NEXT_PUBLIC_ASSET_CLASSES` are unset:
+the lockdown, equity only, with the chain at 0x7F.
 
 Switching a module off (rollback, incident) never waits for a Terms
-change: a module the Terms offer may have its flag off. Turning trading
+change: a module the Terms offer may have its flag off. To switch trading
 through Manci off: set pause bit 0x04 first (any Admin, `/admin/platform`;
 the program then refuses direct calls too), then set the flag to `false`
 and redeploy. Conversion needs no pause step: 0x08 stays set outside its
@@ -122,8 +133,8 @@ windows.
 | Vesting series | `NEXT_PUBLIC_FEATURE_VESTING` | `/api/vesting-series/create`, `/prepare-creation`, `/admin-review` (decision `approved` only) | `create_vesting_series` | `/portfolio/vesting`, `/issuer/vesting-series`, `/admin/vesting` |
 | Rights-Token issuances | `NEXT_PUBLIC_FEATURE_RIGHTS` | `/api/vesting/create` (the rights builder) | `create_rights_issuance` | `/portfolio/rights` (with distributions), `/admin/rights`, `/issuer/vesting` |
 | Distributions | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | `/api/distribution-plans/prepare`, `/bind` | `create_distribution`, `route_yield` | `/portfolio/rights` (with rights), `/admin/payouts` |
-| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type ConversionPending | `/portfolio/conversion`, `/admin/custody` (with delivery) |
-| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | `open_custody_vault` of type DeliveryEscrow | `/portfolio/delivery`, `/admin/custody` (with conversion) |
+| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type DeliveryEscrow declared as a conversion (the admin's "Approve & open vault" on a conversion request, `/admin/custody`). ConversionPending is retired on-chain (VaultTypeRetired, 6142) and belongs to no module | `/portfolio/conversion`, `/admin/custody` (with delivery) |
+| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | every other `open_custody_vault` of type DeliveryEscrow (a delivery request's approval, a DeliveryEscrow from "+ Open vault") | `/portfolio/delivery`, `/admin/custody` (with conversion; with delivery off the page hides "Approve & open vault" on delivery requests and the DeliveryEscrow type in "+ Open vault", and keeps reject, cancel, return, confirm and "Finish recording approval" for a vault already opened) |
 
 Off means: the entry routes answer 403 with "…: not available on Solana
 mainnet." before any database, screening or chain work, the
@@ -133,9 +144,31 @@ hide their entry buttons ("+ Create offer", "Fund escrow", "+ Create
 proposal" and the votes, "+ New issuance"). An on-chain entry without a
 server route (an OTC offer, a proposal, an issuance) is refused by the
 wallet path before the wallet opens (`lib/pause-gate.ts` `MODULE_FLOWS`,
-called from `lib/verified-solana-client.ts`); the program itself still
-accepts it unless a pause bit is set, which is why the pilot also keeps
-0x1c paused (runbook §8). Exits of existing positions stay open everywhere
+called from `lib/verified-solana-client.ts`). A conversion and a delivery
+open the same DeliveryEscrow on-chain, so the conversion approval declares
+its purpose (`withGateFacts`) and is gated by the conversion switch alone:
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` is the only module switch
+conversions need (delivery stays off). It is not the only prerequisite. On
+mainnet KYC-only mode must be off as well (`NEXT_PUBLIC_FEATURE_KYC_ONLY=false`;
+both values are build-time, so set both before one Redeploy). While the
+mode is on it overrides every module switch: `/api/conversion/create`
+answers 403, the approval's `open_custody_vault` is refused as a module
+entry (`MODULE_FLOWS`; every module reads off) and the holder's
+`deposit_to_custody_vault` before the wallet (`KYC_ONLY_FLOWS`). Leaving
+the mode also reopens primary sales and issuance on the platform side, so
+it is the owner's decision ("Leaving KYC-only mode later" below); keep 0x01
+and 0x02 set on-chain if those stay closed. The Terms in force must offer
+conversion. And the program's 0x08 pause (custody entry) must be clear for
+**both** the vault open and the holder's deposit (`open_custody_vault` and
+`deposit_to_custody_vault` both check it): the conversion window is the
+mode's mask minus 0x08 (runbook §8, "Pause mask by mode"), and any Admin
+sets 0x08 again once the deposit has landed. "Confirm conversion" (trigger
+and realize, the burn) reads no pause bit and stays open in KYC-only mode.
+The program itself accepts an on-chain entry unless its pause bit is set,
+which is why every bit stays set between windows (0x7F, runbook §8).
+With delivery off, `/admin/custody` still lets the wallet that opened a
+delivery vault finish recording it ("Finish recording approval", no
+transaction). Exits of existing positions stay open everywhere
 (cancels, withdrawals, deal declines and archives, claims, refunds, custody
 returns, the batches of an existing distribution, vesting-series send-backs
 and rejections), like the program's emergency pause. Payout airdrops
@@ -145,8 +178,9 @@ payout schedules (`/api/payout-schedules/*`: reminders, no money moves) and
 payout-vault snapshots (`/api/payout-snapshots/*`: the Startup payout
 vault's vote and yield snapshots, which exist only under `STARTUP_RAISES`,
 and a vault vote protects holders). The switches are the platform's scope;
-the program's pause bits are the on-chain one (runbook: which bits the
-pilot keeps set), and `lib/pause-gate.ts` reads those before a wallet signs.
+the program's pause bits are the on-chain one (runbook §8, "Pause mask by
+mode": which bits each mode keeps set), and `lib/pause-gate.ts` reads those
+before a wallet signs.
 
 ### Geoblocking
 
@@ -191,6 +225,125 @@ that already landed on-chain, and the record must match the chain). Off
 mainnet an unset list blocks nothing. IP geolocation is one line (VPNs pass
 it): the Terms' eligibility clause and the wallet sanctions screen are the
 others. Changing the list needs a redeploy of the same build settings.
+
+### KYC-only mode and offered asset classes
+
+Owner decision of 2026-10-10: the public may only connect (wallet, email or
+Google) and submit an identity verification (KYC) request; everything else
+is paused. `NEXT_PUBLIC_FEATURE_KYC_ONLY` is that one switch
+(`lib/features.ts` `kycOnly`): **on on mainnet unless it reads as off**
+(unset keeps the platform locked), off on devnet, testnet and localnet
+unless it reads as on (a rehearsal). A production build refuses a value
+that is neither on nor off (`FEATURE_FLAG_NAMES`). Separately, the asset
+classes shown on public pages are `NEXT_PUBLIC_ASSET_CLASSES`: **equity
+only on mainnet** when unset, every class elsewhere.
+
+What stays open while the mode is on: sign-in (wallet SIWS, email, Google)
+and account management; Terms acceptance; the verification request
+(`/verify` for a person's KYC and a company's KYB, `/account/verify`,
+`/onboarding/[id]`, passport submission and status, verification document
+uploads); read-only browsing of the marketing and marketplace pages; the
+portfolio overview and activity; exits of existing positions (cancels,
+reclaims, refunds, claims, conversion and delivery recording, purchase
+recovery); the whole admin console; and the contact form. A company's
+verification (KYB) stays open like a person's KYC (owner decision);
+raising and issuing themselves stay paused, and the admin console
+processes both.
+
+What is paused: every pilot module, **whatever its own variable says**
+(`moduleEnabled`; `pilotModules()` still reports the variables, which the
+build guards read), and the two core areas without a switch of their own:
+
+| Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
+|---|---|---|---|
+| Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+
+Also refused before the wallet: `deposit_to_custody_vault` and the vesting
+series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
+`deposit_to_vesting_escrow`). That client gate has no role context and
+applies to **every wallet, admin included** (the operator's `open_sale`,
+`mint_to_treasury`, "Add issuer", asset and share-class set-up too); the
+admin console is otherwise unaffected, and `/admin/custody` stays reachable
+by URL for recording an existing conversion. Every page the mode pauses, a
+module's included, says "Paused." with one sentence (`KYC_ONLY_MESSAGE`:
+sales, trading, issuance and the other services are paused for now). The
+wording claims nothing about which services the Terms offer, so it holds
+under any Terms version (one that offers trading or conversion included);
+re-check it only if the emergency-pause clause changes. Links to those
+pages leave every menu, card and CTA (`navHrefVisible`, and the mx
+`Button` / `TextLink` through `kycOnlyHides`), and the guides of the paused
+areas leave the menus (`KYC_ONLY_NAV_PREFIXES`).
+
+On-chain, the program's pause flags remain the authority, and this switch
+does not change them. **The lockdown needs 0x7F on-chain** (every pause
+bit; any Admin sets bits on Admin → Platform, before or with the release;
+runbook §8, "Pause mask by mode"). The chain held the pilot's 0x7E on
+2026-10-10, and 0x7F is the target, read back on 2026-10-18 (runbook §20
+shows the read): at 0x7E, 0x01 (onboarding) is clear, and
+`register_issuer` (permissionless while 0x01 is clear) and a KYB-verified
+issuer's `create_asset`, `add_share_class` and
+`initialize_share_class_mint` are stopped only by this UI and client gate,
+which is a display gate: a hand-built transaction passes, and a new Pending
+issuer would show in the public registry counts. 0x01 stops exactly those
+four instructions and nothing else, so KYC and passports are unaffected:
+the KYC registry instructions (approve, revoke, registry authority) never
+read the pause flags.
+
+After the release (post-deploy check): Admin → Platform shows 0x7F; the
+home page (`components/market-overview.tsx`, equity only) has no "Explore
+by asset class" section and no class tiles (they render only with more
+than one offered class), no "More asset classes" / "Coming later" tile
+(the layout before 2026-10-16), no Primary sales tab, stat or "Create a
+raise", and no link to `/marketplace/launchpad` or `/apply`; its "Know
+what you own" card links "Read the equity guide"
+(`tests/asset-classes.test.ts`, "mainnet default"); the sidebar has no
+Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
+"Paused."; `/verify`, `/login`, `/account` and `/portfolio` work;
+`/admin/kyc`, `/admin/clients` and `/admin/platform` work;
+`/markets/types` shows Equity only. `/admin/custody` leaves the admin menu
+while nothing waits there (every module reads off in the mode); open it by
+URL to record an existing conversion.
+
+Leaving KYC-only mode later:
+1. Confirm that the Terms in force offer what reopens.
+2. In Vercel Production set the module switches as decided, before the
+   redeploy: once the mode is off they apply as their own variables say
+   (unset = off on mainnet), `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION`
+   included.
+3. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy (both
+   values are build-time).
+4. Verify: "Primary sales" is back in the sidebar and
+   `/marketplace/launchpad` shows no "Paused." notice. Its amber "Primary
+   sales are paused" banner (`components/runtime-pause-notice.tsx`) stays
+   while 0x02 is set: expected until a sale window clears 0x02 (step 5);
+   it is not a reason to redeploy, roll back or clear the bit early.
+5. Only then, as each window starts, clear the pause bits the new mode's
+   row allows (runbook §8, "Pause mask by mode"; the Super Admin clears):
+   0x01 for an issuer or asset set-up and 0x08 for a conversion's open and
+   deposit, each set again right after the step; 0x02 only for a sale
+   window or a direct mint, never as a steady state. A bit cleared before
+   the redeploy leaves its instructions permissionless on-chain while the
+   old build's gate is only a display gate (`register_issuer` with 0x01
+   clear), so no bit is cleared ahead of the build.
+6. Update the Status paragraph of `README.md` (the KYC-only line) in the
+   same change.
+
+To return to the lockdown, delete the variable (or set `true`) and
+Redeploy. To rehearse on devnet, set `true` on the devnet or Preview
+environment and redeploy.
+
+Asset classes: `NEXT_PUBLIC_ASSET_CLASSES=equity,debt` (slugs: `equity`,
+`debt`, `real_estate`, `royalty`, `revenue_share`, `commodity`, `physical`,
+`other`; any case, comma or space) or `all`, then Redeploy. Any production
+build refuses an unknown slug, `none` or an empty list
+(`assertBuildAssetClasses`). Only public class navigation, filters and
+lists follow it (the overview tiles and filter, `/marketplace`'s filter,
+`/markets/types`, the footer, the whitepaper filter, the contact form); a
+class that is not offered keeps its pages, which show a notice and are
+`noindex`. The data of existing assets is never hidden, and the issuer and
+admin screens list every class. The switch is independent of KYC-only
+mode: leaving the lockdown keeps equity only.
 
 ## Supabase
 

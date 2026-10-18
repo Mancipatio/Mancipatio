@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { SkeletonTable } from "@/components/skeleton";
 import { Kpi } from "@/components/kpi";
+import { assetClassOffered } from "@/lib/pilot-scope";
 import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer, withClosedOffers } from "@/lib/indexer";
@@ -17,6 +18,8 @@ import {
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { findOfferPda } from "@/lib/pdas";
+import { isOfferFunded } from "@/lib/escrow-ledger";
+import { isAllowedPaymentMint } from "@/lib/payment-mints";
 import { listResellListings, type ResellListing } from "@/lib/resell";
 import {
   createOtcRequest,
@@ -24,7 +27,12 @@ import {
   type OtcRequest,
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
-import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
+import {
+  detectNetwork,
+  isTestNetwork,
+  networkLabel,
+  type Network,
+} from "@/lib/network";
 import { formatPaymentForDisplay, resellAskNote } from "@/lib/payment-price";
 import {
   PaymentMintPicker,
@@ -39,9 +47,44 @@ type Row = {
   shareClass?: ShareClass;
 };
 
+// ── Offer availability ───────────────────────────────────────────────────────
+// Pure, no RPC. Shared with the public list (app/marketplace/otc/page.tsx),
+// which imports it from here because a page module exports only its page;
+// the natural home is lib/offer-availability.ts. A snapshot only: the take
+// page and the program re-check at take time.
+
+/** Why an Open offer cannot be taken right now. */
+export type OfferHold = "expired" | "unfunded" | "payment-token";
+
+/** An offer the public lists show at all: Open with a non-zero amount. */
+export function listedOpenOffer(o: Pick<Offer, "status" | "amount">): boolean {
+  return o.status === OfferStatus.Open && o.amount > BigInt(0);
+}
+
+/**
+ * The reason an Open offer cannot be taken, or null when it can, in the take
+ * page's order (app/marketplace/otc/[offer]/page.tsx, take_offer.rs): past
+ * its expiry (an expiry equal to `now` can still be taken), the deposit
+ * ledger below the amount, a payment mint the network does not accept (on
+ * mainnet the allowlist; every other network accepts any mint). It does not
+ * check the viewer's wallet (KYC-gated class, balance, blocklist, the
+ * secondary-trading pause), the same caveat as lib/market-overview.ts.
+ */
+export function offerHold(
+  o: Pick<Offer, "expiresAt" | "amount" | "deposited" | "paymentMint">,
+  nowSec: bigint,
+  network: Network,
+): OfferHold | null {
+  if (o.expiresAt !== BigInt(0) && nowSec > o.expiresAt) return "expired";
+  if (!isOfferFunded(o.amount, o.deposited)) return "unfunded";
+  if (!isAllowedPaymentMint(network, o.paymentMint.toString())) return "payment-token";
+  return null;
+}
+
 export function ResellBoard() {
   const sp = useSearchParams();
-  const initialType = sp.get("type") ?? "";
+  const requestedType = sp.get("type") ?? "";
+  const initialType = assetClassOffered(requestedType) ? requestedType : "";
 
   const client = useSolanaClient();
   const conn = useWalletConnection();
@@ -59,6 +102,8 @@ export function ResellBoard() {
   const [posts, setPosts] = useState<ResellListing[] | null>(null);
   const [myOtcRequests, setMyOtcRequests] = useState<OtcRequest[]>([]);
   const [requestFor, setRequestFor] = useState<ResellListing | null>(null);
+  // "now" captured at load time (render must stay pure) — expiry checks.
+  const [nowSec, setNowSec] = useState<bigint>(BigInt(0));
 
   // OTC escrow requests the connected wallet is already a party to — used to
   // grey out repeat requests for the same seller+mint pair.
@@ -137,6 +182,7 @@ export function ResellBoard() {
           scm.set(sc.mint.toString(), sc);
         }
         if (!cancelled) {
+          setNowSec(BigInt(Math.floor(Date.now() / 1000)));
           setData(network);
           setPdaMap(am);
           setScByMint(scm);
@@ -151,10 +197,13 @@ export function ResellBoard() {
     };
   }, [client]);
 
+  // Only offers a taker can fill now: Open, funded, unexpired and priced in
+  // a token this network accepts (offerHold). The rest are counted below.
   const rows: Row[] = useMemo(() => {
     if (!data) return [];
+    const network = detectNetwork();
     return data.offers
-      .filter((o) => o.status === OfferStatus.Open)
+      .filter((o) => listedOpenOffer(o) && offerHold(o, nowSec, network) === null)
       .map((offer) => {
         const sc = scByMint.get(offer.mint.toString());
         const asset = sc ? pdaMap.get(sc.asset.toString()) : undefined;
@@ -166,7 +215,7 @@ export function ResellBoard() {
         return slug === typeFilter;
       })
       .sort((a, b) => Number(b.offer.offerId - a.offer.offerId));
-  }, [data, pdaMap, scByMint, typeFilter]);
+  }, [data, pdaMap, scByMint, typeFilter, nowSec]);
 
   // Derive each visible offer's PDA (async) for deep-linking to its take page.
   useEffect(() => {
@@ -196,12 +245,16 @@ export function ResellBoard() {
 
   const totals = useMemo(() => {
     if (!data) return null;
-    const open = data.offers.filter((o) => o.status === OfferStatus.Open).length;
+    const network = detectNetwork();
+    const listed = data.offers.filter(listedOpenOffer);
+    // The overview's "Funded OTC offers": takeable now.
+    const funded = listed.filter((o) => offerHold(o, nowSec, network) === null).length;
     const filled = data.offers.filter(
       (o) => o.status === OfferStatus.Filled,
     ).length;
-    return { open, filled };
-  }, [data]);
+    // Open on-chain but not takeable (unfunded, expired, foreign payment mint).
+    return { funded, heldBack: listed.length - funded, filled };
+  }, [data, nowSec]);
 
   const filteredPosts = useMemo(() => {
     if (!posts) return null;
@@ -225,7 +278,7 @@ export function ResellBoard() {
     <div className="space-y-6">
       {totals && (
         <div className="grid gap-3 sm:grid-cols-3">
-          <Kpi label="Open offers" value={String(totals.open)} />
+          <Kpi label="Funded offers" value={String(totals.funded)} />
           <Kpi label="Filled (lifetime)" value={String(totals.filled)} />
           <Kpi
             label="Active asset types"
@@ -243,7 +296,7 @@ export function ResellBoard() {
             className="ml-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[13px] focus:border-slate-400 focus:outline-none"
           >
             <option value="">All</option>
-            {ASSET_TYPES.map((t) => (
+            {ASSET_TYPES.filter((type) => assetClassOffered(type.slug)).map((t) => (
               <option key={t.slug} value={t.slug}>
                 {t.title}
               </option>
@@ -264,9 +317,9 @@ export function ResellBoard() {
       {data === null ? (
         <SkeletonTable rows={4} cols={6} />
       ) : rows.length === 0 ? (
-        <EmptyState typeFilter={typeFilter} />
+        <EmptyState typeFilter={typeFilter} heldBack={totals?.heldBack ?? 0} />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-[11px] uppercase tracking-[0.12em] text-slate-500">
               <tr>
@@ -276,7 +329,6 @@ export function ResellBoard() {
                 <th className="px-4 py-3 text-right font-medium">Price</th>
                 <th className="px-4 py-3 text-right font-medium">Unit</th>
                 <th className="px-4 py-3 font-medium">Maker</th>
-                <th className="px-4 py-3 text-right font-medium"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -303,6 +355,24 @@ export function ResellBoard() {
                       <p className="text-[11px] text-slate-500">
                         {typeRecord?.code ?? "—"}
                       </p>
+                      {/* The action sits under the asset, not in a trailing column, so
+                          a reader on a phone reaches it without horizontal scrolling. */}
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
+                        <Link
+                          href={
+                            offerPdaByKey.get(
+                              `${r.offer.mint.toString()}-${String(r.offer.offerId)}`,
+                            )
+                              ? `/marketplace/otc/${offerPdaByKey.get(
+                                  `${r.offer.mint.toString()}-${String(r.offer.offerId)}`,
+                                )}`
+                              : "/marketplace/otc"
+                          }
+                          className="text-[12px] font-medium text-brand-700 hover:underline"
+                        >
+                          Open ↗
+                        </Link>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums text-slate-700">
                       {String(r.offer.amount)}
@@ -317,28 +387,27 @@ export function ResellBoard() {
                       {r.offer.maker.toString().slice(0, 6)}…
                       {r.offer.maker.toString().slice(-4)}
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      <Link
-                        href={
-                          offerPdaByKey.get(
-                            `${r.offer.mint.toString()}-${String(r.offer.offerId)}`,
-                          )
-                            ? `/marketplace/otc/${offerPdaByKey.get(
-                                `${r.offer.mint.toString()}-${String(r.offer.offerId)}`,
-                              )}`
-                            : "/marketplace/otc"
-                        }
-                        className="text-[12px] font-medium text-brand-700 hover:underline"
-                      >
-                        Open ↗
-                      </Link>
-                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+      )}
+
+      {totals && totals.heldBack > 0 && (
+        <p className="text-[12.5px] text-slate-500">
+          {totals.heldBack} more open{" "}
+          {totals.heldBack === 1 ? "offer is" : "offers are"} not takeable yet
+          (escrow not funded, past expiry or priced in a token this network
+          does not accept).{" "}
+          <Link
+            href="/marketplace/otc"
+            className="font-medium text-brand-700 hover:underline"
+          >
+            See all on /marketplace/otc →
+          </Link>
+        </p>
       )}
 
       {/* Holder posts — off-chain classifieds from token holders who want to
@@ -723,19 +792,32 @@ function quietLead(): string {
   return isTestNetwork(network) ? `${networkLabel(network)} is quiet.` : "It's quiet here.";
 }
 
-function EmptyState({ typeFilter }: { typeFilter: string }) {
+function EmptyState({
+  typeFilter,
+  heldBack,
+}: {
+  typeFilter: string;
+  /** Open offers that exist but cannot be taken right now (see offerHold). */
+  heldBack: number;
+}) {
   const typed = typeFilter
     ? ASSET_TYPES.find((t) => t.slug === typeFilter)?.title
     : null;
   return (
     <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
       <p className="text-[14px] font-medium text-slate-900">
-        {typed ? `No open ${typed} offers right now.` : "No open offers yet."}
+        {typed
+          ? `No open ${typed} offers right now.`
+          : heldBack > 0
+            ? "No takeable offers right now."
+            : "No open offers yet."}
       </p>
       <p className="mt-2 text-[12.5px] text-slate-500">
         {typed
           ? "Try the full list or open the platform to post one."
-          : `${quietLead()} The platform is live but no issuer has posted a secondary offer yet.`}
+          : heldBack > 0
+            ? `${heldBack} open ${heldBack === 1 ? "offer is" : "offers are"} not takeable yet: escrow not funded, past expiry or priced in a token this network does not accept.`
+            : `${quietLead()} The platform is live but no issuer has posted a secondary offer yet.`}
       </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         <Link href="/marketplace" className="btn-brand">

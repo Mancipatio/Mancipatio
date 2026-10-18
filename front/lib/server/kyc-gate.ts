@@ -108,7 +108,7 @@ export function kycGateMessage(
 ): string | null {
   if (kyc.eligible) return null;
   if (!kyc.hasClient) {
-    return `Onboarding required — no client profile is linked to this wallet. Please contact us to get onboarded before ${context}.`;
+    return `Onboarding required — no verified identity is linked to this wallet. Verify at /verify (or add this wallet to the account you verified with) before ${context}.`;
   }
   if (kyc.expired) {
     const expiryMs = kyc.kycExpiresAt === null ? NaN : Date.parse(kyc.kycExpiresAt);

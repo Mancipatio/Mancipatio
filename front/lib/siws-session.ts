@@ -36,6 +36,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "account.wallets.transaction",
   // Menu counts only — integers per admin page (app/api/admin/badges).
   "admin.badges",
+  // Registered accounts before KYC/KYB; the route rechecks the admin role.
+  "admin.accountsList",
   // The Super Admin's document anchors (app/api/admin/document-anchor). The
   // list reads audit rows. Record WRITES (one of the accepted exceptions in
   // the header): its only write is the audit row of an anchor the server
@@ -51,6 +53,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "applications.adminEvents",
   "applications.adminList",
   "applications.capacity",
+  // The signer's own apply verdict (KYC/KYB) — never another wallet's.
+  "applications.eligibility",
   "applications.mine",
   "archive.check",
   "audit.list",
@@ -89,6 +93,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "payout-snapshots.adminRead",
   "payout-snapshots.proof",
   "profiles.read",
+  // The seller's own listings or the admin board (0082: a listing is public only while active).
+  "resell.list",
   "saleApprovals.capacity",
   "saleApprovals.list",
   "saleApprovals.mine",

@@ -43,11 +43,12 @@ vi.mock("@/lib/server/ops-watch", async (importOriginal) => {
   };
 });
 
-import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
+import { ASSET_REGISTRY_PROGRAM_ADDRESS, VaultState, VaultType } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, primaryIdleReport, roleChangesReport, runAlarmChecks, thresholdState,
+  bootstrapOpenReport, custodyEntryOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, primaryIdleReport, roleChangesReport,
+  runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
@@ -703,6 +704,104 @@ describe("role-change-pending and payout-modules", () => {
     const { sb: mock, rpcs } = mockSb(heartbeats);
     await runAlarmChecks(mock, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(incident(rpcs, "primary-open-idle")).toBeDefined();
+  });
+
+  it("custody-entry-open: 0x08 clear fails after 30 minutes with nothing waiting, after 2 hours while a custody step waits (high on mainnet)", async () => {
+    const now = Date.parse("2026-10-10T12:00:00Z");
+    const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+    const reads: string[] = [];
+    type T = {
+      flags?: number | null; platformAt?: string; alerts?: Record<string, unknown>[]; vaults?: Record<string, unknown>[];
+      conversions?: Record<string, unknown>[]; deliveries?: Record<string, unknown>[]; broken?: string;
+    };
+    // A precise fake: each read answers by its table and the eq / in filters it received, and a
+    // `select(..., { count })` answers the count of the matching rows (never the rows).
+    const sb = (t: T) => ({
+      from: (table: string) => {
+        const eqs: Record<string, unknown> = {};
+        const ins: Record<string, unknown[]> = {};
+        let counted = false;
+        const b: Record<string, unknown> = {};
+        b.select = (_columns: string, opts?: { count?: string }) => { counted = !!opts?.count; return b; };
+        b.order = () => b; b.limit = () => b;
+        b.eq = (column: string, value: unknown) => { eqs[column] = value; return b; };
+        b.in = (column: string, values: unknown[]) => { ins[column] = values; return b; };
+        const matching = (rows: Record<string, unknown>[]) => rows.filter((r) =>
+          Object.entries(eqs).every(([c, v]) => c === "network" || c === "source" || r[c] === v)
+          && Object.entries(ins).every(([c, vs]) => vs.includes(r[c])));
+        const rows = () => {
+          if (t.broken === table) return { data: null, error: { code: "08006" } };
+          reads.push(table);
+          if (table === "platforms") return { data: t.flags === null ? null : { pause_flags: t.flags ?? 0x76, updated_at: t.platformAt ?? ago(500) }, error: null };
+          const all = table === "compliance_alerts" ? t.alerts ?? []
+            : table === "custody_vaults" ? matching(t.vaults ?? [])
+              : table === "conversion_requests" ? matching(t.conversions ?? [])
+                : table === "delivery_requests" ? matching(t.deliveries ?? []) : [];
+          return counted ? { data: null, error: null, count: all.length } : { data: all, error: null };
+        };
+        b.abortSignal = () => ({
+          maybeSingle: async () => rows(),
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => Promise.resolve().then(rows).then(resolve, reject),
+        });
+        return b;
+      },
+    }) as never;
+    const run = (t: T, network: "mainnet" | "devnet" = "mainnet") => custodyEntryOpenReport(sb(t), network, AbortSignal.timeout(5_000), now);
+    const cleared = (minutes: number, mask = 0x08) => [{ created_at: ago(minutes), evidence: { set_mask: 0, clear_mask: mask } }];
+    const vault = (deposited: unknown, over: Record<string, unknown> = {}) =>
+      ({ vault_type: VaultType.DeliveryEscrow, state: VaultState.Active, deposited, ...over });
+
+    // 0x08 set: pass, nothing else read.
+    reads.length = 0;
+    expect(await run({ flags: 0x7e })).toMatchObject({ state: "pass", severity: "high", check: "custody-entry-open", source: "onchain:custody-entry-open", category: "onchain" });
+    expect(reads).toEqual(["platforms"]);
+    // Cleared 10 minutes ago (the onchain:pause alert of a clear of bit 0x08), nothing waiting: hold; 31 minutes: fail, high on mainnet, low elsewhere.
+    expect(await run({ alerts: cleared(10) })).toMatchObject({ state: "hold", evidence: { minutes_open: 10, vaults_awaiting_deposit: 0, requests_waiting: 0 },
+      summary: expect.stringMatching(/open for 10 minutes \(0 vaults awaiting a deposit, 0 requests waiting; fails after 30\)/) });
+    const idle = await run({ alerts: cleared(31) });
+    expect(idle).toMatchObject({ state: "fail", severity: "high", evidence: { pause_flags: 0x76, open_since: ago(31), minutes_open: 31 },
+      summary: expect.stringMatching(/^Custody entry \(0x08\) has been open for 31 minutes \(0 vaults awaiting a deposit, 0 requests waiting\): every Admin can open custody vaults/) });
+    expect(idle?.summary).toContain("/admin/platform");
+    expect(await run({ alerts: cleared(31) }, "devnet")).toMatchObject({ state: "fail", severity: "low" });
+    // A clear of another bit does not count: the Platform mirror's own update time then.
+    expect(await run({ alerts: cleared(5, 0x02), platformAt: ago(45) })).toMatchObject({ state: "fail", evidence: { minutes_open: 45 } });
+    expect(await run({ platformAt: ago(20) })).toMatchObject({ state: "hold", evidence: { minutes_open: 20 } });
+    // An Active DeliveryEscrow with no deposit yet: the window waits for it (2 hours).
+    expect(await run({ alerts: cleared(90), vaults: [vault("0")] })).toMatchObject({ state: "hold", evidence: { vaults_awaiting_deposit: 1 },
+      summary: expect.stringMatching(/\(1 vault awaiting a deposit, 0 requests waiting; fails after 120\)/) });
+    expect(await run({ alerts: cleared(121), vaults: [vault("0")] })).toMatchObject({ state: "fail", evidence: { minutes_open: 121, vaults_awaiting_deposit: 1 } });
+    // Deposited (a digit string or a number): nothing waits. Only Active DeliveryEscrows count; an unreadable deposit column counts as awaiting.
+    expect(await run({ alerts: cleared(31), vaults: [vault("250")] })).toMatchObject({ state: "fail", evidence: { vaults_awaiting_deposit: 0 } });
+    expect(await run({ alerts: cleared(31), vaults: [vault(250)] })).toMatchObject({ state: "fail" });
+    expect(await run({ alerts: cleared(31), vaults: [vault("0", { state: VaultState.Realized }), vault("0", { vault_type: VaultType.Vesting })] }))
+      .toMatchObject({ state: "fail", evidence: { vaults_awaiting_deposit: 0 } });
+    expect(await run({ alerts: cleared(31), vaults: [vault(null)] })).toMatchObject({ state: "hold", evidence: { vaults_awaiting_deposit: 1 } });
+    // A conversion or delivery request before its deposit (requested, approved, vault_opened) waits too; a deposited, converted or delivered one does not.
+    for (const status of ["requested", "approved", "vault_opened"]) {
+      expect(await run({ alerts: cleared(45), conversions: [{ status }] }), status).toMatchObject({ state: "hold", evidence: { requests_waiting: 1 } });
+      expect(await run({ alerts: cleared(45), deliveries: [{ status }] }), status).toMatchObject({ state: "hold", evidence: { requests_waiting: 1 } });
+    }
+    expect(await run({ alerts: cleared(45), conversions: [{ status: "deposited" }, { status: "converted" }], deliveries: [{ status: "delivered" }] }))
+      .toMatchObject({ state: "fail", evidence: { requests_waiting: 0 } });
+    // 10.10 replayed: cleared at 11:40 for a request; the vault open and awaiting its deposit at 12:10 (hold); deposited at 12:18, the
+    // request `deposited`: fail — before the 12:26 burn, which does not need the window.
+    const at = (hhmm: string) => Date.parse(`2026-10-10T${hhmm}:00Z`);
+    const replay = (when: string, t: T) => custodyEntryOpenReport(sb(t), "mainnet", AbortSignal.timeout(5_000), at(when));
+    const clearedAt1140 = [{ created_at: new Date(at("11:40")).toISOString(), evidence: { set_mask: 0, clear_mask: 0x08 } }];
+    expect(await replay("11:45", { alerts: clearedAt1140, conversions: [{ status: "requested" }] })).toMatchObject({ state: "hold", evidence: { minutes_open: 5 } });
+    expect(await replay("12:10", { alerts: clearedAt1140, vaults: [vault("0")], conversions: [{ status: "vault_opened" }] })).toMatchObject({ state: "hold", evidence: { minutes_open: 30 } });
+    expect(await replay("12:18", { alerts: clearedAt1140, vaults: [vault("250")], conversions: [{ status: "deposited" }] })).toMatchObject({ state: "fail", evidence: { minutes_open: 38 } });
+    // No Platform mirrored: hold; a read that fails: the check could not run (never a silent pass).
+    expect(await run({ flags: null })).toMatchObject({ state: "hold" });
+    for (const broken of ["platforms", "compliance_alerts", "custody_vaults", "conversion_requests", "delivery_requests"]) {
+      expect(await run({ broken }), broken).toBeNull();
+    }
+    expect(SOURCE_LABELS["onchain:custody-entry-open"]).toMatchObject({ format: "platform" });
+    // Recorded with the other cheap checks (devnet here, no Platform mirrored: hold).
+    const { sb: mock, rpcs } = mockSb(heartbeats);
+    const result = await runAlarmChecks(mock, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "custody-entry-open")).toMatchObject({ p_state: "hold", p_severity: "low", p_source: "onchain:custody-entry-open", p_category: "onchain" });
+    expect(result.reports.length).toBe(result.expected);
   });
 
   it("roleChangesReport reads only this network's rows", async () => {

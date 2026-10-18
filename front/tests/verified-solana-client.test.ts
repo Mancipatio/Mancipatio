@@ -11,7 +11,7 @@ import type {
   TransactionPrepareRequest,
   WalletSession,
 } from "@solana/client";
-import { address, type Address, type Instruction } from "@solana/kit";
+import { address, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, SolanaError, type Address, type Instruction } from "@solana/kit";
 
 const events = vi.hoisted(() => [] as string[]);
 vi.mock("@/lib/maintenance", async (original) => ({
@@ -26,15 +26,20 @@ vi.mock("@/lib/transaction-wallet-policy", async (original) => ({
     events.push("authorize");
   }),
 }));
+// The genesis check: held back behind `gate` when a test sets one, failed with `fail`.
+const net = vi.hoisted(() => ({ gate: null as Promise<void> | null, fail: null as Error | null }));
 vi.mock("@/lib/network-identity", async (original) => ({
   ...(await original<typeof import("@/lib/network-identity")>()),
   createNetworkVerifier: () => async () => {
     events.push("network");
+    if (net.gate) await net.gate;
+    if (net.fail) throw net.fail;
   },
 }));
 const sim = vi.hoisted(() => ({
   verdict: { err: null as unknown, logs: [] as string[], unitsConsumed: 300_000 as number | null },
-  throws: null as Error | null,
+  /** Thrown by the next simulations, one each in order; then the verdict. */
+  throws: [] as unknown[],
   messages: [] as unknown[],
 }));
 vi.mock("@/lib/simulation-gate", async (original) => ({
@@ -42,23 +47,55 @@ vi.mock("@/lib/simulation-gate", async (original) => ({
   simulateMessage: vi.fn(async (_rpc: unknown, message: unknown) => {
     events.push("simulate");
     sim.messages.push(message);
-    if (sim.throws) throw sim.throws;
+    const next = sim.throws.shift();
+    if (next) throw next;
     return sim.verdict;
   }),
 }));
+// The Platform account the pause gate reads (lib/pause-gate readFromChain): its flags, or no account at all (a failed read).
+const platform = vi.hoisted(() => ({ flags: null as number | null }));
+vi.mock("@/lib/generated/asset_registry", async (original) => {
+  const actual = await original<typeof import("@/lib/generated/asset_registry")>();
+  return {
+    ...actual,
+    fetchMaybePlatform: vi.fn(async () => {
+      events.push("pause-read");
+      if (platform.flags === null) throw new Error("no platform");
+      return { exists: true, programAddress: actual.ASSET_REGISTRY_PROGRAM_ADDRESS, data: { pauseFlags: platform.flags } };
+    }),
+  };
+});
 
-import { withVerifiedTransactions } from "@/lib/verified-solana-client";
+import { BLOCKHASH_FETCH_TIMEOUT_MS, SETTLE_TIMEOUT_MS, withVerifiedTransactions, type VerifiedTransactionsOptions } from "@/lib/verified-solana-client";
 import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
+import { assertSiteWritable, MaintenanceModeError } from "@/lib/maintenance";
+import { NetworkIdentityError } from "@/lib/network-identity";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 import { PROBE_LIFETIME, SimulationRefusedError, SimulationUnavailableError } from "@/lib/simulation-gate";
 import { explainSendError, SALE_AUTHORITY_HINT, SALE_SYNC_SUFFIX } from "@/lib/tx-error";
+import { PILOT_MODULE_ENV } from "@/lib/features";
+import { clearPauseFlagsCache, ModuleDisabledFlowError, PausedFlowError, withGateFacts } from "@/lib/pause-gate";
+import * as PAUSE from "@/lib/pause-flags";
+import { currentSendStage, onSendStage, type SendStage } from "@/lib/send-stage";
+import {
+  BUY_DISCRIMINATOR,
+  getOpenCustodyVaultInstructionDataEncoder,
+  RealizeAction,
+  SET_PAUSE_FLAGS_DISCRIMINATOR,
+  TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
+  VaultType,
+} from "@/lib/generated/asset_registry";
 
 const WALLET = address("7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2");
 const PROGRAM = address("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
 const HOOK = address("GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy");
 const TOKEN_2022 = address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const ix = (bytes = 8): Instruction => ({ programAddress: PROGRAM, data: new Uint8Array(bytes) });
+/** A registry instruction the gate recognizes: its discriminator and zeroed data. */
+const registryIx = (discriminator: Uint8Array): Instruction => ({ programAddress: PROGRAM, data: new Uint8Array([...discriminator, ...new Uint8Array(32)]) });
+/** What kit makes of an HTTP status from the RPC transport (8100002). */
+const http = (statusCode: number) => new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode });
 
 const oracle = { network: "devnet", microLamports: "5000", beforeReply: null as (() => void) | null };
 const fetchMock = vi.fn(async (url: unknown) => {
@@ -77,7 +114,7 @@ function session(wallet: Address = WALLET): WalletSession {
   };
 }
 
-function fixture(network: "devnet" | "mainnet" = "devnet", rpc: Record<string, unknown> = {}) {
+function fixture(network: "devnet" | "mainnet" = "devnet", rpc: Record<string, unknown> = {}, options: VerifiedTransactionsOptions = {}) {
   let current: WalletSession = session();
   const prepare = vi.fn(async (input: TransactionPrepareRequest) => {
     events.push("sdk.prepare");
@@ -102,7 +139,7 @@ function fixture(network: "devnet" | "mainnet" = "devnet", rpc: Record<string, u
     store: { getState: () => ({ wallet: { status: "connected", session: current } }) },
   } as unknown as SolanaClient;
   return {
-    guarded: withVerifiedTransactions(client, network),
+    guarded: withVerifiedTransactions(client, network, options),
     prepare,
     prepareAndSend,
     sign: transaction.sign,
@@ -120,8 +157,12 @@ const request = (over: Partial<TransactionPrepareAndSendRequest> = {}) =>
 beforeEach(() => {
   events.length = 0;
   sim.verdict = { err: null, logs: [], unitsConsumed: 300_000 };
-  sim.throws = null;
+  sim.throws.length = 0;
   sim.messages.length = 0;
+  net.gate = null;
+  net.fail = null;
+  platform.flags = null;
+  clearPauseFlagsCache();
   resetPriorityFeeCache();
   oracle.network = "devnet";
   oracle.microLamports = "5000";
@@ -278,10 +319,12 @@ describe("prepareAndSend puts the compute unit limit first", () => {
 });
 
 describe("the simulation gate", () => {
-  it("runs after maintenance and before the wallet-policy prompt: one simulation per send", async () => {
+  it("runs after the checks before it and before the wallet-policy prompt: one simulation per send", async () => {
     const f = fixture();
     await f.guarded.transaction.prepareAndSend(request());
-    expect(events).toEqual(["network", "fee", "maintenance", "sdk.prepare", "simulate", "authorize", "sdk.prepareAndSend"]);
+    // The network, the fee and the maintenance flag are read together (in any order); then the probe, the one simulation, the policy, the SDK.
+    expect(new Set(events.slice(0, 3))).toEqual(new Set(["network", "fee", "maintenance"]));
+    expect(events.slice(3)).toEqual(["sdk.prepare", "simulate", "authorize", "sdk.prepareAndSend"]);
   });
 
   it("prepares the probe with a placeholder lifetime (the node replaces it), or the caller's own", async () => {
@@ -348,10 +391,34 @@ describe("the simulation gate", () => {
 
   it("fails closed when the network cannot be asked", async () => {
     const f = fixture();
-    sim.throws = new Error("fetch failed");
+    sim.throws.push(new Error("fetch failed"));
     const failure = await f.guarded.transaction.prepareAndSend(request()).then(() => null, (err: unknown) => err);
     expect(failure).toBeInstanceOf(SimulationUnavailableError);
     expect(explainSendError(failure)).toMatch(/^Could not test this transaction on devnet before opening your wallet, so nothing was sent \(fetch failed\)/);
+    // Not a refusal of the moment: asked once.
+    expect(events.filter((e) => e === "simulate")).toHaveLength(1);
+    expect(events).not.toContain("authorize");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
+  });
+
+  it("a simulation the RPC refused for a moment (HTTP 429) is read again, and the send goes on (r2g4-03)", async () => {
+    const f = fixture("devnet", {}, { readRetry: { delaysMs: [1, 1, 1], sleep: async () => {} } });
+    sim.throws.push(http(429));
+    await expect(f.guarded.transaction.prepareAndSend(request())).resolves.toBe("signature");
+    expect(events.filter((e) => e === "simulate")).toHaveLength(2);
+    expect(events.lastIndexOf("simulate")).toBeLessThan(events.indexOf("authorize"));
+  });
+
+  it("refused on every attempt: fails closed naming the status, never kit's production decode text", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const f = fixture("devnet", {}, { readRetry: { delaysMs: [1, 1, 1], sleep: async () => {} } });
+    sim.throws.push(http(429), http(429), http(429), http(429));
+    const failure = await f.guarded.transaction.prepareAndSend(request()).then(() => null, (err: unknown) => err);
+    expect(failure).toBeInstanceOf(SimulationUnavailableError);
+    expect(events.filter((e) => e === "simulate")).toHaveLength(4);
+    const text = explainSendError(failure);
+    expect(text).toBe("Could not test this transaction on devnet before opening your wallet, so nothing was sent (the RPC answered HTTP 429). Try again in a moment.");
+    expect(text).not.toMatch(/npx|Solana error #/);
     expect(events).not.toContain("authorize");
     expect(f.prepareAndSend).not.toHaveBeenCalled();
   });
@@ -388,5 +455,252 @@ describe("the simulation gate", () => {
     expect(statuses).toHaveBeenCalledTimes(2);
     expect(events.indexOf("status:signature")).toBeGreaterThan(-1);
     expect(events.lastIndexOf("status:signature")).toBeLessThan(events.indexOf("simulate"));
+  });
+});
+
+// r2g4-11 / r2g4-01: between the click and the wallet, the checks none of
+// which needs another's result run together, and only the simulation, the
+// policy and the wallet come one after another. Their failures are still
+// reported in the old order.
+describe("the checks before the wallet run together", () => {
+  it("the fee and the maintenance flag are read while the network check is still pending; nothing is simulated before it answers", async () => {
+    let release: () => void = () => {};
+    net.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = fixture();
+    const sending = f.guarded.transaction.prepareAndSend(request());
+    await vi.waitFor(() => {
+      expect(events).toContain("fee");
+      expect(events).toContain("maintenance");
+    });
+    expect(new Set(events)).toEqual(new Set(["network", "fee", "maintenance"]));
+    expect(events).not.toContain("simulate");
+    release();
+    await expect(sending).resolves.toBe("signature");
+    expect(events.slice(3)).toEqual(["sdk.prepare", "simulate", "authorize", "sdk.prepareAndSend"]);
+  });
+
+  it("a failed network check is reported first, whatever else failed, and nothing after it runs", async () => {
+    net.fail = new NetworkIdentityError("The RPC is connected to a different network. Expected devnet; the blockchain action was stopped.");
+    vi.mocked(assertSiteWritable).mockRejectedValueOnce(new MaintenanceModeError("Platform upgrade in progress."));
+    const f = fixture();
+    await expect(f.guarded.transaction.prepareAndSend(request())).rejects.toBeInstanceOf(NetworkIdentityError);
+    expect(events).not.toContain("sdk.prepare");
+    expect(events).not.toContain("simulate");
+    expect(events).not.toContain("authorize");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
+  });
+
+  it("a maintenance refusal still wins over the simulation and the wallet when the network is fine", async () => {
+    vi.mocked(assertSiteWritable).mockRejectedValueOnce(new MaintenanceModeError("Platform upgrade in progress."));
+    const f = fixture();
+    await expect(f.guarded.transaction.prepareAndSend(request())).rejects.toBeInstanceOf(MaintenanceModeError);
+    expect(events).not.toContain("simulate");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
+  });
+
+  it("the pause flags are read with the other checks for an entry only: a custody recording (an exit) reads nothing", async () => {
+    platform.flags = 0;
+    await fixture().guarded.transaction.prepareAndSend(request({ instructions: [registryIx(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR)] }));
+    expect(events).not.toContain("pause-read");
+    events.length = 0;
+    await fixture().guarded.transaction.prepareAndSend(request({ instructions: [registryIx(BUY_DISCRIMINATOR)] }));
+    // Read once, with the other checks; the decision after the (absent) wait reuses it.
+    expect(events.filter((e) => e === "pause-read")).toHaveLength(1);
+    expect(events.indexOf("pause-read")).toBeLessThan(events.indexOf("sdk.prepare"));
+    expect(events.at(-1)).toBe("sdk.prepareAndSend");
+  });
+
+  it("a set bit refuses the entry before the simulation, on the flags read with the other checks", async () => {
+    platform.flags = PAUSE.PAUSE_PRIMARY;
+    const f = fixture();
+    const failure = await f.guarded.transaction.prepareAndSend(request({ instructions: [registryIx(BUY_DISCRIMINATOR)] })).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(PausedFlowError);
+    expect(events.filter((e) => e === "pause-read")).toHaveLength(1);
+    expect(events).not.toContain("simulate");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
+  });
+
+  // r2g4-05: a Resume is sent, then a dependent click within the same minute.
+  // The flags are cached for a few seconds (lib/pause-gate), so a read taken
+  // while the Resume was in flight still shows the bit set; the decision must
+  // wait for the Resume and then read again.
+  it("a click right after this tab's previous send: the pause decision is taken on flags read after that send landed, not on flags cached before it", async () => {
+    platform.flags = PAUSE.PAUSE_PRIMARY;
+    const statuses = vi
+      .fn()
+      .mockImplementationOnce(async () => ({ value: [null] }))
+      .mockImplementationOnce(async () => {
+        // Landed: the bit it cleared is clear.
+        platform.flags = 0;
+        return { value: [{ confirmationStatus: "confirmed", err: null }] };
+      });
+    const f = fixture("devnet", {
+      getSignatureStatuses: () => ({
+        send: async () => {
+          events.push("status");
+          return statuses();
+        },
+      }),
+    });
+    // The Resume itself: set_pause_flags has no pause flow, so nothing is read for it.
+    await f.guarded.transaction.prepareAndSend(request({ instructions: [registryIx(SET_PAUSE_FLAGS_DISCRIMINATOR)] }));
+    expect(events).not.toContain("pause-read");
+    events.length = 0;
+    await expect(f.guarded.transaction.prepareAndSend(request({ instructions: [registryIx(BUY_DISCRIMINATOR)] }))).resolves.toBe("signature");
+    // Read with the other checks (stale: the bit still set), waited, read again, decided, then simulated.
+    expect(events.filter((e) => e === "pause-read")).toHaveLength(2);
+    expect(events.filter((e) => e === "status")).toHaveLength(2);
+    expect(events.indexOf("pause-read")).toBeLessThan(events.indexOf("status"));
+    expect(events.lastIndexOf("pause-read")).toBeGreaterThan(events.lastIndexOf("status"));
+    expect(events.lastIndexOf("pause-read")).toBeLessThan(events.indexOf("simulate"));
+  });
+});
+
+// r2g4-10: what the site-wide notice is told (lib/send-stage) by a single send.
+describe("the stages of a send, for the site-wide notice", () => {
+  let stop = () => {};
+  beforeEach(() => {
+    stop = onSendStage((stage) => events.push(`stage:${stage.kind}`));
+  });
+  afterEach(() => stop());
+
+  it("announces each step in its place, and ends with done", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request());
+    expect(events.filter((e) => e.startsWith("stage:"))).toEqual(["stage:checking", "stage:testing", "stage:account", "stage:wallet", "stage:done"]);
+    expect(events.indexOf("stage:checking")).toBeLessThan(events.indexOf("network"));
+    expect(events.indexOf("stage:testing")).toBeGreaterThan(events.indexOf("maintenance"));
+    expect(events.indexOf("stage:testing")).toBeLessThan(events.indexOf("simulate"));
+    expect(events.indexOf("stage:account")).toBeGreaterThan(events.indexOf("simulate"));
+    expect(events.indexOf("stage:account")).toBeLessThan(events.indexOf("authorize"));
+    expect(events.indexOf("stage:wallet")).toBeGreaterThan(events.indexOf("authorize"));
+    expect(events.indexOf("stage:wallet")).toBeLessThan(events.indexOf("sdk.prepareAndSend"));
+    expect(events.at(-1)).toBe("stage:done");
+    expect(currentSendStage()).toBeNull();
+  });
+
+  it("a refused simulation never reaches the account or wallet stage, and ends with failed", async () => {
+    sim.verdict = { err: "InsufficientFundsForFee", logs: [], unitsConsumed: 0 };
+    await expect(fixture().guarded.transaction.prepareAndSend(request())).rejects.toBeInstanceOf(SimulationRefusedError);
+    expect(events.filter((e) => e.startsWith("stage:"))).toEqual(["stage:checking", "stage:testing", "stage:failed"]);
+    expect(currentSendStage()).toBeNull();
+  });
+
+  it("says when it waits for this tab's previous send, how many and for how long at most, before the simulation (r2g4-04)", async () => {
+    const waits: SendStage[] = [];
+    const stopWaits = onSendStage((stage) => {
+      if (stage.kind === "waiting-previous") waits.push(stage);
+    });
+    const statuses = vi.fn().mockResolvedValueOnce({ value: [null] }).mockResolvedValueOnce({ value: [{ confirmationStatus: "confirmed", err: null }] });
+    const f = fixture("devnet", {
+      getSignatureStatuses: () => ({
+        send: async () => {
+          events.push("status");
+          return statuses();
+        },
+      }),
+    });
+    try {
+      await f.guarded.transaction.prepareAndSend(request());
+      expect(waits).toEqual([]);
+      events.length = 0;
+      await f.guarded.transaction.prepareAndSend(request());
+    } finally {
+      stopWaits();
+    }
+    expect(waits).toEqual([{ kind: "waiting-previous", count: 1, maxSeconds: SETTLE_TIMEOUT_MS / 1000 }]);
+    expect(events.indexOf("stage:waiting-previous")).toBeLessThan(events.indexOf("status"));
+    expect(events.indexOf("stage:testing")).toBeGreaterThan(events.lastIndexOf("status"));
+  });
+
+  it("a listener that throws does not stop the send", async () => {
+    const stopThrowing = onSendStage(() => {
+      throw new Error("the notice broke");
+    });
+    try {
+      await expect(fixture().guarded.transaction.prepareAndSend(request())).resolves.toBe("signature");
+    } finally {
+      stopThrowing();
+    }
+    expect(events.at(-1)).toBe("stage:done");
+  });
+});
+
+// r2g4-06: the blockhash fetch just before the wallet is bounded by the
+// request's own signal (the SDK hands it to that fetch and its planning only,
+// never to the wallet); the wallet's prompt may take as long as the user needs.
+describe("the blockhash fetch is bounded, the wallet is not", () => {
+  it("hands the SDK a request with its own abortSignal, or the caller's", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request());
+    const sent = f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest;
+    expect(sent.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(sent.abortSignal?.aborted).toBe(false);
+    expect(BLOCKHASH_FETCH_TIMEOUT_MS).toBe(15_000);
+    const own = new AbortController().signal;
+    const g = fixture();
+    await g.guarded.transaction.prepareAndSend(request({ abortSignal: own }));
+    expect((g.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest).abortSignal).toBe(own);
+  });
+
+  it("a fetch cut off by that signal is explained as nothing sent", async () => {
+    const f = fixture();
+    f.prepareAndSend.mockRejectedValueOnce(new DOMException("The operation timed out.", "TimeoutError"));
+    const failure = await f.guarded.transaction.prepareAndSend(request()).catch((e: unknown) => e);
+    expect(explainSendError(failure)).toBe("The network did not answer in time; nothing was sent. Try again in a moment.");
+  });
+});
+
+describe("the pilot scope on the wallet path: a page's declared purpose reaches the gate", () => {
+  // /admin/custody sends a conversion approval as tx.send({ instructions: [ix],
+  // feePayer }); @solana/react-hooks' useSendTransaction copies only the
+  // request ({ ...request, authority }) and calls this client's
+  // prepareAndSend, which runs the pilot-scope gate on input.instructions
+  // first. The declaration (withGateFacts) belongs to the instruction object,
+  // so it must still be on that object when the gate reads it; if a library
+  // upgrade ever copies instructions before the gate, the second case shows
+  // what happens (a delivery, refused), and this test is where it shows.
+  const conversionOpen = () =>
+    withGateFacts(
+      {
+        programAddress: PROGRAM,
+        data: new Uint8Array(getOpenCustodyVaultInstructionDataEncoder().encode({
+          vaultId: BigInt(1), vaultType: VaultType.DeliveryEscrow, realizeAction: RealizeAction.BurnAndAttest,
+          amount: BigInt(10), deadline: BigInt(0), metadataHash: new Uint8Array(32), beneficiary: WALLET,
+        })),
+      } as Instruction,
+      { custodyPurpose: "conversion" },
+    );
+
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    oracle.network = "mainnet";
+    for (const name of Object.values(PILOT_MODULE_ENV)) vi.stubEnv(name, "");
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+  });
+
+  it("mainnet, conversion alone switched on: the declared conversion open passes the gate and reaches the SDK", async () => {
+    const f = fixture("mainnet");
+    const declared = conversionOpen();
+    // As the hook passes it: a shallow copy of the request, the same instruction objects.
+    const sent = { ...request({ instructions: [declared] }) };
+    await expect(f.guarded.transaction.prepareAndSend(sent)).resolves.toBe("signature");
+    expect(f.prepareAndSend).toHaveBeenCalledOnce();
+    expect(events).toContain("simulate");
+    expect(events.at(-1)).toBe("sdk.prepareAndSend");
+  });
+
+  it("a copy of the instruction carries no declaration: it is gated as a delivery and refused before the wallet", async () => {
+    const f = fixture("mainnet");
+    const copied = { ...conversionOpen() };
+    const failure = await f.guarded.transaction.prepareAndSend(request({ instructions: [copied] })).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ModuleDisabledFlowError);
+    expect((failure as ModuleDisabledFlowError).module).toBe("custodyDelivery");
+    expect(explainSendError(failure)).toBe("Physical delivery: not available on Solana mainnet. Nothing was sent to your wallet.");
+    expect(events).not.toContain("simulate");
+    expect(events).not.toContain("authorize");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
   });
 });

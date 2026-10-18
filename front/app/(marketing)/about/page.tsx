@@ -13,6 +13,7 @@ import {
   TextLink,
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { KYC_ONLY_MESSAGE, scopeEnabled } from "@/lib/features";
 import { modulesFact } from "@/lib/module-facts";
 import { securityReviewFact } from "@/lib/legal/audit";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
@@ -44,6 +45,9 @@ export const metadata: Metadata = {
 
 const NETWORK = detectNetwork();
 const OPERATOR = operatorFor(NETWORK);
+/** KYC-only mode (lib/features.ts): issuer applications are paused (modulesFact
+ *  says so), and the page's way in is identity verification. */
+const ISSUANCE_OPEN = scopeEnabled("issuance", NETWORK);
 
 /** Who operates this network: the registered entity and its licence, or the
  *  pilot's plain statement that there is none yet (lib/legal/operator.ts). */
@@ -73,7 +77,7 @@ const WHERE_THINGS_STAND = [
   securityReviewFact(),
   "Asset registry, Token-2022 mints and program-owned custody",
   modulesFact(NETWORK),
-  "Issuer applications are open and read by a person",
+  ...(ISSUANCE_OPEN ? ["Issuer applications are open and read by a person"] : []),
 ];
 
 export default function AboutPage() {
@@ -98,10 +102,9 @@ export default function AboutPage() {
 
         <H2 className="mt-10">The mission</H2>
         <Body className="mt-4">
-          Bring the whole lifecycle of asset ownership on-chain — not just the
-          easy last mile. Issuance, compliance, custody, primary and secondary
-          markets, governance and vesting, on one platform, enforced by code
-          rather than entrusted to an operator.
+          Bring asset issuance, verification, document review and ownership
+          records into one workspace. Each available service follows the
+          approved terms of the issuance.
         </Body>
 
         <H2 className="mt-10">Why the structure comes first</H2>
@@ -134,6 +137,7 @@ export default function AboutPage() {
         </p>
       </Section>
 
+      {ISSUANCE_OPEN && (
       <Section>
         <H2>Two ways in.</H2>
         <Body className="mt-4">
@@ -143,10 +147,24 @@ export default function AboutPage() {
         <ButtonRow>
           <Button href={MX_ROUTES.apply}>Apply to issue</Button>
           <Button href={MX_ROUTES.instruments} variant="ghost">
-            See the eight instruments
+            See the asset types
           </Button>
         </ButtonRow>
       </Section>
+      )}
+      {/* KYC-only mode: sign-up and identity verification are the way in. */}
+      {!ISSUANCE_OPEN && (
+        <Section>
+          <H2>Sign up and get verified.</H2>
+          <Body className="mt-4">{KYC_ONLY_MESSAGE}</Body>
+          <ButtonRow>
+            <Button href="/verify">Get verified</Button>
+            <Button href={MX_ROUTES.instruments} variant="ghost">
+              See the asset types
+            </Button>
+          </ButtonRow>
+        </Section>
+      )}
     </>
   );
 }

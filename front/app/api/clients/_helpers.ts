@@ -266,6 +266,74 @@ export async function fetchClientOr404(
 }
 
 /**
+ * A dossier owned by a wallet-less (email/Google) account: it belongs to an
+ * account and has no wallet yet. Such a dossier accepts the Terms and
+ * uploads its documents through the magic-link token alone (accept-tos,
+ * upload); a wallet dossier binds both to its wallet. The onboarding page
+ * reads this as `account_owned` (onboarding-view) and shows the wallet steps
+ * as optional. A dossier that later gets a wallet takes the wallet path.
+ */
+export function isAccountOwnedDossier(
+  row: Pick<DbClientRow, "wallet" | "account_id">,
+): boolean {
+  return !row.wallet && !!row.account_id;
+}
+
+/** True when `wallet` is one of the account's linked wallets on `network`. */
+export async function isAccountWalletMember(
+  sb: SupabaseClient,
+  accountId: string,
+  network: string,
+  wallet: string,
+): Promise<boolean> {
+  const { data, error } = await sb
+    .from("account_wallets")
+    .select("wallet")
+    .eq("account_id", accountId)
+    .eq("network", network)
+    .eq("wallet", wallet)
+    .limit(1);
+  if (error) {
+    console.error("[clients/_helpers] account membership read failed:", error.message);
+    throw new SiwsError(500, "Database read failed");
+  }
+  return (data ?? []).length > 0;
+}
+
+/**
+ * The dossier an invitation names, read for a decision the atomic binding
+ * (0044 link_client_wallet) cannot make on its own: who may bind a wallet to
+ * an ACCOUNT-OWNED dossier. The read answers like the binding does for an
+ * unknown dossier, another network or a wrong token (one 401), so it tells a
+ * caller nothing the binding would not; the binding re-checks everything
+ * under its row lock afterwards.
+ */
+export async function dossierForInvitation(
+  sb: SupabaseClient,
+  clientId: string,
+  token: string,
+): Promise<DbClientRow> {
+  const { data, error } = await sb
+    .from("clients")
+    .select("*")
+    .eq("id", clientId)
+    .eq("network", detectNetwork())
+    .maybeSingle();
+  if (error) throw new SiwsError(500, "Database read failed");
+  const row = data as DbClientRow | null;
+  if (!row || !row.onboarding_token || row.onboarding_token !== token) {
+    throw new SiwsError(401, "Invalid onboarding invitation for this network");
+  }
+  if (!isOnboardingTokenLive(row.created_at, row.onboarding_token_expires_at)) {
+    throw new SiwsError(
+      401,
+      "This onboarding link has expired — ask the platform operator for a fresh invitation",
+    );
+  }
+  return row;
+}
+
+/**
  * Magic-link credential check: the presented token must be non-empty, equal
  * to the row's onboarding_token AND not past its TTL. Clients created with a
  * pre-known wallet have a NULL token and can never authenticate this way.

@@ -13,13 +13,40 @@ import {
   TextLink,
   type StepItem,
 } from "@/components/mx";
+import { allAssetClassesOffered, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 import { getSolution, SOLUTIONS } from "@/lib/solutions";
+import { ASSET_TYPE_LABEL } from "@/lib/format";
+import { slugForEnum } from "@/lib/asset-types";
+import type { AssetType } from "@/lib/generated/asset_registry";
+
+/**
+ * The tokenization guide's asset types: the classes offered on this network
+ * (lib/asset-classes.ts), in the on-chain enum order of ASSET_TYPE_LABEL.
+ * With every class offered, the sentence is the one it always was.
+ */
+function OfferedAssetTypes() {
+  const terms = "An asset identifies the instrument; its share classes define the units and their economic terms.";
+  if (allAssetClassesOffered()) {
+    return <>Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other. {terms}</>;
+  }
+  const offered = ASSET_TYPE_LABEL.filter((_, i) => assetClassOffered(slugForEnum(i as AssetType))).map((label) => label.toLowerCase());
+  // The subject of the sentence is the set, so "and" (the choice above says "or").
+  const list = offered.length <= 1 ? offered.join("") : `${offered.slice(0, -1).join(", ")} and ${offered[offered.length - 1]}`;
+  const sentence = offered.length === 1
+    ? `${list} is the asset type Manci offers at the moment.`
+    : `${list} are the asset types Manci offers at the moment.`;
+  return <>{sentence.charAt(0).toUpperCase() + sentence.slice(1)} {terms}</>;
+}
 
 type ToolGuide = {
   intro: string;
   appHref: string;
   appLabel: string;
-  details: { title: string; body: ReactNode }[];
+  /** The app button when appHref belongs to a module switched off on this network. */
+  appFallback?: { href: string; label: string };
+  /** `onlyIf`: the card shows only while that page's module is on (lib/pilot-scope.ts). */
+  details: { title: string; body: ReactNode; onlyIf?: string }[];
   steps?: StepItem[];
 };
 
@@ -54,7 +81,7 @@ const GUIDES: Record<string, ToolGuide> = {
     details: [
       {
         title: "Asset types",
-        body: "Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other. An asset identifies the instrument; its share classes define the units and their economic terms.",
+        body: <OfferedAssetTypes />,
       },
       {
         title: "Document reference",
@@ -109,6 +136,8 @@ const GUIDES: Record<string, ToolGuide> = {
       {
         title: "Unique physical goods",
         body: "A unique physical good uses one class capped at one unit, with post-launch minting disabled. This prevents separate classes from representing multiple claims to the same item.",
+        // Physical goods are an asset class that may not be offered (lib/asset-classes.ts).
+        onlyIf: "/markets/types/physical",
       },
     ],
   },
@@ -161,6 +190,7 @@ const GUIDES: Record<string, ToolGuide> = {
       "Follow escrowed units through conversion, delivery and redemption, including their completion and return paths.",
     appHref: "/portfolio/delivery",
     appLabel: "Open delivery requests",
+    appFallback: { href: "/portfolio/conversion", label: "Open conversion requests" },
     details: [
       {
         title: "Vault types and states",
@@ -172,6 +202,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Delivery requests",
+        onlyIf: "/portfolio/delivery",
         body: "Requesting delivery requires identity verification (KYC). Delivery deposits tokens into escrow. A completed return releases the holder’s recorded deposit; confirmed delivery burns the units. A holder’s refund may complete while the vault still contains someone else’s surplus. Review the actual request and transaction state.",
       },
       {
@@ -180,6 +211,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Conversion requests",
+        onlyIf: "/portfolio/conversion",
         body: (
           <>
             <TextLink href="/portfolio/conversion">
@@ -213,6 +245,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "After a purchase",
+        onlyIf: "/marketplace/otc",
         body: (
           <>
             Purchased units appear in Portfolio. Existing holders can use the{" "}
@@ -333,8 +366,9 @@ export async function generateMetadata({
   const { slug } = await params;
   const solution = getSolution(slug);
   return {
-    title: solution ? `${solution.name} — Manci` : "Manci",
-    description: GUIDES[slug]?.intro,
+    title: solution ? `${slug === "custody" && navHrefVisible("/portfolio/conversion") && !navHrefVisible("/portfolio/delivery") ? "Token conversion" : solution.name} — Manci` : "Manci",
+    description: !navHrefVisible(`/solutions/${slug}`) ? "This service is not available at the moment." : slug === "custody" && !navHrefVisible("/portfolio/delivery") ? "Request conversion of eligible tokens you own into company shares and track its progress." : GUIDES[slug]?.intro,
+    ...(!navHrefVisible(`/solutions/${slug}`) && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
 }
 
@@ -348,28 +382,51 @@ export default async function SolutionPage({
   const guide = GUIDES[slug];
   if (!solution || !guide) notFound();
 
+  if (!navHrefVisible(`/solutions/${slug}`)) {
+    return <PageHeader eyebrow="Platform guide" title={solution.name} lede="This service is not available at the moment.">
+      <ButtonRow><Button href="/docs" variant="ghost">View available guides</Button></ButtonRow>
+    </PageHeader>;
+  }
+
+  const conversionOnly = slug === "custody" && !navHrefVisible("/portfolio/delivery");
+  const guideTitle = conversionOnly ? "Token conversion" : solution.name;
+  const guideIntro = conversionOnly ? "Request conversion of eligible tokens you own into company shares, then track review, escrow and completion." : guide.intro;
+  const conversionSteps = [
+    { title: "Verify your identity", body: "Complete KYC and wait for approval before requesting conversion." },
+    { title: "Choose eligible holdings", body: "Review the issuance terms and select tokens you own that support conversion." },
+    { title: "Submit and track the request", body: "Follow the request instructions, escrow deposit and review status. Respond if further documents are requested." },
+    { title: "Completion or return", body: "The operator records the completed conversion into company shares. Cancelled requests follow the available token return process." },
+  ];
   const sourceSteps = solution.howItWorks.map(({ step, note }) => ({
     title: step,
     body: note,
   }));
   const isVesting = slug === "rights-vesting";
+  // Pilot scope (lib/pilot-scope.ts): no button or card into a module that is
+  // switched off on this network; the guide itself stays readable.
+  const app = navHrefVisible(guide.appHref)
+    ? { href: guide.appHref, label: guide.appLabel }
+    : guide.appFallback && navHrefVisible(guide.appFallback.href)
+      ? guide.appFallback
+      : null;
+  const details = guide.details.filter((detail) => !detail.onlyIf || navHrefVisible(detail.onlyIf));
 
   return (
     <>
       <PageHeader
         eyebrow={`${solution.eyebrow} / Platform guide`}
-        title={solution.name}
-        lede={guide.intro}
+        title={guideTitle}
+        lede={guideIntro}
       >
         <ButtonRow>
-          <Button href={guide.appHref}>{guide.appLabel}</Button>
+          {app && <Button href={app.href}>{app.label}</Button>}
           <TextLink href="/docs#platform-tools">All platform guides →</TextLink>
         </ButtonRow>
       </PageHeader>
 
       <Section id="workflow">
         <H2>{isVesting ? "Vesting series workflow" : "Workflow"}</H2>
-        <Steps className="mt-6" items={guide.steps ?? sourceSteps} />
+        <Steps className="mt-6" items={conversionOnly ? conversionSteps : guide.steps ?? sourceSteps} />
       </Section>
 
       {isVesting ? (
@@ -387,8 +444,8 @@ export default async function SolutionPage({
       <Section id="details">
         <H2 className="mb-6">Details to check</H2>
         <Grid cols={2}>
-          {guide.details.map((detail) => (
-            <Card key={detail.title} title={detail.title} body={detail.body} />
+          {details.map((detail) => (
+            <Card key={detail.title} title={detail.title} body={conversionOnly && detail.title === "Vault types and states" ? "Conversion requests use escrow to hold the recorded token deposit while the request is processed. Review the current request and vault state before taking an action." : detail.body} />
           ))}
         </Grid>
       </Section>

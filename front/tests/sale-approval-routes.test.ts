@@ -80,6 +80,14 @@ vi.mock("@/lib/server/admin-gate", async () => {
     }),
   };
 });
+// The treasury-mint reserve route reads the class's room (lib/server/sale-requests readSaleRoom);
+// the room arithmetic itself is covered by tests/treasury-mint-route.test.ts.
+vi.mock("@/lib/server/sale-requests", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/server/sale-requests")>()),
+  readSaleRoom: vi.fn(async () => ({
+    room: BigInt(4_000), legalDocHash: new Uint8Array(32), assetActive: true, mintInitialized: true, openSales: 0, liveApprovals: 0,
+  })),
+}));
 vi.mock("@/lib/supabase-server", () => ({
   getSupabaseAdmin: () => ({
     from: (table: string) => {

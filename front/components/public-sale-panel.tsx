@@ -36,7 +36,7 @@ import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
-import { features } from "@/lib/features";
+import { features, KYC_ONLY_MESSAGE, scopeEnabled } from "@/lib/features";
 import { isPaused, PAUSE_ISSUER_PROCEEDS, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { signedUpload, sha256HexOfFile } from "@/lib/storage-client";
@@ -477,13 +477,17 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
   }
 
   if (!wallet) return null;
+  // KYC-only mode (lib/features.ts): primary sales are paused, so no new
+  // request and no opening; withdrawing a request and ending a sale stay.
+  const salesOn = scopeEnabled("primarySales");
 
   return (
     <div className="mt-3 space-y-3 text-[13px] text-slate-700">
       {chainError && <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">{chainError}</p>}
       {!chain && !chainError && <p className="text-slate-500">Reading the sale state…</p>}
 
-      {chain && stage === "form" && (
+      {chain && stage === "form" && !salesOn && <p className="text-[12px] text-slate-600">{KYC_ONLY_MESSAGE}</p>}
+      {chain && stage === "form" && salesOn && (
         <>
           {request && request.status !== "requested" && (
             <p className="text-[12px] text-slate-500">
@@ -634,14 +638,18 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
               Opens now and runs {openDays} days. Wallet prompts: 1 transaction + 1 to publish the listing.
             </p>
           )}
-          <button
-            type="button"
-            disabled={!primaryOpen || busy}
-            onClick={() => setConfirm("open")}
-            className="mt-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
-          >
-            Open sale
-          </button>
+          {salesOn ? (
+            <button
+              type="button"
+              disabled={!primaryOpen || busy}
+              onClick={() => setConfirm("open")}
+              className="mt-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+            >
+              Open sale
+            </button>
+          ) : (
+            <p className="mt-2 text-[12px] text-slate-600">{KYC_ONLY_MESSAGE}</p>
+          )}
           {working && <span className="ml-3" aria-live="polite">{working}</span>}
         </div>
       )}

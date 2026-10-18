@@ -55,6 +55,7 @@ import {
   ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED,
   ASSET_REGISTRY_ERROR__RECEIVER_KYC_EXPIRED,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
+  ASSET_REGISTRY_ERROR__RETURN_NOT_ALLOWED,
   ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
   ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH,
   ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID,
@@ -273,6 +274,19 @@ export const BLOCKLIST_RECOVERY_PENDING_HINT =
 export const KYC_REGISTRY_NOT_ALLOWED_HINT =
   "An Open mint must not name a KYC registry — choose KYC-gated, or clear the registry (KycRegistryNotAllowed).";
 
+// Custody recording (trigger, realize, return, revert): what the program
+// requires of the vault and of the signer. trigger needs Active, realize
+// Triggered, return a delivery escrow that is Active or Triggered.
+/** The vault is not in the state that step needs (InvalidVaultState, 6015; the hook's 6015 is another error, so it matches by name). */
+export const INVALID_VAULT_STATE_HINT =
+  "This vault is not in the state this step needs: it was already triggered, realized or returned, or not yet triggered. Reload the page; if you already sent the burn or the return, record that transaction instead (InvalidVaultState).";
+/** return_custody_vault by a wallet other than the vault authority before the deadline (ReturnNotAllowed, 6052). */
+export const RETURN_NOT_ALLOWED_HINT =
+  "Only the vault authority (the admin wallet that opened this escrow) can return it before its deadline; after the deadline anyone can (ReturnNotAllowed).";
+/** Unauthorized on `custody_vault`: trigger / realize by a key that is not the vault's authority (has_one), or an account passed that does not belong to the vault. */
+export const CUSTODY_VAULT_AUTHORITY_HINT =
+  "This custody vault refused the transaction: this wallet is not the vault authority (the admin wallet that opened it, the only one that can trigger or confirm it), or an account passed does not belong to this vault (Unauthorized).";
+
 /**
  * asset_registry custom errors whose raw log ("custom program error: 0x17bd")
  * is meaningless to a user but whose cause is actionable. Codes come from the
@@ -399,6 +413,10 @@ export const REGISTRY_ERROR_HINTS: ReadonlyMap<number, string> = new Map<number,
     ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH,
     "This escrow pinned a different KYC registry when it was opened. Confirm it against that registry, or return the deposit and re-open the vault (CustodyKycRegistryMismatch).",
   ],
+  // Custody recording: who may return an escrow before its deadline (its
+  // state, InvalidVaultState 6015, shares its number with a hook error and
+  // is worded by name in contextualErrorHint).
+  [ASSET_REGISTRY_ERROR__RETURN_NOT_ALLOWED, RETURN_NOT_ALLOWED_HINT],
   // Clawback (both permanent-delegate paths; 2C-4 appended 6137 / 6138).
   [
     ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE,
@@ -685,6 +703,10 @@ export function contextualErrorHint(text: string, options: { issuerRotation?: ()
   // numbers with the other program, so these match Anchor's names too.
   if (/caused by account: kyc_registry\. Error Code: Unauthorized\b/.test(text)) return KYC_REGISTRY_NOT_AUTHORITY_HINT;
   if (/caused by account: transfer\. Error Code: AccountNotInitialized\b/.test(text)) return NO_PENDING_AUTHORITY_TRANSFER_HINT;
+  // Custody recording: the vault's authority (6001, shared with the hook's
+  // Unauthorized) and its state (6015, shared with a hook code too).
+  if (/caused by account: custody_vault\. Error Code: Unauthorized\b/.test(text)) return CUSTODY_VAULT_AUTHORITY_HINT;
+  if (/Error Code: InvalidVaultState\b/.test(text)) return INVALID_VAULT_STATE_HINT;
   if (/caused by account: sale\. Error Code: Unauthorized\b/.test(text))
     return SALE_AUTHORITY_HINT + (options.issuerRotation?.() ? SALE_SYNC_SUFFIX : "");
   if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;

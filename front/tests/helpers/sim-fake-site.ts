@@ -293,7 +293,8 @@ export class FakeSite {
         return { data: { client: d ? { id: d.id, kyc_status: d.kyc_status } : null, onboarding_path: open ? `/onboarding/${d!.id}?t=${d!.token}` : null } };
       }
       case "/api/applications/eligibility": {
-        const d = this.dossiers.get(String(body.wallet));
+        const { wallet } = await signed("applications.eligibility");
+        const d = this.dossiers.get(wallet);
         const company = d?.kind === "kyb" && d.kyb_status === "verified";
         const individual = d?.kind === "kyc" && d.kyc_status === "verified";
         return { data: { eligible: company || individual, applicantKind: company ? "company" : individual ? "individual" : null, kybStatus: d?.kind === "kyb" ? d.kyb_status : "none" } };

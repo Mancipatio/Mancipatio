@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { sendStageLabel, useSendStage } from "@/lib/send-stage";
 
 export type ConfirmKind = "destructive" | "warning" | "info";
 
@@ -33,6 +34,9 @@ export type ConfirmModalProps = {
   reasonPlaceholder?: string;
   reasonMinLength?: number;
   busy?: boolean;
+  /** What the busy button says; defaults to the wallet send's current stage
+   *  (lib/send-stage) and then "Working…". */
+  busyLabel?: string;
   /** Keeps the confirm button disabled, e.g. until a required checkbox in
    *  `description` is ticked. */
   confirmDisabled?: boolean;
@@ -55,9 +59,11 @@ function ConfirmModalInner({
   reasonPlaceholder = "Why are you doing this? (visible in audit log)",
   reasonMinLength = 4,
   busy = false,
+  busyLabel,
   confirmDisabled = false,
 }: ConfirmModalProps) {
   const [reason, setReason] = useState("");
+  const stageLabel = sendStageLabel(useSendStage());
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -108,9 +114,17 @@ function ConfirmModalInner({
                 disabled={busy}
                 autoFocus
               />
-              {!reasonOk && reason.length > 0 && (
-                <p className="mt-1 text-xs text-amber-600">
-                  At least {reasonMinLength} characters.
+              {/* Why the confirm button is disabled: a required reason that is
+                  still empty is the usual cause, so it is said up front, not
+                  only once the operator starts typing. */}
+              {!reasonOk && (
+                <p
+                  id="confirm-reason-hint"
+                  className={`mt-1 text-xs ${reason.trim().length === 0 ? "text-slate-500" : "text-amber-600"}`}
+                >
+                  {reason.trim().length === 0
+                    ? `Enter a reason (at least ${reasonMinLength} characters).`
+                    : `At least ${reasonMinLength} characters.`}
                 </p>
               )}
             </div>
@@ -131,7 +145,7 @@ function ConfirmModalInner({
             disabled={busy || !reasonOk || confirmDisabled}
             className={`rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${styles.button}`}
           >
-            {busy ? "Working…" : confirmLabel}
+            {busy ? (busyLabel ?? stageLabel ?? "Working…") : confirmLabel}
           </button>
         </div>
       </div>

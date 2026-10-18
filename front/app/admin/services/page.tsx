@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 const CATALOG = [
   {
@@ -83,7 +84,10 @@ export default function ServicesPage() {
       </p>
 
       <div className="mt-8 space-y-8">
-        {CATALOG.map((section) => (
+        {/* Services of modules switched off on this network are left out (lib/pilot-scope.ts). */}
+        {CATALOG.map((section) => ({ ...section, items: section.items.filter((item) => navHrefVisible(item.href)) }))
+          .filter((section) => section.items.length > 0)
+          .map((section) => (
           <div key={section.group}>
             <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
               {section.group}

@@ -10,7 +10,9 @@
 //            confirmed blockers are kept with the record. The row:
 //            status 'archived', is_published false, fields.archive = record;
 //            unarchive restores the previous status (or removes a row the
-//            archive created).
+//            archive created). In KYC-only mode an issuer's unarchive that
+//            would re-publish the profile answers 403 (a publish is an
+//            issuance entry, as on profiles/upsert); archiving stays open.
 //   issuer — super admin only; refused while an asset of it that is not
 //            archived has tokens in circulation. issuer_profiles.archive
 //            (migration 0081); 503 with a plain message before 0081 exists.
@@ -33,7 +35,8 @@ import {
   readPda,
 } from "@/lib/server/archive-actions";
 import { isMissingArchiveColumn } from "@/lib/server/archive";
-import { assetArchiveRecord, checkArchiveReason, type ArchiveRecord } from "@/lib/archive";
+import { assetArchiveRecord, checkArchiveReason, unarchiveRepublishes, type ArchiveRecord } from "@/lib/archive";
+import { requireArea } from "@/lib/server/feature-gate";
 
 type Undo = () => Promise<unknown>;
 
@@ -94,6 +97,10 @@ export async function POST(request: Request) {
       } else {
         if (!state.archived || !state.row) throw new SiwsError(409, "This asset is not archived");
         if (!state.canUnarchive) throw new SiwsError(403, state.unarchiveRefusal ?? "You cannot unarchive this asset");
+        // KYC-only mode (lib/features.ts): an issuer's unarchive that puts a
+        // published profile back on the public lists is an issuance entry
+        // (assetArchiveState refuses it already; the route does not rely on it).
+        if (state.actor === "issuer" && unarchiveRepublishes(state.record)) requireArea("issuance");
         const record = state.record;
         const before = { status: state.row.status, is_published: state.row.is_published, fields: state.row.fields };
         if (record?.row_created) {
@@ -109,7 +116,7 @@ export async function POST(request: Request) {
           const { error } = await sb.from("asset_profiles")
             .update({
               status: record?.previous_status ?? "draft",
-              is_published: record?.previous_is_published === true && record?.previous_status === "published",
+              is_published: unarchiveRepublishes(record),
               fields: rest,
             })
             .eq("network", network).eq("asset_pda", pda);

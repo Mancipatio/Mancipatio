@@ -297,8 +297,11 @@ export async function verifySigned(
 export function siwsErrorResponse(err: unknown): NextResponse {
   if (err instanceof MaintenanceError) return maintenanceResponse(err);
   if (err instanceof SiwsError) {
+    // A typed refusal may carry a machine-readable code (e.g. "awaiting_finalization"
+    // from lib/server/chain-evidence.ts) so the client matches it by code, not by text.
+    const code = (err as { code?: unknown }).code;
     return NextResponse.json(
-      { ok: false, error: err.message },
+      { ok: false, error: err.message, ...(typeof code === "string" ? { code } : {}) },
       { status: err.status },
     );
   }

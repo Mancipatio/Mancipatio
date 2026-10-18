@@ -1,7 +1,9 @@
 // SERVER-ONLY — the API half of lib/features.ts. The UI hides a feature that
 // is off on this network; the routes behind it call requireFeature() so a
 // hand-crafted signed request cannot reach it either. Pilot-scope modules
-// (lib/features.ts pilotModules) work the same way through requireModule().
+// (lib/features.ts pilotModules) work the same way through requireModule(),
+// and the core areas KYC-only mode pauses (primary sales, issuance) through
+// requireArea().
 
 import "server-only";
 
@@ -10,8 +12,11 @@ import {
   features,
   moduleDisabledMessage,
   moduleEnabled,
+  scopeDisabledMessage,
+  scopeEnabled,
   type FeatureName,
   type PilotModule,
+  type ScopeArea,
 } from "@/lib/features";
 import { RaiseType } from "@/lib/generated/asset_registry";
 import { SiwsError } from "@/lib/server/siws";
@@ -32,6 +37,16 @@ export function requireModule(name: PilotModule): void {
   if (!moduleEnabled(name)) {
     throw new SiwsError(403, moduleDisabledMessage(name));
   }
+}
+
+/**
+ * Throws a 403 SiwsError while a core area (primary sales, issuance) is
+ * paused: KYC-only mode (lib/features.ts kycOnly). Called first by the
+ * area's ENTRY routes, like requireModule; a route an admin also uses calls
+ * it on its non-admin branch only. Exits stay open.
+ */
+export function requireArea(name: ScopeArea): void {
+  if (!scopeEnabled(name)) throw new SiwsError(403, scopeDisabledMessage(name));
 }
 
 /**

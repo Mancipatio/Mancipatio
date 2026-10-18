@@ -25,6 +25,11 @@ import {
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
 import { ArchiveDialog } from "@/components/archive-dialog";
 import { useArchivedSet } from "@/lib/archive-client";
+import { scopeEnabled } from "@/lib/features";
+import { offeredAssetClasses } from "@/lib/pilot-scope";
+
+const OFFERED_CLASSES = offeredAssetClasses();
+const SHOW_OTHER_ASSET_TYPES = OFFERED_CLASSES.some((category) => category !== "equity");
 
 const STATUS_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -174,6 +179,7 @@ export default function MyAssetsPage() {
   }, [myAssets, categoryOf]);
 
   const verified = me?.kybStatus === 1;
+  const issuanceOn = scopeEnabled("issuance");
   const legalId = me ? fromBytes32(me.legalEntityId) : null;
 
   if (!wallet) return <main><WalletRequired /></main>;
@@ -192,7 +198,9 @@ export default function MyAssetsPage() {
             Every asset registered under your issuer authority.
           </p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        {/* KYC-only mode (lib/features.ts): issuance is paused, so no entry
+            buttons; the list and the exits of what exists stay. */}
+        {issuanceOn && <div className="flex flex-wrap items-center justify-end gap-2">
           {verified ? (
             <Link
               href="/issuer/assets/tokenize"
@@ -209,7 +217,7 @@ export default function MyAssetsPage() {
               Tokenize company shares
             </span>
           )}
-          <button
+          {SHOW_OTHER_ASSET_TYPES && <button
             type="button"
             disabled={!verified}
             onClick={() => setShowCreate(true)}
@@ -217,8 +225,8 @@ export default function MyAssetsPage() {
             title={verified ? undefined : "Verify KYB first to create assets."}
           >
             Other asset types
-          </button>
-        </div>
+          </button>}
+        </div>}
       </div>
 
       {!verified && me && (
@@ -232,17 +240,17 @@ export default function MyAssetsPage() {
         <p className="mt-8 text-sm text-red-600">Failed to load.</p>
       ) : data === null ? (
         <div className="mt-8">
-          <SkeletonTable rows={3} cols={5} />
+          <SkeletonTable rows={3} cols={4} />
         </div>
       ) : !myIssuerPda ? (
         <NotIssuer />
       ) : myAssets.length === 0 ? (
-        <Empty onClick={() => setShowCreate(true)} canCreate={verified} />
+        <Empty onClick={() => setShowCreate(true)} canCreate={verified} paused={!issuanceOn} />
       ) : (
         <>
           {/* Category segmented filter */}
           <div className="mt-8 flex flex-wrap gap-1.5">
-            {(["all", ...CATEGORY_SLUGS] as ("all" | CategorySlug)[]).map((c) => {
+            {(["all", ...CATEGORY_SLUGS.filter((category) => OFFERED_CLASSES.includes(category) || (categoryCounts[category] ?? 0) > 0)] as ("all" | CategorySlug)[]).map((c) => {
               const active = categoryFilter === c;
               const label = c === "all" ? "All" : assetTypeBySlug(c)?.title ?? c;
               const count = c === "all" ? undefined : categoryCounts[c] ?? 0;
@@ -286,7 +294,7 @@ export default function MyAssetsPage() {
               </p>
             </div>
           ) : (
-            <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+            <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
               <table className="w-full text-sm">
                 <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
@@ -296,7 +304,6 @@ export default function MyAssetsPage() {
                       Share classes
                     </th>
                     <th className="px-4 py-3 font-medium">Status</th>
-                    <th className="px-4 py-3 text-right font-medium">Manage</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -324,20 +331,9 @@ export default function MyAssetsPage() {
                           <p className="mt-0.5 text-xs text-slate-500">
                             {a.assetId} · {a.symbolPrefix}
                           </p>
-                        </td>
-                        <td className="px-4 py-3">{categoryLabel}</td>
-                        <td className="px-4 py-3 text-right font-mono">
-                          {a.shareClassesCount}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[a.status] ?? STATUS_BADGE[0]}`}
-                          >
-                            {ASSET_STATUS_LABEL[a.status] ?? "?"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="flex items-center justify-end gap-3">
+                          {/* Actions sit under the asset, not in a trailing column, so an
+                              issuer on a phone reaches them without horizontal scrolling. */}
+                          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                             {pda && (archived || issuerMayArchive(a, pda)) && (
                               <button
                                 type="button"
@@ -359,6 +355,17 @@ export default function MyAssetsPage() {
                               <span className="text-xs text-slate-400">…</span>
                             )}
                           </div>
+                        </td>
+                        <td className="px-4 py-3">{categoryLabel}</td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          {a.shareClassesCount}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[a.status] ?? STATUS_BADGE[0]}`}
+                          >
+                            {ASSET_STATUS_LABEL[a.status] ?? "?"}
+                          </span>
                         </td>
                       </tr>
                     );
@@ -382,7 +389,7 @@ export default function MyAssetsPage() {
         />
       )}
 
-      {showCreate && legalId && (
+      {showCreate && legalId && issuanceOn && (
         <AssetCreateModal
           variant="issuer"
           issuerLegalId={legalId}
@@ -404,13 +411,13 @@ function NotIssuer() {
         No issuer found for this wallet
       </p>
       <p className="mt-1 text-xs text-amber-900/80">
-        Register an issuer first to see your assets here.
+        Complete verification and follow your token issuance request to set up the issuer.
       </p>
       <Link
-        href="/issuer/onboarding"
+        href="/issuer"
         className="mt-3 inline-block rounded-lg bg-amber-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-950"
       >
-        Start onboarding →
+        View issuer process →
       </Link>
     </div>
   );
@@ -419,16 +426,19 @@ function NotIssuer() {
 function Empty({
   onClick,
   canCreate,
+  paused,
 }: {
   onClick: () => void;
   canCreate: boolean;
+  /** Issuance is paused (KYC-only mode): the first sentence only. */
+  paused: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         You haven&apos;t created any assets yet.
       </p>
-      {canCreate ? (
+      {paused ? null : canCreate ? (
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Link
             href="/issuer/assets/tokenize"
@@ -436,13 +446,13 @@ function Empty({
           >
             Tokenize company shares →
           </Link>
-          <button
+          {SHOW_OTHER_ASSET_TYPES && <button
             type="button"
             onClick={onClick}
             className="inline-block rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400"
           >
             Other asset types
-          </button>
+          </button>}
         </div>
       ) : (
         <p className="mt-2 text-xs text-amber-700">

@@ -1,7 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useSendTransaction, useWalletConnection } from "@solana/react-hooks";
+import type { Address } from "@solana/kit";
+import {
+  useSendTransaction,
+  useSolanaClient,
+  useWalletConnection,
+} from "@solana/react-hooks";
 import {
   AssetType,
   findAssetPda,
@@ -20,13 +25,31 @@ import {
   type CategorySlug,
   type FieldDef,
 } from "@/lib/asset-types";
+import { toColumnValue, type NewAssetProfile } from "@/lib/asset-profiles";
 import {
-  toColumnValue,
-  upsertAssetProfile,
-  type NewAssetProfile,
-} from "@/lib/asset-profiles";
+  createSignedRequest,
+  postSignedRequest,
+  type SiwsRequestBody,
+} from "@/lib/siws-client";
+import { waitForFinalizedAsset } from "@/lib/tokenize-shares-chain";
 
 type Variant = "admin" | "issuer";
+
+const PROFILE_ROUTE = "/api/profiles/upsert";
+/** The whole finality wait, inside the signed envelope's 300 s window (lib/siws-client SIWS_MAX_AGE_MS). */
+const FINALITY_WAIT_MS = 240_000;
+
+/** Where the profile can be saved again once the asset exists on chain, per console. */
+const SAVE_AGAIN: Record<Variant, string> = {
+  issuer:
+    "The asset exists on chain. Save the profile again here, or later from My assets → Manage → Edit.",
+  admin:
+    "The asset exists on chain. Save the profile again here, or later from Admin → Assets → the asset → Edit.",
+};
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export type AssetCreateModalProps = {
   variant: Variant;
@@ -72,11 +95,21 @@ export function AssetCreateModal({
   onSuccess,
 }: AssetCreateModalProps) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
   const lockedIssuer = variant === "issuer";
+
+  // What the modal is doing right now; the buttons stay disabled meanwhile.
+  const [working, setWorking] = useState<string | null>(null);
+  // The asset exists on chain but its profile was not saved: only the save is
+  // offered again (create_asset cannot run twice for the same ID).
+  const [pendingProfile, setPendingProfile] = useState<{
+    assetPda: Address;
+    row: NewAssetProfile;
+  } | null>(null);
 
   // On-chain core args.
   const [issuerId, setIssuerId] = useState(issuerLegalId ?? "");
@@ -107,6 +140,62 @@ export function AssetCreateModal({
     setCatValues((prev) => ({ ...prev, [key]: value }));
   }
 
+  /**
+   * Signs the profile (one prompt), waits until the asset is visible at
+   * `finalized` — what /api/profiles/upsert checks ownership at
+   * (lib/server/profile-read requireProfileOwner) — then posts it. `tx.send`
+   * returns on submission, so a write right after it was refused ("Profile
+   * access denied") and the typed name, summary and facts were lost. The
+   * same sequence as the tokenize flow's saveDetails, for both consoles: an
+   * admin needs no finality, but a profile is never written for a
+   * transaction that never lands. Never throws; false = not saved.
+   */
+  async function saveProfile(assetPda: Address, row: NewAssetProfile, prompt: string): Promise<boolean> {
+    if (!conn.wallet) return false;
+    setWorking(`Confirm in your wallet (${prompt}): save the profile`);
+    let envelope: SiwsRequestBody;
+    try {
+      envelope = await createSignedRequest(conn.wallet, "profiles.upsert", { profile: row });
+    } catch (err) {
+      toast.showError("Profile not saved", `${errorText(err)} ${SAVE_AGAIN[variant]}`);
+      return false;
+    }
+    setWorking("Waiting for the network to finalize the asset (usually under a minute)…");
+    // Bounded, so the envelope is posted while the server still accepts it.
+    const finalized = await waitForFinalizedAsset(client.runtime.rpc, assetPda, {
+      signal: AbortSignal.timeout(FINALITY_WAIT_MS),
+    });
+    if (!finalized) {
+      toast.showError(
+        "Profile not saved yet",
+        `The asset is not final on the network yet. ${SAVE_AGAIN[variant]} (1 signature)`,
+      );
+      return false;
+    }
+    setWorking("Saving the profile…");
+    try {
+      await postSignedRequest(PROFILE_ROUTE, envelope);
+      toast.show({ kind: "success", title: "Profile saved" });
+      return true;
+    } catch (err) {
+      toast.showError("Profile not saved", `${errorText(err)} ${SAVE_AGAIN[variant]}`);
+      return false;
+    }
+  }
+
+  /** The profile alone, for an asset that was created but whose profile was not saved. */
+  async function saveAgain() {
+    if (!pendingProfile) return;
+    try {
+      if (await saveProfile(pendingProfile.assetPda, pendingProfile.row, "1 of 1")) {
+        setPendingProfile(null);
+        onSuccess();
+      }
+    } finally {
+      setWorking(null);
+    }
+  }
+
   async function create() {
     if (!wallet || !conn.wallet) return;
     const trimmedIssuer = effectiveIssuerId.trim();
@@ -114,9 +203,14 @@ export function AssetCreateModal({
     if (!trimmedIssuer || !trimmedAssetId || !name.trim()) return;
 
     const pendingId = toast.showPending(`Creating asset ${trimmedAssetId}…`);
+    setWorking("Confirm in your wallet (1 of 2): create the asset");
     try {
       const [issuerPda] = await findIssuerPda({
         legalEntityId: toBytes32(trimmedIssuer),
+      });
+      const [assetPda] = await findAssetPda({
+        issuer: issuerPda,
+        assetId: trimmedAssetId,
       });
       const signer = walletSigner(conn.wallet);
 
@@ -172,56 +266,47 @@ export function AssetCreateModal({
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Asset created" });
 
-      // Off-chain profile write — never fail the whole flow on this.
-      try {
-        const [assetPda] = await findAssetPda({
-          issuer: issuerPda,
-          assetId: trimmedAssetId,
-        });
-        const row: NewAssetProfile = {
-          asset_pda: assetPda.toString(),
-          category: slug,
-          issuer_pda: issuerPda.toString(),
-          display_name: displayName.trim() || name.trim(),
-          summary: summary.trim() || null,
-          description: description.trim() || null,
-          website: website.trim() || null,
-          jurisdiction: jurisdiction || null,
-          legal_doc_sha256: legalDocHex,
-          status: "draft",
-        };
-        // Merge category-specific columns (dynamic keys → asset_profiles columns).
-        Object.assign(row, profileFields);
-        const ok = await upsertAssetProfile(conn.wallet, row);
-        if (!ok) {
-          toast.showError(
-            "Asset created — profile not saved",
-            "The on-chain asset exists, but the off-chain product profile could not be written. Edit it later from the admin console.",
-          );
-        }
-      } catch (offErr) {
-        console.warn("[asset-profile] write failed", offErr);
-        toast.showError(
-          "Asset created — profile not saved",
-          "The on-chain asset exists, but the off-chain product profile failed to save.",
-        );
+      // The off-chain profile, posted once the asset is final (saveProfile).
+      const row: NewAssetProfile = {
+        asset_pda: assetPda.toString(),
+        category: slug,
+        issuer_pda: issuerPda.toString(),
+        display_name: displayName.trim() || name.trim(),
+        summary: summary.trim() || null,
+        description: description.trim() || null,
+        website: website.trim() || null,
+        jurisdiction: jurisdiction || null,
+        legal_doc_sha256: legalDocHex,
+        status: "draft",
+      };
+      // Merge category-specific columns (dynamic keys → asset_profiles columns).
+      Object.assign(row, profileFields);
+      if (await saveProfile(assetPda, row, "2 of 2")) {
+        onSuccess();
+        return;
       }
-
-      onSuccess();
+      // The asset exists but its profile does not: keep the typed values and
+      // offer the save alone (saveProfile has reported why).
+      setPendingProfile({ assetPda, row });
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to create asset", explainSendError(err));
       console.error("[create_asset]", err);
+    } finally {
+      setWorking(null);
     }
   }
 
   if (!wallet) return null;
 
-  const canSubmit =
-    !tx.isSending &&
+  const busy = tx.isSending || working !== null;
+  const formComplete =
     effectiveIssuerId.trim().length > 0 &&
     assetId.trim().length > 0 &&
     name.trim().length > 0;
+  const canSubmit = !busy && (pendingProfile !== null || formComplete);
+  // Once the asset exists, closing refreshes the list behind the modal.
+  const close = pendingProfile ? onSuccess : onClose;
 
   return (
     <div
@@ -229,7 +314,7 @@ export function AssetCreateModal({
       role="dialog"
       aria-modal="true"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !tx.isSending) onClose();
+        if (e.target === e.currentTarget && !busy) close();
       }}
     >
       <div className="mx-auto my-8 w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
@@ -245,7 +330,17 @@ export function AssetCreateModal({
           )}
         </div>
 
-        <div className="space-y-6 px-5 py-4">
+        {/* Locked once the asset exists: the retried save posts the row of the asset that was created. */}
+        <fieldset disabled={pendingProfile !== null} className="min-w-0 space-y-6 px-5 py-4">
+          {pendingProfile && (
+            <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p className="font-medium">Asset created — profile not saved yet</p>
+              <p className="mt-1 text-[13px]">
+                {SAVE_AGAIN[variant]} The form is locked to what was created.
+              </p>
+            </div>
+          )}
+
           {/* ── Core on-chain identity ── */}
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -433,27 +528,34 @@ export function AssetCreateModal({
           <p className="text-[11px] text-slate-400">
             Allowed-countries bitmap uses permissive v0.1 defaults; the legal-doc
             hash is computed from your upload (or a canonical hash of the profile
-            when no file is attached). The product profile is saved off-chain as
-            a draft and can be edited later.
+            when no file is attached). Two wallet confirmations: the transaction
+            that creates the asset, then one message signature for the product
+            profile, which is saved off-chain as a draft once the network has
+            finalized the asset (usually under a minute) and can be edited later.
           </p>
-        </div>
+        </fieldset>
 
-        <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
+          {working && (
+            <p className="mr-auto text-xs text-slate-600" aria-live="polite">
+              {working}
+            </p>
+          )}
           <button
             type="button"
-            onClick={onClose}
-            disabled={tx.isSending}
+            onClick={close}
+            disabled={busy}
             className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200 disabled:opacity-50"
           >
-            Cancel
+            {pendingProfile ? "Close" : "Cancel"}
           </button>
           <button
             type="button"
-            onClick={() => void create()}
+            onClick={() => void (pendingProfile ? saveAgain() : create())}
             disabled={!canSubmit}
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
-            {tx.isSending ? "Sending…" : "Create asset"}
+            {pendingProfile ? "Save profile" : "Create asset"}
           </button>
         </div>
       </div>

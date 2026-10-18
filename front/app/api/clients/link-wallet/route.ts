@@ -2,12 +2,33 @@
 // The signed params contain client_id and SHA-256(token), never the raw bearer
 // credential. 0044's service-only function rechecks the invitation under a row
 // lock, binds the wallet once, caps TTL and writes the system note atomically.
+//
+// A dossier OWNED BY AN ACCOUNT (an email/Google verification: account_id
+// set, no wallet yet — isAccountOwnedDossier) binds only a wallet of that
+// account. Holding the upload link proves nothing about the identity behind
+// it, so the signer must already be one of the account's wallets
+// (account_wallets), or the browser must be signed in to that account, in
+// which case the wallet is added to the account first — the two-proof rule
+// of /api/account/wallets/attach (wallet signature + account session). An
+// invitation without an account keeps today's rule: the signer binds itself.
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { readAccountSession } from "@/lib/server/account-auth";
+import { attachAccountWallet } from "@/lib/server/account-wallets";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
-import { assertUuid, clientIpOf, rateLimited } from "../_helpers";
+import {
+  assertUuid,
+  clientIpOf,
+  dossierForInvitation,
+  isAccountOwnedDossier,
+  isAccountWalletMember,
+  rateLimited,
+} from "../_helpers";
+
+const ACCOUNT_WALLET_REQUIRED =
+  "This verification belongs to a Manci account. Sign in to that account in this browser, or add this wallet under Your account → Wallets, then link it here.";
 
 export async function POST(request: Request) {
   try {
@@ -32,11 +53,31 @@ export async function POST(request: Request) {
       throw new SiwsError(401, "Signature does not match this invitation");
     }
 
-    const { data, error } = await getSupabaseAdmin().rpc("link_client_wallet", {
+    const sb = getSupabaseAdmin();
+    const network = detectNetwork();
+    // Who may bind a wallet to this dossier (see the header). The read answers
+    // like the binding below for an unknown dossier, another network or a
+    // wrong token (401); the binding re-checks everything under its row lock.
+    const dossier = await dossierForInvitation(sb, clientId, invitationToken);
+    if (isAccountOwnedDossier(dossier)) {
+      const accountId = dossier.account_id as string;
+      if (!(await isAccountWalletMember(sb, accountId, network, wallet))) {
+        const session = readAccountSession(request);
+        if (!session || session.a !== accountId) {
+          throw new SiwsError(403, ACCOUNT_WALLET_REQUIRED);
+        }
+        // The signed-in owner adds the signer to the account first. A 409
+        // from there (another account's wallet, the wallet limit) binds
+        // nothing: the dossier keeps waiting for one of the account's wallets.
+        await attachAccountWallet(accountId, network, wallet);
+      }
+    }
+
+    const { data, error } = await sb.rpc("link_client_wallet", {
       p_client_id: clientId,
       p_token: invitationToken,
       p_wallet: wallet,
-      p_network: detectNetwork(),
+      p_network: network,
     });
     if (error) {
       if (error.code === "23505") {

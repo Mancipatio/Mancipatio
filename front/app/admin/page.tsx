@@ -14,8 +14,10 @@ import {
 } from "@/components/icons";
 import { PlatformStatusCard } from "@/components/platform-status-card";
 import { RequireRole } from "@/components/require-role";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { NetworkDashboard } from "./network-dashboard";
 import { OperatorLanding } from "./operator-landing";
+import { AccountsPanel } from "./accounts/accounts-panel";
 
 const SHORTCUTS = [
   {
@@ -89,6 +91,7 @@ export default function AdminOverview() {
       {/* An operator role without an Admin record lands on its own summary.
           Bootstrap (no Platform yet) runs on /issuer/authority. */}
       <RequireRole role="admin" fallback={<OperatorLanding />}>
+        <section className="mt-6"><AccountsPanel compact /></section>
         <div className="mt-6 grid gap-4 lg:grid-cols-2">
           <PlatformStatusCard />
           <AlertsCard />
@@ -112,7 +115,8 @@ export default function AdminOverview() {
             </Link>
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {SHORTCUTS.map((c) => (
+            {/* No shortcut into a module switched off on this network (lib/pilot-scope.ts). */}
+            {SHORTCUTS.filter((c) => navHrefVisible(c.href)).map((c) => (
               <Link
                 key={c.href}
                 href={c.href}

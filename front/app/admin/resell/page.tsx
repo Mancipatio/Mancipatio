@@ -13,7 +13,7 @@ import { SkeletonTable } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
 import {
-  listResellListings,
+  listAllResellListings,
   moderateResellListing,
   type ResellListing,
   type ResellStatus,
@@ -66,9 +66,11 @@ function ResellModeration() {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    try { setRows(await listResellListings()); setLoadError(null); }
+    // Signed admin read on the service role: every status with its moderation
+    // stamps (0082 hides withdrawn, matched and removed rows from the anon client).
+    try { setRows(await listAllResellListings(conn.wallet)); setLoadError(null); }
     catch (error) { setLoadError(error instanceof Error ? error.message : "Listings service unavailable"); }
-  }, []);
+  }, [conn.wallet]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

@@ -4,7 +4,7 @@
 // when it cannot be written), and the issuer archive before / after
 // migration 0081. Chain reads, SIWS, the admin gate and the audit are
 // mocked; Supabase is in memory.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { memorySupabase } from "./helpers/memory-supabase";
 import type { AssetArchiveChain } from "@/lib/server/archive";
 
@@ -109,6 +109,7 @@ import { POST as checkRoute } from "@/app/api/archive/check/route";
 import { GET as listRoute } from "@/app/api/archive/list/route";
 import { POST as publicProfiles } from "@/app/api/profiles/public/route";
 import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
+import { KYC_ONLY_ENV, KYC_ONLY_MESSAGE } from "@/lib/features";
 
 const REASON = "Test asset made with a test legal PDF";
 const B = (n: number) => BigInt(n);
@@ -265,6 +266,53 @@ describe("check (the dialog's fresh read)", () => {
     const admin = await call(checkRoute, ADMIN, { kind: "asset", pda: ASSET });
     expect(admin.body.data).toMatchObject({ actor: "admin", canArchive: false });
     expect((await call(checkRoute, STRANGER, { kind: "asset", pda: ASSET })).status).toBe(403);
+  });
+});
+
+describe("KYC-only mode (lib/features.ts): an issuer's unarchive may not re-publish", () => {
+  // The mode on, as on mainnet with the variable unset (this file's network
+  // is mainnet); the suite's default is off (vitest.config.ts).
+  const modeOn = () => vi.stubEnv(KYC_ONLY_ENV, "");
+  afterEach(() => vi.unstubAllEnvs());
+  const row = (status: "draft" | "published", is_published: boolean) => db.ref!.rows("asset_profiles").push({
+    network: "mainnet", asset_pda: ASSET, issuer_pda: ISSUER, category: "equity", status, is_published, fields: {},
+  });
+
+  it("archiving a published draft stays open; putting it back on the public lists is a publish: refused, and the dialog says so first", async () => {
+    modeOn();
+    state.chain = testToken({ draft: true });
+    row("published", true);
+    expect((await archive(ISSUER_KEY)).status).toBe(200);
+    const check = await call(checkRoute, ISSUER_KEY, { kind: "asset", pda: ASSET });
+    expect(check.body.data).toMatchObject({ archived: true, canUnarchive: false, unarchiveRefusal: KYC_ONLY_MESSAGE });
+    expect(await unarchive(ISSUER_KEY)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
+    expect(profile()).toMatchObject({ status: "archived", is_published: false });
+    expect(state.audits.map((a) => a.ix_name)).toEqual(["asset_archive"]);
+    // The super admin (the operator's console) restores it.
+    expect((await unarchive(SUPER)).status).toBe(200);
+    expect(profile()).toMatchObject({ status: "published", is_published: true });
+  });
+
+  it("an unpublished draft, or a row the archive created, comes back as before", async () => {
+    modeOn();
+    state.chain = testToken({ draft: true });
+    row("draft", false);
+    expect((await archive(ISSUER_KEY)).status).toBe(200);
+    expect((await call(checkRoute, ISSUER_KEY, { kind: "asset", pda: ASSET })).body.data).toMatchObject({ canUnarchive: true, unarchiveRefusal: null });
+    expect((await unarchive(ISSUER_KEY)).status).toBe(200);
+    expect(profile()).toMatchObject({ status: "draft", is_published: false });
+    db.ref!.tables.asset_profiles = [];
+    expect((await archive(ISSUER_KEY)).status).toBe(200);
+    expect((await unarchive(ISSUER_KEY)).status).toBe(200);
+    expect(profile()).toBeUndefined();
+  });
+
+  it("the mode off: the issuer restores its published profile, as today", async () => {
+    state.chain = testToken({ draft: true });
+    row("published", true);
+    expect((await archive(ISSUER_KEY)).status).toBe(200);
+    expect((await unarchive(ISSUER_KEY)).status).toBe(200);
+    expect(profile()).toMatchObject({ status: "published", is_published: true });
   });
 });
 

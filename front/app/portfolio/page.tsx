@@ -28,6 +28,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { countryName, COUNTRIES } from "@/lib/countries";
 import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { useToast } from "@/lib/toast";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 const CLASS_TYPE = [
   "Common",
@@ -389,9 +390,9 @@ function PassportCard({
           Not verified yet
         </p>
         <p className="mt-1 text-[13px] text-slate-500">
-          Buying and trading tokens does not require verification. Complete
-          KYC before you convert tokens into company shares, take delivery of
-          a physical good, or buy a KYC-gated class.
+          Buying tokens does not require verification unless the class is KYC-gated.
+          {navHrefVisible("/portfolio/conversion") && " Complete KYC before converting tokens into company shares."}
+          {navHrefVisible("/portfolio/delivery") && " Physical delivery also requires KYC."}
         </p>
         {openRequest ? (
           <>
@@ -527,7 +528,7 @@ function PassportCard({
           <p className="text-[12px] text-slate-500">
             {entry.status === KycStatus.Revoked
               ? "Your verification has been revoked. Contact support or verify again."
-              : "Your verification has expired. Renew it before converting tokens into company shares, taking delivery, or buying KYC-gated classes."}
+              : "Your verification has expired. Renew it before using services that require an approved investor passport."}
             {" "}
             {openRequest ? (
               <>
@@ -814,20 +815,28 @@ function PassportRequestModalInner({
 
 
 function Empty() {
+  // Primary sales paused (KYC-only mode, lib/pilot-scope.ts): no buy prompt.
+  const salesOn = navHrefVisible("/marketplace/launchpad");
   return (
     <div className="mt-4 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         No Manci holdings yet.
       </p>
-      <p className="mt-1 text-xs text-slate-400">
-        Buy on a primary sale or take an OTC offer to see balances here.
-      </p>
-      <Link
-        href="/marketplace/launchpad"
-        className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
-      >
-        Browse launchpad →
-      </Link>
+      {salesOn ? (
+        <>
+          <p className="mt-1 text-xs text-slate-400">
+            Buy on a primary sale{navHrefVisible("/marketplace/otc") && " or take an OTC offer"} to see balances here.
+          </p>
+          <Link
+            href="/marketplace/launchpad"
+            className="mt-4 inline-block rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400"
+          >
+            Browse launchpad →
+          </Link>
+        </>
+      ) : (
+        <p className="mt-1 text-xs text-slate-400">Holdings you receive appear here.</p>
+      )}
     </div>
   );
 }

@@ -11,31 +11,33 @@ import {
   Small,
   TextLink,
 } from "@/components/mx";
+import { features } from "@/lib/features";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
   description:
-    "Find an asset, review its documents, connect your wallet and use the sale, OTC and portfolio screens.",
+    `Find an asset, review its documents, connect your wallet and use the sale${navHrefVisible("/marketplace/otc") ? ", OTC" : ""} and portfolio screens.`,
 };
 
 const STEPS = [
   {
     title: "01 · Explore the market",
-    body: "Browse assets, open sales and funded OTC offers. Open an asset to review its issuer and available share classes.",
+    body: `Browse assets${navHrefVisible("/marketplace/otc") ? ", open sales and funded OTC offers" : " and open sales"}. Open an asset to review its issuer and available share classes.`,
     links: [{ label: "Explore markets", href: MX_ROUTES.home }],
   },
   {
     title: "02 · Read the documents",
-    body: "Review the selected issuance's rights, terms and disclosures. Use the instrument comparison when you need context for its asset category.",
+    body: "Review the selected issuance's rights, terms and disclosures. Use the asset guide when you need context for its rights.",
     links: [
       { label: "Token documents", href: MX_ROUTES.whitepapers },
-      { label: "Compare instruments", href: MX_ROUTES.instruments },
+      { label: "Asset guides", href: MX_ROUTES.instruments },
     ],
   },
   {
     title: "03 · Connect your wallet",
-    body: "Connect a Solana wallet using the app's wallet control. Buying and trading tokens does not require identity verification. You verify (KYC) later, if you convert tokens into company shares or take delivery of a physical good. A class marked KYC-gated also requires an approved investor passport, shown in Portfolio.",
+    body: `Connect a Solana wallet using the app's wallet control. Buying tokens does not require identity verification unless the class is KYC-gated. A KYC-gated class requires an approved investor passport, shown in Portfolio.${navHrefVisible("/portfolio/conversion") ? " Complete KYC before requesting conversion of tokens you own into company shares." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
     links: [
       { label: "Open Portfolio", href: "/portfolio" },
       { label: "Verification rules", href: MX_ROUTES.security },
@@ -79,7 +81,8 @@ export default function InvestorsPage() {
             <li key={step.title}>
               <Card title={step.title} body={step.body} className="h-full">
                 <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2">
-                  {step.links.map((link) => (
+                  {/* No link into a module switched off on this network (lib/pilot-scope.ts). */}
+                  {step.links.filter((link) => navHrefVisible(link.href)).map((link) => (
                     <TextLink key={link.href} href={link.href}>
                       {link.label} →
                     </TextLink>
@@ -101,25 +104,29 @@ export default function InvestorsPage() {
       <Section>
         <H2>After a purchase</H2>
         <Body className="mt-4">
-          Use Portfolio to review your holdings and transaction history. Its
-          navigation also opens vesting, payouts, governance, conversion and
-          delivery when relevant to your positions. If recording is pending, use
+          Use Portfolio to review your holdings and transaction history.
+          If recording is pending, use
           the saved transaction receipt to retry the record instead of repeating
           the payment.
         </Body>
-        <Body className="mt-4">
+        {features().startupRaises && <Body className="mt-4">
           Startup payout-vault entitlements follow their saved original-investor
           snapshot, even if token balances later change. Read the{" "}
           <TextLink href="/solutions/governance">
             snapshot and payout-rights guide
           </TextLink>{" "}
           for that distinction.
-        </Body>
+        </Body>}
         <ButtonRow>
           <Button href="/portfolio">Open Portfolio</Button>
-          <Button href="/portfolio/vesting" variant="ghost">
-            Check vesting
-          </Button>
+          {navHrefVisible("/portfolio/conversion") && (
+            <Button href="/portfolio/conversion" variant="ghost">Convert tokens into shares</Button>
+          )}
+          {navHrefVisible("/portfolio/vesting") && (
+            <Button href="/portfolio/vesting" variant="ghost">
+              Check vesting
+            </Button>
+          )}
         </ButtonRow>
       </Section>
     </>

@@ -14,7 +14,7 @@
 // Status transitions are additionally pinned by a DB trigger (migration 0030).
 
 import type { WalletSession } from "@solana/client";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 // NOTE: the legacy 'approved' status was dropped from the front — the flow
@@ -51,6 +51,9 @@ export type DeliveryRequest = {
   decided_at: string | null;
   deposit_tx: string | null;
   outcome_tx: string | null;
+  /** Server-verified proofs (lib/server/custody-evidence.ts); the admin lists return every column. */
+  deposit_evidence?: unknown;
+  outcome_evidence?: unknown;
 };
 
 // holder_wallet / client_id are no longer part of the input — the server
@@ -182,12 +185,14 @@ export async function adminUpdateDeliveryRequest(
 /**
  * Admin reads the full queue (signed + on-chain admin gate), optionally by
  * `status` and/or only the requests linked to `vaultPda` (unbounded by the
- * 1000-row list cap). THROWS.
+ * 1000-row list cap). THROWS. `opts.interactive` as in signedFetch: a
+ * background poll passes `false` so a timer never opens the wallet.
  */
 export async function adminListDeliveryRequests(
   session: WalletSession | null | undefined,
   status?: DeliveryStatus,
   vaultPda?: string,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<DeliveryRequest[]> {
   const data = await signedFetch<{ requests: DeliveryRequest[] }>(
     session,
@@ -197,6 +202,7 @@ export async function adminListDeliveryRequests(
       ...(status ? { status } : {}),
       ...(vaultPda ? { vault_pda: vaultPda } : {}),
     },
+    { interactive: opts.interactive ?? true },
   );
   return data.requests ?? [];
 }

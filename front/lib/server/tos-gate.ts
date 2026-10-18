@@ -1,8 +1,9 @@
 // SERVER-ONLY — Terms-of-Service acceptance on the signed write routes a buyer
 // or seller uses (pravo-compliance-9): /api/launchpad/commit, /api/otc/create
-// and /api/resell/create, and the sale page's pre-buy check
-// /api/compliance/screen-wallet (D2, 2026-10-03: buying needs a wallet linked
-// to the platform, i.e. signed in with the Terms in force accepted).
+// and /api/resell/create, the holder's /api/conversion/create, and the sale
+// page's pre-buy check /api/compliance/screen-wallet (D2, 2026-10-03: buying
+// needs a wallet linked to the platform, i.e. signed in with the Terms in
+// force accepted).
 //
 // The <TosGate /> interstitial is a client-side screen: a script can call these
 // routes without ever seeing it. So on MAINNET these routes also require a

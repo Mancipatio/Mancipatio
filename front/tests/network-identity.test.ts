@@ -210,7 +210,7 @@ describe("transaction helper boundary", () => {
     },
   );
 
-  it("rechecks the network for every transaction attempt, including prepared sends", async () => {
+  it("checks the network once per client for every transaction attempt (10-minute cache), including prepared sends", async () => {
     const { guarded, transaction, send, wallet } = clientFor(
       CLUSTER_GENESIS_HASHES.devnet,
     );
@@ -219,6 +219,6 @@ describe("transaction helper boundary", () => {
     await guarded.transaction.send(prepared);
     expect(transaction.prepareAndSend).toHaveBeenCalledOnce();
     expect(transaction.send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
