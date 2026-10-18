@@ -46,9 +46,9 @@ services are paused; exits of existing positions stay open
 ([`ops/env-vars.md`](ops/env-vars.md), "KYC-only mode and offered asset
 classes"). Outside that mode, the Terms in force, the module switches and
 the program's pause flags decide per network which modules are offered
-(same file, "Pilot scope"). The site serves the commit last released to
-`release/mainnet`, which [`ops/release-checklist.md`](ops/release-checklist.md)
-keeps at the tip of `main`.
+(same file, "Pilot scope"). The site serves the commit last pushed to
+`release/mainnet`; [`ops/release-checklist.md`](ops/release-checklist.md)
+requires that commit to be the tip of `main` and checks it before the push.
 
 ## Repository
 

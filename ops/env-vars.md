@@ -271,14 +271,19 @@ the KYC registry instructions (approve, revoke, registry authority) never
 read the pause flags.
 
 After the release (post-deploy check): Admin → Platform shows 0x7F; the
-home page shows one Equity tile, the "More asset classes coming later"
-tile, and no Primary sales tab, stat or "Create a raise"; the sidebar has
-no Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
+home page (`components/market-overview.tsx`, equity only) has no "Explore
+by asset class" section and no class tiles (they render only with more
+than one offered class), no "More asset classes" / "Coming later" tile
+(the layout before 2026-10-16), no Primary sales tab, stat or "Create a
+raise", and no link to `/marketplace/launchpad` or `/apply`; its "Know
+what you own" card links "Read the equity guide"
+(`tests/asset-classes.test.ts`, "mainnet default"); the sidebar has no
+Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
 "Paused."; `/verify`, `/login`, `/account` and `/portfolio` work;
-`/admin/kyc`, `/admin/clients` and `/admin/platform` work; `/markets/types`
-shows Equity only. `/admin/custody` leaves the admin menu while nothing
-waits there (every module reads off in the mode); open it by URL to record
-an existing conversion.
+`/admin/kyc`, `/admin/clients` and `/admin/platform` work;
+`/markets/types` shows Equity only. `/admin/custody` leaves the admin menu
+while nothing waits there (every module reads off in the mode); open it by
+URL to record an existing conversion.
 
 Leaving KYC-only mode later:
 1. Confirm that the Terms in force offer what reopens.

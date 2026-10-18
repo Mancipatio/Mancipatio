@@ -185,6 +185,18 @@ describe("scripts/check-release-ancestry.sh", () => {
     expect(r.status).toBe(2);
     expect(r.out).toContain("::error::cannot resolve refs/heads/nope");
   });
+
+  it("refuses a RELEASE_GUARD_STRICT value that is neither 1 nor 0 (exit 2) instead of running the lenient check silently", () => {
+    const f = fixture((seed, env) => git(seed, env, "branch", "release/mainnet", "main"));
+    const tip = f.sha("origin/main");
+    for (const value of ["true", "yes", "10"]) {
+      const r = run(f, [tip], { RELEASE_GUARD_NO_FETCH: "1", RELEASE_GUARD_STRICT: value });
+      expect(r.status, value).toBe(2);
+      expect(r.out).toContain(`::error::RELEASE_GUARD_STRICT must be 1 or 0, not '${value}'`);
+      expect(r.out).not.toContain("ok:");
+    }
+    expect(run(f, [tip], { RELEASE_GUARD_NO_FETCH: "1", RELEASE_GUARD_STRICT: "0" }).status).toBe(0);
+  });
 });
 
 describe(".github/workflows/release-guard.yml", () => {
@@ -207,8 +219,10 @@ describe(".github/workflows/release-guard.yml", () => {
     expect(workflow.match(pin)?.[0]).toBe(expected);
   });
 
-  it("says that a push workflow runs only from a commit that carries it", () => {
+  it("says that a push workflow runs only from a commit that carries it, and what a red manual run or re-run means", () => {
     expect(workflow).toMatch(/GitHub reads a push workflow from the pushed commit/);
+    expect(workflow).toContain("A manual run checks the branch tip");
+    expect(workflow).toContain("not that the live release is at fault");
   });
 });
 
@@ -239,6 +253,18 @@ describe("the runbook and the release checklist point at the guard", () => {
     expect(checklist).toMatch(/exit 0 with no `::warning::`/);
     expect(checklist).toMatch(/a missing run is a\s+fault/);
     expect(checklist).toMatch(/4\. \*\*Push \(owner\), then the Release guard\.\*\*/);
+  });
+
+  it("says what a refused push and a red manual run mean, and that the script runs from the repository root", () => {
+    for (const doc of [runbook, checklist]) {
+      expect(doc).toMatch(/A push refused as non-fast-forward means that\s+`release\/mainnet` carries commits `main` lacks/);
+      expect(doc).toMatch(/merge `origin\/release\/mainnet` into\s+`main` through a PR/);
+      expect(doc).toMatch(/never `--force`/);
+      expect(doc).toMatch(/A manual run \(workflow_dispatch\) checks the branch tip/);
+      expect(doc).toMatch(/not a\s+fault of the live one/);
+      expect(doc).toMatch(/from the repository root/);
+    }
+    expect(checklist).toMatch(/`RELEASE_GUARD_STRICT` reads\s+exactly `1`, another value exits 2/);
   });
 
   it("sends the health token through stdin, never on curl's command line", () => {

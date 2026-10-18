@@ -952,7 +952,7 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   | Public sale window (KYC-only off) | 0x7D | the Super Admin clears 0x02 with "Reopen primary issuance" after the pre-clear check (`/admin/launchpad`); any Admin sets 0x02 again when the window ends (`onchain:primary-open-idle`, §15, fires after an hour with no sale taking buys) |
   | Collecting proceeds (`close_sale`) | 0x5F | the Super Admin clears 0x20 only for the close; "End and collect" sets 0x20 (and 0x02) again with its `repause` mask |
   | Conversion window | the mode's mask minus 0x08 | only for the vault open and the holder's deposit; any Admin sets 0x08 again right after the deposit. Trigger, realize and return read no pause bit. Needs KYC-only off, `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and Terms that offer conversion (`ops/env-vars.md`, "Pilot scope") |
-  | Trading through Manci | the mode's mask minus 0x04 | cleared last, once the Terms offer it and `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true` |
+  | Trading through Manci (KYC-only off) | the mode's mask minus 0x04 | cleared last, once the Terms offer it and `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true`, which the mode overrides while it is on (`moduleEnabled`); 0x04 cleared earlier would leave the OTC entries permissionless on-chain behind a display gate |
 
   The mainnet role map has `unpauseMask` 1, so S6 left 0x7E; the 0x23
   arithmetic of §5 (S6) is the company example. On mainnet never use
@@ -2637,20 +2637,27 @@ branch `release/mainnet` (Ignored Build Step: only production), so a merge
 to `main` deploys devnet and never touches mainnet. Every front release is a
 fast-forward of that branch: `release/mainnet` is pushed from the tip of
 `main` (`ops/release-checklist.md`), never cherry-picked and never from a
-feature branch. Before the push, `RELEASE_GUARD_STRICT=1 bash
-scripts/check-release-ancestry.sh <sha>` checks the candidate: it must
-contain `origin/main` and carry nothing that is not on `main`. After the
-push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
+feature branch. Before the push, from the repository root,
+`RELEASE_GUARD_STRICT=1 bash scripts/check-release-ancestry.sh <sha>`
+checks the candidate: it must contain `origin/main` and carry nothing that
+is not on `main`. A push refused as non-fast-forward means that
+`release/mainnet` carries commits `main` lacks (the script run without an
+argument lists them as `::warning::`): merge `origin/release/mainnet` into
+`main` through a PR and start again at the check; never `--force`. After
+the push, the "Release guard" workflow (`.github/workflows/release-guard.yml`)
 runs the same script against the pushed commit: red means the live site is
 missing commits of `main`, as on 2026-10-15, when a push from a branch that
 had diverged before #78 left the KYC-only lockdown out of the release
 branch. GitHub reads a push workflow from the pushed commit, so a commit
 from a branch created before the workflow was merged runs no guard at all
 (exactly that shape): a missing run is a fault, and the pre-push check is
-the defence. A migration the new front needs is applied to the mainnet
-project before the push ("Apply migration 0080" below shows the order); a
-migration that needs the new front FIRST goes the other way round ("Apply
-migration 0082" below).
+the defence. A manual run (workflow_dispatch) checks the branch tip, and a
+re-run the commit pushed then, against the current `origin/main`, so it is
+red whenever `main` has unreleased commits: the next release's work, not a
+fault of the live one. A migration the new front needs is applied to the
+mainnet project before the push ("Apply migration 0080" below shows the
+order); a migration that needs the new front FIRST goes the other way round
+("Apply migration 0082" below).
 
 #### Apply migration 0080
 

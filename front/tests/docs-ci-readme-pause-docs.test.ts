@@ -69,6 +69,9 @@ describe("README status (F091)", () => {
     expect(envVars).toContain("### KYC-only mode and offered asset classes");
     expect(readme).toContain("[`ops/release-checklist.md`](ops/release-checklist.md)");
     expect(() => read("ops/release-checklist.md")).not.toThrow();
+    // The release rule, not a claim about which commit the live site serves.
+    expect(readme).toMatch(/requires that commit to be the tip of `main` and checks it before the push/);
+    expect(readme).not.toMatch(/keeps at the tip of `main`/);
   });
 
   it("claims no external audit until one is recorded (SECURITY_AUDIT)", () => {
@@ -117,6 +120,34 @@ describe("env-vars.md: conversion prerequisites and pause masks (F093, F089)", (
     expect(leaving).toMatch(/never as a\s+steady state/);
     expect(leaving).toMatch(/6\. Update the Status paragraph of `README\.md`/);
   });
+
+  it("post-deploy check: main's equity-only home page has no class tiles and links the equity guide (tests/asset-classes.test.ts pins the component)", () => {
+    expect(kycOnly).toContain("After the release (post-deploy check):");
+    const check = kycOnly.slice(kycOnly.indexOf("After the release (post-deploy check):"), kycOnly.indexOf("Leaving KYC-only mode later:"));
+    expect(check.length).toBeGreaterThan(0);
+    // b50db44 (2026-10-16) took the class tiles off the equity-only home page: a
+    // check that expects a tile fails on a correct release.
+    expect(check).not.toMatch(/Equity tile|More asset classes coming later/);
+    expect(check).toMatch(/no "Explore\s+by asset class" section and no class tiles/);
+    expect(check).toContain('"Read the equity guide"');
+    expect(check).toMatch(/no link to\s+`\/marketplace\/launchpad` or `\/apply`/);
+    expect(check).toMatch(/`\/markets\/types` shows Equity only/);
+  });
+});
+
+describe("ops/release-checklist.md step 6 (smoke)", () => {
+  it("expects what main renders in KYC-only, equity-only mode, so a correct release passes it", () => {
+    const checklist = read("ops/release-checklist.md");
+    expect(checklist).toContain("6. **Smoke.**");
+    const smoke = checklist.slice(checklist.indexOf("6. **Smoke.**"), checklist.indexOf("7. **Pause mask.**"));
+    expect(smoke.length).toBeGreaterThan(0);
+    expect(smoke).not.toMatch(/Equity tile|More asset classes coming later/);
+    expect(smoke).toMatch(/no "Explore by asset class" section and no class tiles/);
+    expect(smoke).toMatch(/no Primary\s+sales tab/);
+    expect(smoke).toMatch(/no link to `\/marketplace\/launchpad` or `\/apply`/);
+    expect(smoke).toContain('"Read the equity guide"');
+    expect(smoke).toContain("front/tests/asset-classes.test.ts");
+  });
 });
 
 describe("runbook §8 pause mask by mode (F089)", () => {
@@ -131,6 +162,8 @@ describe("runbook §8 pause mask by mode (F089)", () => {
     // mint_to_treasury, open_sale and buy are in KYC_ONLY_FLOWS: both 0x7D rows need the mode off.
     expect(s8).toMatch(/\| Direct mint \(`mint_to_treasury`; KYC-only off\) \| 0x7D \|/);
     expect(s8).toMatch(/\| Public sale window \(KYC-only off\) \| 0x7D \|/);
+    // secondaryTrading is a pilot module: moduleEnabled() is false while the mode is on.
+    expect(s8).toMatch(/\| Trading through Manci \(KYC-only off\) \| the mode's mask minus 0x04 \|/);
     expect(s8).toContain(`| ${mask(PAUSE_FLAGS_ALL & ~PAUSE_ISSUER_PROCEEDS)} |`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_CUSTODY_ENTRY)}`);
     expect(s8).toContain(`the mode's mask minus ${mask(PAUSE_SECONDARY)}`);

@@ -10,9 +10,12 @@
 # and GitHub reads a push workflow from the pushed commit, so a commit from a
 # branch created before this file was merged runs no guard at all: the
 # checklist's pre-push check (step 1) is the defence; this run makes a
-# mistake visible. No secret: the checkout's own token fetches main. Every
-# action is pinned to a commit SHA (the comment names its tag), as in
-# front-ci.yml; Dependabot moves the SHA and the comment together.
+# mistake visible. A manual run checks the branch tip, and a re-run the
+# commit pushed then, against the current origin/main: red then means main
+# has unreleased commits, not that the live release is at fault. No secret:
+# the checkout's own token fetches main. Every action is pinned to a commit
+# SHA (the comment names its tag), as in front-ci.yml; Dependabot moves the
+# SHA and the comment together.
 name: Release guard
 
 on:
