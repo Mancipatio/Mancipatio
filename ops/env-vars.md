@@ -294,7 +294,10 @@ Leaving KYC-only mode later:
 3. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy (both
    values are build-time).
 4. Verify: "Primary sales" is back in the sidebar and
-   `/marketplace/launchpad` shows no notice.
+   `/marketplace/launchpad` shows no "Paused." notice. Its amber "Primary
+   sales are paused" banner (`components/runtime-pause-notice.tsx`) stays
+   while 0x02 is set: expected until a sale window clears 0x02 (step 5);
+   it is not a reason to redeploy, roll back or clear the bit early.
 5. Only then, as each window starts, clear the pause bits the new mode's
    row allows (runbook §8, "Pause mask by mode"; the Super Admin clears):
    0x01 for an issuer or asset set-up and 0x08 for a conversion's open and

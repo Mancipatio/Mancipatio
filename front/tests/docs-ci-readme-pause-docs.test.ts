@@ -116,6 +116,9 @@ describe("env-vars.md: conversion prerequisites and pause masks (F093, F089)", (
   it("leaving the mode redeploys first, clears only a row's bits as each window starts, and updates the README", () => {
     const leaving = kycOnly.slice(kycOnly.indexOf("Leaving KYC-only mode later:"));
     expect(leaving).toMatch(/3\. There set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and Redeploy/);
+    // Step 4 runs with every bit still set: the runtime pause banner is expected, not a fault.
+    expect(leaving).toMatch(/4\. Verify:[\s\S]*no "Paused\." notice[\s\S]*Primary\s+sales are paused[\s\S]*5\. Only then/);
+    expect(leaving).not.toMatch(/launchpad` shows no notice\./);
     expect(leaving).toMatch(/5\. Only then, as each window starts, clear the pause bits[\s\S]*Pause\s+mask by mode/);
     expect(leaving).toMatch(/never as a\s+steady state/);
     expect(leaving).toMatch(/6\. Update the Status paragraph of `README\.md`/);
