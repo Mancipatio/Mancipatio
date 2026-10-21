@@ -46,12 +46,12 @@ const NEXT_STEP: Record<string, { title: string; body: string; href: string }> =
   delegate: {
     title: "Wait for an operating role",
     body: "Your wallet is now tied to your invitation. The platform Super Admin will grant any operational role from /admin/admins.",
-    href: "/",
+    href: "/app",
   },
   officer: {
     title: "Wait for assignment",
     body: "Your wallet is linked. The relevant issuer will grant officer permissions from their issuer console.",
-    href: "/",
+    href: "/app",
   },
 };
 
@@ -283,10 +283,10 @@ function Consumer({ id }: { id: string }) {
           link.
         </p>
         <Link
-          href="/"
+          href="/app"
           className="mt-6 inline-block rounded-lg bg-red-900 px-4 py-2 text-sm font-medium text-white hover:bg-red-950"
         >
-          Back to home
+          Back to app
         </Link>
       </div>
     );

@@ -55,6 +55,10 @@ requires that commit to be the tip of `main` and checks it before the push.
 
 ## Repository
 
+The public introduction is at `/`; `/app` opens the application overview.
+The existing account, verification and marketplace routes retain their network
+and feature controls. Documentation is at `/docs`.
+
 | Path | What it is |
 | --- | --- |
 | `program/` | Anchor workspace with the two on-chain programs: `asset_registry` (`FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS`) and `transfer_hook` (`GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy`), their LiteSVM tests and IDL tooling |

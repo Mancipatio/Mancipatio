@@ -298,7 +298,7 @@ the KYC registry instructions (approve, revoke, registry authority) never
 read the pause flags.
 
 After the release (post-deploy check): Admin → Platform shows 0x7F; the
-home page (`components/market-overview.tsx`, equity only) has no "Explore
+application overview at `/app` (`components/market-overview.tsx`, equity only) has no "Explore
 by asset class" section and no class tiles (they render only with more
 than one offered class), no "More asset classes" / "Coming later" tile
 (the layout before 2026-10-16), no Primary sales tab, stat or "Create a

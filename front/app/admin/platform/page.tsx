@@ -295,7 +295,7 @@ export default function AdminPage() {
         )}
 
         <p className="mt-8 text-sm text-slate-400">
-          <Link className="underline hover:text-slate-600" href="/">
+          <Link className="underline hover:text-slate-600" href="/app">
             ← back
           </Link>
         </p>

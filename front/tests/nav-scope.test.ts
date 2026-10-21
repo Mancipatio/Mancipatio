@@ -112,7 +112,7 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
     const portfolio = shell("portfolio", "/portfolio");
     const links = [...hrefs(sidebar(portfolio)), ...hrefs(tabs(portfolio))];
     for (const href of OFF_ON_MAINNET_USER) expect(links, href).not.toContain(href);
-    expect(hrefs(sidebar(portfolio))).toEqual(expect.arrayContaining(["/", "/marketplace", "/marketplace/launchpad", "/account", "/portfolio", "/issuer", "/docs"]));
+    expect(hrefs(sidebar(portfolio))).toEqual(expect.arrayContaining(["/", "/app", "/marketplace", "/marketplace/launchpad", "/account", "/portfolio", "/issuer", "/docs"]));
     expect(hrefs(tabs(portfolio))).toEqual(["/portfolio", "/portfolio/conversion", "/portfolio/history"]);
 
     expect(hrefs(tabs(shell("marketplace", "/marketplace")))).toEqual(["/marketplace", "/marketplace/launchpad"]);

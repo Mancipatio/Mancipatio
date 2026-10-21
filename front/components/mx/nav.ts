@@ -12,6 +12,7 @@ import { detectNetwork, type Network } from "@/lib/network";
  */
 export const MX_ROUTES = {
   home: "/",
+  app: "/app",
   /** Owns the six-step issuance flow — nothing else may restate it. */
   howItWorks: "/how-it-works",
   /** The SPV / rights / pledge / recourse page. */
@@ -68,7 +69,7 @@ export const MX_PRIMARY_NAV: MxNavItem[] = [
   { label: "Security", href: MX_ROUTES.security },
   { label: "Whitepapers", href: MX_ROUTES.whitepapers },
   { label: "Pricing", href: MX_ROUTES.pricing },
-  { label: "Open app", href: MX_ROUTES.home },
+  { label: "Open app", href: MX_ROUTES.app },
 ];
 
 /** Footer columns. Marketplace / resell / solutions are appended to
