@@ -2,11 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Montserrat } from "next/font/google";
 import { BrandLogo } from "@/components/brand-logo";
-import { IconArrowUpRight, IconFile, IconLayers, IconShield } from "@/components/icons";
+import { IconArrowUpRight, IconBuilding, IconCheck, IconCoins, IconLock } from "@/components/icons";
 import { MANCI_X_URL } from "@/components/follow-on-x";
 import { OwnershipVisual } from "@/components/marketing/ownership-visual";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { KYC_ONLY_MESSAGE, kycOnly } from "@/lib/features";
+import { KYC_ONLY_MESSAGE, kycOnly, scopeEnabled } from "@/lib/features";
 import { offeredAssetClasses } from "@/lib/pilot-scope";
 import { ASSET_TYPES } from "@/lib/asset-types";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
@@ -15,35 +15,39 @@ import styles from "./landing.module.css";
 const brandFont = Montserrat({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-brand", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Manci — Real assets. Clear rights. On-chain.",
+  title: "Manci — From token to registered owner",
   description:
-    "Meet Manci: infrastructure for real-world assets on Solana. Explore asset records, understand ownership rights and complete identity verification.",
+    "Company shares tokenized on Solana. Discover Manci's documented path from eligible company-share tokens through verification, conversion and registration to ownership.",
 };
 
-const capabilities = [
+const ownershipSteps = [
   {
     number: "01",
-    icon: IconFile,
-    title: "Know the asset",
-    description: "Explore the asset registry and review the issuer, documents and ownership records behind each asset.",
-    href: "/marketplace",
-    link: "Explore the registry",
+    icon: IconCoins,
+    title: "Token",
+    description: "An eligible company-share token carries a documented right to acquire a real share.",
+    detail: "A claim to a share",
   },
   {
     number: "02",
-    icon: IconLayers,
-    title: "Understand your rights",
-    description: "Learn how the asset, its legal structure and the rights attached to its tokens fit together.",
-    href: "/docs",
-    link: "Read the documentation",
+    icon: IconLock,
+    title: "Convert",
+    description: "Complete KYC and place eligible tokens in escrow for the conversion process.",
+    detail: "Verification + escrow",
   },
   {
     number: "03",
-    icon: IconShield,
-    title: "Verify your identity",
-    description: "Create an account and complete identity verification for yourself or your company in one workspace.",
-    href: "/verify",
-    link: "Start verification",
+    icon: IconBuilding,
+    title: "Register",
+    description: "Complete the legal transfer and enter the share ownership in the official register.",
+    detail: "Legal registration",
+  },
+  {
+    number: "04",
+    icon: IconCheck,
+    title: "Burn",
+    description: "After registration is confirmed, the escrowed tokens are burned. The registered share remains.",
+    detail: "Registered ownership",
   },
 ];
 
@@ -71,19 +75,20 @@ export default function HomePage() {
         <main id="main-content" tabIndex={-1}>
           <section className={`${styles.container} ${styles.hero}`} aria-labelledby="intro-title">
             <div>
-              <p className={styles.eyebrow}><span /> REAL-WORLD ASSETS ON SOLANA</p>
-              <h1 id="intro-title">Real assets.<br />Clear rights.<br /><span>On-chain.</span></h1>
-              <p className={styles.lead}>We’re building the infrastructure to connect real-world assets with digital ownership. Understand the asset, review its rights and find your place in the Manci workspace.</p>
+              <p className={styles.eyebrow}><span /> PRIVATE COMPANY SHARES · ON SOLANA</p>
+              <h1 id="intro-title">From token to<br />registered<br /><span>owner.</span></h1>
+              <p className={styles.lead}>Company shares tokenized on Solana, end to end.</p>
+              <p className={styles.heroCopy}>A documented path from a company-share token to registered ownership, through verification, conversion and legal registration.</p>
               <div className={styles.actions}>
                 <Link href="/app" className={styles.primary}>Explore the app <IconArrowUpRight size={19} /></Link>
-                <Link href="/how-it-works" className={styles.textLink}>How it works <span aria-hidden="true">→</span></Link>
+                <a href="#ownership-path" className={styles.textLink}>How it works <span aria-hidden="true">↓</span></a>
               </div>
               <p className={styles.stage}><span /> {network === "mainnet" ? "Built on Solana mainnet" : `Explore on Solana ${networkLabel(network).toLowerCase()} · Test environment`}</p>
               {kycOnly(network) && <p className={styles.scopeNotice}>{KYC_ONLY_MESSAGE}</p>}
             </div>
             <figure className={styles.visual}>
               <OwnershipVisual />
-              <figcaption><span>Real-world value</span><span aria-hidden="true">→</span><span>Defined rights</span><span aria-hidden="true">→</span><span>Digital ownership</span></figcaption>
+              <figcaption>A documented claim. A path to registered ownership.</figcaption>
             </figure>
           </section>
 
@@ -91,18 +96,40 @@ export default function HomePage() {
             <div className={styles.container}><span className={styles.assetBandLabel}>UNDERSTAND THE ASSET</span><p>{assetTypes.map((asset, index) => <span className={styles.assetName} key={asset.slug}>{index > 0 && <span aria-hidden="true">/</span>}{asset.title}</span>)}</p><Link href={assetGuide} aria-label={assetTypes.length === 1 ? "Read the asset guide" : "Explore offered asset types"}><IconArrowUpRight size={20} /></Link></div>
           </div>
 
-          <section className={styles.about} aria-labelledby="about-title">
+          <section id="ownership-path" className={styles.about} aria-labelledby="about-title">
             <div className={styles.container}>
               <div className={styles.aboutHeading}>
-                <div><p className={styles.eyebrow}>MEET MANCI</p><h2 id="about-title">Real ownership.<br /><span>A clearer picture.</span></h2></div>
-                <div className={styles.aboutCopy}><p>Manci brings asset records, documentation and identity verification into one workspace on Solana. We start with what ownership means: the asset, its issuer and the rights it carries.</p><Link href="/about" className={styles.textLink}>More about us <IconArrowUpRight size={17} /></Link></div>
+                <div><p className={styles.eyebrow}>MEET MANCI</p><h2 id="about-title">Private companies.<br /><span>A path to ownership.</span></h2></div>
+                <div className={styles.aboutCopy}><p>We bring together Solana engineering, legal structuring and company verification. Our focus is private companies and the people who hold their tokens, with a documented route from a token-holder claim to registered share ownership.</p><Link href="/about" className={styles.textLink}>More about us <IconArrowUpRight size={17} /></Link></div>
               </div>
-              <div className={styles.capabilities}>
-                {capabilities.map(({ number, icon: Icon, title, description, href, link }) => <article key={number} className={styles.capability}><div className={styles.capabilityTop}><Icon size={25} /><span>{number}</span></div><h3>{title}</h3><p>{description}</p><Link href={href}>{link} <IconArrowUpRight size={17} /></Link></article>)}
+              <ol className={styles.capabilities} aria-label="From token to registered owner: four steps">
+                {ownershipSteps.map(({ number, icon: Icon, title, description, detail }) => (
+                  <li key={number} className={styles.capability}>
+                    <div className={styles.capabilityTop}><Icon size={25} /><span>{number}</span></div>
+                    <h3>{title}</h3><p>{description}</p><span className={styles.stepDetail}>{detail}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className={styles.processNote}>Token rights, eligibility and conversion requirements are defined in each issuance’s documents. Holding a token alone does not make you a registered shareholder. <Link href="/docs">Read the documentation <span aria-hidden="true">↗</span></Link></p>
+
+              <div className={styles.otc}>
+                <div className={styles.otcCopy}>
+                  <p className={styles.eyebrow}>PEER TO PEER · SETTLED ON SOLANA</p>
+                  <h3>A second path: trade the token.</h3>
+                  <p>Manci’s OTC model connects sellers and buyers through smart-contract escrow, without converting the token into a registered share.</p>
+                  {!scopeEnabled("secondaryTrading", network) && <span className={styles.availability}>OTC trading is currently paused.</span>}
+                </div>
+                <div className={styles.otcFlow} aria-label="OTC model: seller, smart-contract escrow, buyer">
+                  <div><span>Seller</span><small>Posts an offer</small></div>
+                  <span className={styles.flowArrow} aria-hidden="true">↔</span>
+                  <div className={styles.escrow}><IconLock size={23} /><span>Escrow</span><small>Holds both sides</small></div>
+                  <span className={styles.flowArrow} aria-hidden="true">↔</span>
+                  <div><span>Buyer</span><small>Receives tokens</small></div>
+                </div>
               </div>
               <div className={styles.nextStep}>
-                <div><p className={styles.eyebrow}>YOUR NEXT STEP</p><h2>Explore what’s possible.</h2><p>Get to know the platform, or talk to us about your asset.</p></div>
-                <div className={styles.actions}><Link href="/app" className={styles.primary}>Open app <IconArrowUpRight size={19} /></Link><Link href="/contact" className={styles.textLink}>Let’s talk <IconArrowUpRight size={17} /></Link></div>
+                <div><p className={styles.eyebrow}>YOUR NEXT STEP</p><h2>Get to know Manci.</h2><p>Explore the registry, create an account and complete identity verification.</p></div>
+                <div className={styles.actions}><Link href="/app" className={styles.primary}>Open app <IconArrowUpRight size={19} /></Link><Link href="/verify" className={styles.textLink}>Get verified <IconArrowUpRight size={17} /></Link></div>
               </div>
             </div>
           </section>
@@ -110,7 +137,7 @@ export default function HomePage() {
       </div>
 
       <footer className={styles.footer}>
-        <div className={`${styles.container} ${styles.footerTop}`}><Link href="/" className={styles.logo}><BrandLogo /></Link><p>Real-world assets. Connected.</p><nav aria-label="Footer navigation"><Link href="/about">About</Link><Link href="/docs">Docs</Link><a href={MANCI_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Manci on X (opens in a new tab)">X <IconArrowUpRight size={13} /></a><Link href="/contact">Contact</Link></nav></div>
+        <div className={`${styles.container} ${styles.footerTop}`}><Link href="/" className={styles.logo}><BrandLogo /></Link><p>From token to registered owner.</p><nav aria-label="Footer navigation"><Link href="/about">About</Link><Link href="/docs">Docs</Link><a href={MANCI_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Manci on X (opens in a new tab)">X <IconArrowUpRight size={13} /></a><Link href="/contact">Contact</Link></nav></div>
         <div className={`${styles.container} ${styles.footerBottom}`}><span>© {new Date().getFullYear()} Manci</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/privacy">Privacy</Link><Link href="/legal/company">Company &amp; licence</Link></div></div>
         {operatorLine && <p className={`${styles.container} ${styles.operatorLine}`}>{operatorLine}</p>}
       </footer>
