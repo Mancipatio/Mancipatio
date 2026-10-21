@@ -61,7 +61,7 @@ their own path (runbook §9, through Squads).
    Instant Rollback: Vercel → Deployments.
 6. **Smoke.** Sign-in (wallet and email) and `/verify` load; in KYC-only
    mode `/marketplace/launchpad` shows "Paused.", the sidebar has no
-   Primary sales and no Issuer workspace, and the home page (equity only)
+   Primary sales and no Issuer workspace, and the application overview at `/app` (equity only)
    has no "Explore by asset class" section and no class tiles, no Primary
    sales tab and no link to `/marketplace/launchpad` or `/apply`, while its
    "Know what you own" card links "Read the equity guide"

@@ -235,7 +235,7 @@ describe("pages while the mode is on (mainnet default)", () => {
     for (const path of [
       "/issuer/authority", "/issuer/recovery", "/issuer/rotation",
       "/verify", "/account", "/account/verify", "/login", "/onboarding/x",
-      "/portfolio", "/portfolio/history", "/", "/marketplace", "/markets/types", "/contact", "/docs",
+      "/portfolio", "/portfolio/history", "/", "/app", "/marketplace", "/markets/types", "/contact", "/docs",
       "/admin/kyc", "/admin/clients", "/admin/platform",
     ]) {
       expect(moduleRouteState(path, "mainnet"), path).toBeNull();

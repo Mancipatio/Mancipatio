@@ -18,7 +18,7 @@ import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
 
 const primary = [
-  { href: "/", label: "Overview", icon: IconHome },
+  { href: "/app", label: "Overview", icon: IconHome },
   { href: "/marketplace", label: "Explore assets", icon: IconLayers },
   { href: "/marketplace/launchpad", label: "Primary sales", icon: IconRocket },
   { href: "/marketplace/otc", label: "OTC market", icon: IconRepeat },
@@ -45,7 +45,7 @@ const marketTabs = [
 ];
 
 function activePath(path: string, href: string) {
-  if (["/", "/marketplace", "/portfolio", "/issuer"].includes(href)) return path === href;
+  if (["/app", "/marketplace", "/portfolio", "/issuer"].includes(href)) return path === href;
   return path === href || path.startsWith(`${href}/`);
 }
 
@@ -162,7 +162,7 @@ export function AppShell({ children, section = "overview" }: {
           <div className="app-account"><AccountMenu /></div>
         </header>
         {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
-        {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
+        {path !== "/app" && <div className="app-floating-account"><AccountMenu /></div>}
         {tabs && tabs.length > 0 && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           <RuntimePauseNotice path={path} />

@@ -25,7 +25,7 @@ const STEPS = [
   {
     title: "01 · Explore the market",
     body: `Browse assets${navHrefVisible("/marketplace/otc") ? ", open sales and funded OTC offers" : " and open sales"}. Open an asset to review its issuer and available share classes.`,
-    links: [{ label: "Explore markets", href: MX_ROUTES.home }],
+    links: [{ label: "Explore markets", href: MX_ROUTES.app }],
   },
   {
     title: "02 · Read the documents",
@@ -63,7 +63,7 @@ export default function InvestorsPage() {
         lede="Follow an asset from discovery and document review to purchase and your portfolio."
       >
         <ButtonRow>
-          <Button href={MX_ROUTES.home}>Explore markets</Button>
+          <Button href={MX_ROUTES.app}>Explore markets</Button>
           <Button href={MX_ROUTES.whitepapers} variant="ghost">
             Token documents
           </Button>

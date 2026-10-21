@@ -88,7 +88,7 @@ function network(name: "mainnet" | "devnet", kyc = "", on: Partial<Record<keyof 
   vi.stubEnv("NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "");
 }
 
-type Section = "portfolio" | "marketplace" | "issuer" | "application" | "account";
+type Section = "overview" | "portfolio" | "marketplace" | "issuer" | "application" | "account";
 function shell(section: Section, path: string) {
   nav.path = path;
   // AppShell types `children` as a required prop (a .ts test has no JSX).
@@ -117,9 +117,17 @@ describe("AppShell with the mode on (mainnet default)", () => {
   it("sidebar: browsing, the account and the portfolio; no sale, issuer, raise or module entry; the promo offers verification", () => {
     network("mainnet", "", { custodyConversion: "true" });
     const side = hrefs(sidebar(shell("portfolio", "/portfolio")));
-    expect(side).toEqual(expect.arrayContaining(["/", "/marketplace", "/account", "/portfolio", "/docs", "/verify"]));
+    expect(side).toEqual(expect.arrayContaining(["/", "/app", "/marketplace", "/account", "/portfolio", "/docs", "/verify"]));
     for (const href of ["/marketplace/launchpad", "/issuer", "/apply", ...MODULE_PAGES]) expect(side, href).not.toContain(href);
     expect(sidebar(shell("portfolio", "/portfolio"))).toContain("Identity verification is open.");
+  });
+
+  it("the app overview stays selected at /app and owns its account menu", () => {
+    const overview = shell("overview", "/app");
+    expect(sidebar(overview)).toContain('href="/app" class="app-nav-link is-active"');
+    expect(sidebar(overview)).toContain('href="/" class="app-wordmark"');
+    expect(overview).not.toContain('class="app-floating-account"');
+    expect(shell("portfolio", "/portfolio")).toContain('class="app-floating-account"');
   });
 
   it("section tabs: the portfolio overview and activity, the asset directory, and only issuer verification tabs", () => {
