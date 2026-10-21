@@ -1,0 +1,142 @@
+.poster {
+  --mint: #d6edbd;
+  --cream: #f2f0df;
+  position: relative;
+  container-type: inline-size;
+  width: 100%;
+  max-width: 540px;
+  margin-inline: auto;
+  padding: 22px 24px 16px;
+  border: 1px solid #a9cba12e;
+  border-radius: 22px;
+  color: var(--cream);
+  background: radial-gradient(ellipse at 74% 31%, #7da77b12, transparent 65%), #14352780;
+  box-shadow: inset 0 1px 0 #efffe90a, 0 24px 60px #07180e14;
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+.heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.heading > span:first-child { color: #c5d6c1; font-size: 10px; font-weight: 500; letter-spacing: 1.7px; text-transform: uppercase; }
+.playback { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid #99b99347; border-radius: 20px; padding: 5px 10px; background: #cde3c008; color: #dce9d4; font: inherit; font-size: 11px; cursor: pointer; }
+.playback:hover { border-color: #cbe2b7; background: #cde3c012; }
+.motionOff { color: #afc5a9; font-size: 11px; }
+.scene { position: relative; width: 100%; aspect-ratio: 480 / 293; margin: 6px 0 17px; }
+.scene > svg { display: block; width: 100%; height: auto; overflow: visible; }
+.track { stroke: #a5c19a45; stroke-width: 1.5; stroke-dasharray: 3 6; }
+.arrow { stroke: #a5c19a6b; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.tokenPath, .registerPath, .ownerPath { stroke: var(--mint); stroke-width: 1.5; stroke-dasharray: 1; stroke-dashoffset: 1; }
+.origin { stroke: #accd9e70; stroke-width: 1; stroke-dasharray: 2 6; }
+.originMark { fill: #bdd7ab12; stroke: #bdd7ab5c; }
+.escrow rect { fill: #65875519; stroke: #afc69e; stroke-width: 1.5; }
+.lock { stroke: #afc69e; stroke-width: 2.5; transform: translateY(-6px); }
+.kycCheck { opacity: 0; }
+.kycCheck circle, .registrationSeal circle, .ownerCheck circle { fill: var(--mint); }
+.kycCheck path, .registrationSeal path, .ownerCheck path { stroke: #234d33; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.registry { opacity: .5; }
+.registry > path:first-child { fill: #e5ecd509; stroke: #d2dec5; stroke-width: 1.5; }
+.registry > path:nth-child(2) { stroke: #d2dec5; stroke-width: 1.5; }
+.registerRules { stroke: #cadbb323; stroke-width: 2; }
+.registerEntry { stroke: var(--mint); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
+.registrationSeal { opacity: 0; }
+.owner { opacity: .4; }
+.owner > circle:first-child { fill: #e1eac511; stroke: #a3bc8a; stroke-width: 1.5; }
+.ownerHead, .ownerBody { stroke: #dce8cd; stroke-width: 2; stroke-linecap: round; }
+.ownerCheck { opacity: 0; }
+.tokenTravel { transform: translate(100px, 72px); }
+.token > path:first-child { fill: var(--mint); stroke: #f4f5db; stroke-width: 1.2; }
+.tokenInset { stroke: #4e70436b; stroke-width: 1; }
+.tokenMark { stroke: #2c5037; stroke-width: 2.2; stroke-linejoin: round; }
+.burn { opacity: 0; transform-origin: 380px 72px; }
+.burn path { stroke: #e0e6b5; stroke-width: 1.5; stroke-linecap: round; }
+.sceneLabel { position: absolute; width: 45%; text-align: center; color: #b9ccb1; font-size: 12px; line-height: 1.4; transform: translateX(-50%); }
+.tokenLabel { top: 39%; left: 20.83%; }
+.escrowLabel { top: 39%; left: 79.17%; }
+.registerLabel { top: 86%; left: 79.17%; }
+.registerLabel small { display: block; color: #a8bda1; font-size: 10px; line-height: 1.7; }
+.ownerLabel { top: 86%; left: 20.83%; color: #b9ccb177; }
+.steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.step { position: relative; display: block; overflow: hidden; min-height: 92px; text-align: left; padding: 11px 12px 14px; border: 1px solid #a9cba123; border-radius: 8px; background: #0e2b1d38; color: inherit; font: inherit; cursor: pointer; }
+.step:hover { border-color: #abc69680; }
+.step[aria-pressed="true"] { border-color: #d0e3b983; background: #c4dfa10c; }
+.stepTitle { display: flex; align-items: baseline; gap: 9px; font-size: 13px; font-weight: 500; }
+.stepTitle > span { color: #9bb58b; font-family: var(--font-geist-mono), monospace; font-size: 10px; letter-spacing: .5px; }
+.step[aria-pressed="true"] .stepTitle > span { color: var(--mint); }
+.stepDescription { display: block; margin-top: 6px; color: #b7c9af; font-size: 12px; line-height: 1.5; }
+.progress { position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: #d6edbd0a; }
+.progress > span { display: block; height: 100%; background: var(--mint); transform: scaleX(0); transform-origin: left; animation: progress 4s linear forwards; }
+.caption { margin: 13px 0 0; color: #94ae8d; text-align: center; font-size: 10px; letter-spacing: .3px; }
+.playback:focus-visible, .step:focus-visible { outline: 2px solid #e7f2cc; outline-offset: 4px; }
+
+/* One four-second phase at a time. The progress animation advances React's
+   phase on animationend, so pausing also preserves the exact phase duration. */
+.poster:not([data-step="0"]) .tokenTravel { transform: translate(380px, 72px); }
+.poster:not([data-step="0"]) .tokenPath { stroke-dashoffset: 0; opacity: .45; }
+.poster:not([data-step="0"]) .lock { transform: translateY(0); }
+.poster:not([data-step="0"]) .kycCheck { opacity: 1; }
+.poster[data-step="1"] .tokenTravel { animation: tokenToEscrow 4s cubic-bezier(.4, 0, .2, 1) both; }
+.poster[data-step="1"] .tokenPath { opacity: 1; animation: traceToken 4s ease both; }
+.poster[data-step="1"] .lock { animation: lockEscrow 4s ease both; }
+.poster[data-step="1"] .kycCheck { animation: checkKyc 4s ease both; }
+.poster[data-step="2"] .registerPath { animation: registerRoute 4s ease both; }
+.poster[data-step="2"] .registerEntry { animation: writeRegister 4s ease both; }
+.poster[data-step="2"] .registrationSeal { animation: sealRegister 4s ease both; }
+.poster[data-step="2"] .registry, .poster[data-step="3"] .registry { opacity: 1; }
+.poster[data-step="2"] .registerEntry, .poster[data-step="3"] .registerEntry { stroke-dashoffset: 0; }
+.poster[data-step="2"] .registrationSeal, .poster[data-step="3"] .registrationSeal { opacity: 1; }
+.poster[data-step="3"] .registerPath { stroke-dashoffset: 0; opacity: .45; }
+.poster[data-step="3"] .token { opacity: 0; transform: scale(0); animation: burnToken 4s ease both; }
+.poster[data-step="3"] .burn { animation: burnTrace 4s ease both; }
+.poster[data-step="3"] .ownerPath { stroke-dashoffset: 0; animation: ownerRoute 4s ease both; }
+.poster[data-step="3"] .owner, .poster[data-step="3"] .ownerCheck { opacity: 1; animation: registeredOwner 4s ease both; }
+.poster[data-step="3"] .owner > circle:first-child { fill: #d6edbd1a; stroke: var(--mint); }
+.poster[data-step="3"] .ownerLabel { color: var(--cream); animation: registeredOwner 4s ease both; }
+.poster[data-playing="false"] * { animation-play-state: paused !important; }
+.poster[data-manual="true"] *, .poster[data-static="true"] * { animation: none !important; }
+.poster[data-manual="true"] .progress > span { transform: scaleX(1); }
+.poster[data-static="true"] .tokenTravel { transform: translate(100px, 72px); }
+.poster[data-static="true"] .token { opacity: 1; transform: none; }
+.poster[data-static="true"] .lock { transform: none; }
+.poster[data-static="true"] .kycCheck, .poster[data-static="true"] .registry,
+.poster[data-static="true"] .registrationSeal, .poster[data-static="true"] .owner,
+.poster[data-static="true"] .ownerCheck { opacity: 1; }
+.poster[data-static="true"] .registerEntry { stroke-dashoffset: 0; }
+.poster[data-static="true"] .ownerLabel { color: var(--cream); }
+.poster[data-static="true"] .progress { display: none; }
+
+@keyframes progress { to { transform: scaleX(1); } }
+@keyframes tokenToEscrow { 0%, 25% { transform: translate(100px, 72px); } 72%, 100% { transform: translate(380px, 72px); } }
+@keyframes traceToken { 0%, 25% { stroke-dashoffset: 1; } 72%, 100% { stroke-dashoffset: 0; } }
+@keyframes lockEscrow { 0%, 75% { transform: translateY(-6px); } 92%, 100% { transform: translateY(0); } }
+@keyframes checkKyc { 0%, 5% { opacity: 0; } 20%, 100% { opacity: 1; } }
+@keyframes registerRoute { 0%, 12% { stroke-dashoffset: 1; } 40%, 100% { stroke-dashoffset: 0; } }
+@keyframes writeRegister { 0%, 30% { stroke-dashoffset: 1; } 77%, 100% { stroke-dashoffset: 0; } }
+@keyframes sealRegister { 0%, 74% { opacity: 0; } 90%, 100% { opacity: 1; } }
+@keyframes burnToken { 0%, 12% { opacity: 1; transform: scale(1); } 45%, 100% { opacity: 0; transform: scale(.25); } }
+@keyframes burnTrace { 0%, 12% { opacity: 0; transform: scale(.5); } 27% { opacity: .8; } 50%, 100% { opacity: 0; transform: scale(1.3); } }
+@keyframes ownerRoute { 0%, 18% { stroke-dashoffset: 1; } 57%, 100% { stroke-dashoffset: 0; } }
+@keyframes registeredOwner { 0%, 35% { opacity: .4; } 63%, 100% { opacity: 1; } }
+
+@container (min-width: 440px) {
+  .steps { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .step { padding-inline: 10px; }
+}
+
+@media (max-width: 1050px) {
+  .poster { padding-inline: 16px; }
+  .step { padding-inline: 10px; }
+}
+@media (max-width: 480px) {
+  .poster { padding: 17px 12px 13px; border-radius: 16px; }
+  .heading { gap: 8px; }
+  .heading > span:first-child { font-size: 9px; letter-spacing: 1.1px; }
+  .scene { margin-top: 14px; margin-bottom: 20px; }
+  .sceneLabel { font-size: 11px; }
+  .registerLabel small { font-size: 10px; }
+  .steps { gap: 8px; }
+  .step { min-height: 102px; padding: 10px 9px 13px; }
+  .stepTitle { gap: 7px; font-size: 13px; }
+  .stepDescription { font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .poster *, .poster *::before, .poster *::after { animation: none !important; transition: none !important; }
+}

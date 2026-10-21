@@ -14,7 +14,7 @@ vi.mock("next/image", () => ({
 
 import HomePage from "@/app/page";
 import { ASSET_TYPES } from "@/lib/asset-types";
-import { KYC_ONLY_ENV, KYC_ONLY_MESSAGE } from "@/lib/features";
+import { KYC_ONLY_ENV, KYC_ONLY_MESSAGE, PILOT_MODULE_ENV } from "@/lib/features";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 
 const render = () => renderToStaticMarkup(createElement(HomePage));
@@ -33,10 +33,33 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
   vi.stubEnv("NEXT_PUBLIC_ASSET_CLASSES", "");
   vi.stubEnv(KYC_ONLY_ENV, "");
+  vi.stubEnv(PILOT_MODULE_ENV.secondaryTrading, "");
 });
 afterEach(() => vi.unstubAllEnvs());
 
 describe("the public landing page", () => {
+  it("explains conversion in order without equating a held token with a registered share", () => {
+    const markup = render();
+    const steps = /<ol[^>]*aria-label="From token to registered owner: four steps"[^>]*>([\s\S]*?)<\/ol>/.exec(markup)?.[1] ?? "";
+    const headings = [...steps.matchAll(/<h3[^>]*>(.*?)<\/h3>/g)].map((match) => match[1]);
+    expect(headings).toEqual(["Token", "Convert", "Register", "Burn"]);
+    expect(visibleText(steps)).toContain("Complete KYC");
+    expect(visibleText(steps)).toContain("official register");
+    expect(visibleText(steps)).toContain("After registration is confirmed");
+    expect(visibleText(markup)).toContain("Holding a token alone does not make you a registered shareholder.");
+    expect(anchors(markup).map((link) => link.href)).toContain("#ownership-path");
+  });
+
+  it("shows OTC as paused until both the public scope and its module are enabled", () => {
+    expect(visibleText(render())).toContain("OTC trading is currently paused.");
+    vi.stubEnv(PILOT_MODULE_ENV.secondaryTrading, "true");
+    expect(visibleText(render())).toContain("OTC trading is currently paused.");
+    vi.stubEnv(KYC_ONLY_ENV, "false");
+    expect(visibleText(render())).not.toContain("OTC trading is currently paused.");
+    vi.stubEnv(PILOT_MODULE_ENV.secondaryTrading, "false");
+    expect(visibleText(render())).toContain("OTC trading is currently paused.");
+  });
+
   it("mainnet default: truthful network, shared KYC-only notice and only the equity guide", () => {
     const markup = render();
     expect(visibleText(markup)).toContain("Built on Solana mainnet");
