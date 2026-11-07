@@ -5,14 +5,17 @@ import { WalletRequired } from "@/components/wallet-required";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { findAssetPda } from "@/lib/generated/asset_registry";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Address } from "@solana/kit";
+import { assetHref } from "@/lib/asset-links";
+import { enrichPortfolioHoldings, type PortfolioHolding } from "@/lib/portfolio-overview";
+import { useChainClock } from "@/lib/use-chain-clock";
 import { loadKycAuthorityContext } from "@/lib/kyc-authority";
 import { Kpi } from "@/components/kpi";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { loadNetwork, type NetworkData } from "@/lib/enumerate";
+import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
-import { loadHoldings, type Holding } from "@/lib/holdings";
+import { loadHoldings } from "@/lib/holdings";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import {
   fetchPassport,
@@ -30,16 +33,6 @@ import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { useToast } from "@/lib/toast";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
-const CLASS_TYPE = [
-  "Common",
-  "Preferred A",
-  "Preferred B",
-  "Senior debt",
-  "Junior debt",
-  "Rev-share tier",
-  "Royalty tier",
-];
-
 // Only jurisdictions the server actually accepts (/api/passport/submit
 // validates against DEFAULT_APPROVED_JURISDICTIONS — offering the full ISO
 // list meant signing a wallet message only to get a 400). Every listed code
@@ -49,105 +42,104 @@ const PASSPORT_COUNTRY_OPTIONS = COUNTRIES.filter((c) =>
   isDefaultApprovedJurisdiction(parseInt(c.code, 10)),
 );
 
-type EnrichedHolding = Holding & {
-  className: string;
-  assetName: string;
-  assetId: string;
-  classIndex: number;
-  classType: number;
-};
-
 type PassportState =
   | { phase: "loading" }
   | { phase: "none" }
+  | { phase: "error" }
   | { phase: "ready"; entry: KycEntry };
 
+type RequestState =
+  | { phase: "loading" }
+  | { phase: "error" }
+  | { phase: "ready"; request: OpenPassportRequest | null };
+
 export default function PortfolioOverviewPage() {
+  const conn = useWalletConnection();
+  const wallet = conn.wallet?.account.address;
+  if (!conn.isReady) {
+    return <main className="min-w-0 flex-1"><SkeletonCard className="max-w-md" rows={3} /></main>;
+  }
+  if (!wallet) {
+    return <main className="min-w-0 flex-1"><WalletRequired /></main>;
+  }
+  // A new wallet gets a fresh component before its first render. Responses,
+  // open dialogs and private upload links from the previous wallet cannot leak.
+  return <PortfolioForWallet key={`${detectNetwork()}:${wallet}`} wallet={wallet} />;
+}
+
+function PortfolioForWallet({ wallet }: { wallet: Address }) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const router = useRouter();
   const toast = useToast();
-  const wallet = conn.wallet?.account.address;
-  const [data, setData] = useState<NetworkData | null>(null);
-  const [holdings, setHoldings] = useState<Holding[] | null>(null);
+  const [enriched, setEnriched] = useState<PortfolioHolding[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [passport, setPassport] = useState<PassportState>({ phase: "loading" });
-  const [now] = useState(() => Math.floor(Date.now() / 1000));
+  const now = Number(useChainClock());
   const [registryPda, setRegistryPda] = useState<string | null>(null);
-  const [openRequest, setOpenRequest] = useState<OpenPassportRequest | null>(
-    null,
-  );
+  const [requestState, setRequestState] = useState<RequestState>({ phase: "loading" });
   const [requestModalOpen, setRequestModalOpen] = useState(false);
-
-  const refresh = useCallback(async () => {
-    if (!wallet) return;
-    try {
-      const [network, hs] = await Promise.all([
-        loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
-        loadHoldings(client.runtime.rpc, wallet),
-      ]);
-      setData(network);
-      setHoldings(hs);
-    } catch {
-      setFailed(true);
-    }
-  }, [client, wallet]);
-
+  const [revision, setRevision] = useState(0);
+  const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
+  const active = useRef(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
-  }, [refresh]);
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+  const refresh = () => setRevision((value) => value + 1);
 
-  // Passport fetch — use the live KYC registry (independent of platform.admin).
   useEffect(() => {
     let cancelled = false;
-    async function loadPassport() {
-      if (!wallet) {
-        if (!cancelled) setPassport({ phase: "none" });
-        return;
-      }
+    async function loadHoldingsState() {
+      setEnriched(null);
+      setFailed(false);
+      setLastLoadedAt(null);
       try {
-        // The registry is resolved BY ADDRESS (the NEXT_PUBLIC_KYC_REGISTRY
-        // pin, or an unpinned scan) — never derived from Platform.admin or
-        // from the registry's current (rotatable) authority.
-        const ctx = await loadKycAuthorityContext(client.runtime.rpc);
-        if (!ctx.registry) {
-          if (!cancelled) setPassport({ phase: "none" });
-          return;
-        }
-        const registry = ctx.registry.address;
-        if (!cancelled) setRegistryPda(registry.toString());
-        const entry = await fetchPassport(client.runtime.rpc, registry, wallet);
+        const [network, holdings] = await Promise.all([
+          loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
+          loadHoldings(client.runtime.rpc, wallet),
+        ]);
+        const rows = await enrichPortfolioHoldings(network, holdings);
         if (!cancelled) {
+          setEnriched(rows);
+          setLastLoadedAt(new Date());
+        }
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    }
+    async function loadPassport() {
+      setPassport({ phase: "loading" });
+      setRegistryPda(null);
+      try {
+        const ctx = await loadKycAuthorityContext(client.runtime.rpc, { fresh: revision > 0 });
+        // Preserve the configured registry address across authority rotation.
+        // A missing pin is an unavailable read, never proof of no passport.
+        if (ctx.ambiguous || ctx.pinnedMissing) throw new Error("Passport registry unavailable");
+        const registry = ctx.registry?.address;
+        const entry = registry ? await fetchPassport(client.runtime.rpc, registry, wallet) : null;
+        if (!cancelled) {
+          setRegistryPda(registry?.toString() ?? null);
           setPassport(entry ? { phase: "ready", entry } : { phase: "none" });
         }
       } catch {
-        if (!cancelled) setPassport({ phase: "none" });
+        if (!cancelled) setPassport({ phase: "error" });
       }
     }
-    void loadPassport();
-    return () => {
-      cancelled = true;
-    };
-  }, [client, wallet]);
-
-  // Open (undecided) passport request for this wallet — drives the card's
-  // "application under review" state instead of the Apply/Reapply button.
-  const refreshOpenRequest = useCallback(async () => {
-    if (!wallet) {
-      setOpenRequest(null);
-      return;
+    async function loadRequest() {
+      setRequestState({ phase: "loading" });
+      try {
+        const request = await getOpenPassportRequest(wallet.toString());
+        if (!cancelled) setRequestState({ phase: "ready", request });
+      } catch {
+        if (!cancelled) setRequestState({ phase: "error" });
+      }
     }
-    // Minimal unsigned status probe — the passport_requests table itself is
-    // no longer anon-readable (0031); the server returns only the newest
-    // undecided request's id/status/created_at for this wallet.
-    setOpenRequest(await getOpenPassportRequest(wallet.toString()));
-  }, [wallet]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refreshOpenRequest();
-  }, [refreshOpenRequest]);
+    void loadHoldingsState();
+    void loadPassport();
+    void loadRequest();
+    return () => { cancelled = true; };
+  }, [client, wallet, revision]);
 
   // "Resume document upload": the magic-link is shown exactly once in the
   // submit modal, so a closed tab used to strand dossiers provisioned without
@@ -156,10 +148,11 @@ export default function PortfolioOverviewPage() {
   // re-issues) their own upload link.
   const [resumeBusy, setResumeBusy] = useState(false);
   const resumeUpload = useCallback(async () => {
-    if (!conn.wallet || resumeBusy) return;
+    if (!conn.wallet || conn.wallet.account.address !== wallet || resumeBusy) return;
     setResumeBusy(true);
     try {
       const { path, notice } = await getMyOnboardingPath(conn.wallet);
+      if (!active.current) return;
       if (path) {
         router.push(path);
       } else {
@@ -170,88 +163,23 @@ export default function PortfolioOverviewPage() {
         );
       }
     } catch (err) {
+      if (!active.current) return;
       toast.showError(
         "Could not open the upload page",
         err instanceof Error ? err.message : String(err),
       );
     } finally {
-      setResumeBusy(false);
+      if (active.current) setResumeBusy(false);
     }
-  }, [conn.wallet, resumeBusy, router, toast]);
+  }, [conn.wallet, resumeBusy, router, toast, wallet]);
 
-  // Asset PDA → { name, assetId } for joining share-classes back to their asset.
-  const [assetPdaMap, setAssetPdaMap] = useState<
-    Map<string, { name: string; assetId: string }>
-  >(new Map());
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      if (!data) return;
-      const m = new Map<string, { name: string; assetId: string }>();
-      for (const a of data.assets) {
-        const [pda] = await findAssetPda({
-          issuer: a.issuer,
-          assetId: a.assetId,
-        });
-        m.set(pda.toString(), { name: a.name, assetId: a.assetId });
-      }
-      if (!cancelled) setAssetPdaMap(m);
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [data]);
-
-  // Match each holding to the Manci share class by mint.
-  const enriched = useMemo<EnrichedHolding[]>(() => {
-    if (!data || !holdings) return [];
-    const out: EnrichedHolding[] = [];
-    for (const h of holdings) {
-      const sc = data.shareClasses.find((s) => s.mint.toString() === h.mint);
-      if (!sc) continue;
-      const asset = assetPdaMap.get(sc.asset.toString());
-      out.push({
-        ...h,
-        className: CLASS_TYPE[sc.classType] ?? "?",
-        assetName: asset?.name ?? "(unknown)",
-        assetId: asset?.assetId ?? "—",
-        classIndex: sc.classIndex,
-        classType: sc.classType,
-      });
-    }
-    return out;
-  }, [data, holdings, assetPdaMap]);
-
-  if (!conn.isReady) {
-    return (
-      <main className="min-w-0 flex-1">
-        <SkeletonCard className="max-w-md" rows={3} />
-      </main>
-    );
-  }
-
-  if (!wallet) {
-    return (
-      <main className="min-w-0 flex-1">
-        <WalletRequired />
-      </main>
-    );
-  }
-
-  if (failed) {
-    return (
-      <main className="min-w-0 flex-1">
-        <p className="text-sm text-red-600">Failed to load portfolio.</p>
-      </main>
-    );
-  }
-
-  const loading = data === null || holdings === null;
+  const loading = enriched === null && !failed;
+  const refreshing = loading || passport.phase === "loading" || requestState.phase === "loading";
 
   return (
     <main className="min-w-0 flex-1">
-      <div>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
         <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Portfolio
         </p>
@@ -263,14 +191,21 @@ export default function PortfolioOverviewPage() {
           </code>
           .
         </p>
+        {lastLoadedAt && <p className="mt-2 text-xs text-slate-500">Balances checked at {lastLoadedAt.toLocaleTimeString()}.</p>}
+        </div>
+        <button type="button" onClick={refresh} className="btn-brand">
+          Refresh status
+        </button>
       </div>
+      {refreshing && <p role="status" className="mt-3 text-xs text-slate-500">Checking latest status… You can refresh again if the connection stalls.</p>}
 
       {/* Verification (investor passport) card */}
       <section className="mt-8">
         <PassportCard
           state={passport}
           now={now}
-          openRequest={openRequest}
+          requestState={requestState}
+          onRetry={refresh}
           onApply={() => router.push("/verify?type=kyc")}
           onResumeUpload={() => void resumeUpload()}
           resumeBusy={resumeBusy}
@@ -282,18 +217,18 @@ export default function PortfolioOverviewPage() {
         wallet={wallet.toString()}
         registryPda={registryPda}
         onClose={() => setRequestModalOpen(false)}
-        onSubmitted={() => void refreshOpenRequest()}
+        onSubmitted={refresh}
       />
 
       {/* Summary tiles */}
       <section className="mt-8 grid gap-4 sm:grid-cols-3">
         <Kpi
           label="Holdings"
-          value={loading ? "…" : String(enriched.length)}
+          value={enriched === null ? "—" : String(enriched.length)}
         />
         <Kpi
           label="Distinct assets"
-          value={loading ? "…" : String(new Set(enriched.map((h) => h.assetName)).size)}
+          value={enriched === null ? "—" : String(new Set(enriched.map((h) => h.assetPda)).size)}
         />
         <Kpi
           label="Network"
@@ -305,14 +240,20 @@ export default function PortfolioOverviewPage() {
         <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Token holdings
         </h2>
-        {loading ? (
+        {failed ? (
+          <div role="alert" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+            <p className="font-semibold">Balances could not be loaded</p>
+            <p className="mt-1">Your holdings are unknown until the connection recovers. Try loading them again.</p>
+            <button type="button" onClick={refresh} className="btn-brand mt-3">Try again</button>
+          </div>
+        ) : loading || enriched === null ? (
           <div className="mt-4">
             <SkeletonTable rows={3} cols={4} />
           </div>
         ) : enriched.length === 0 ? (
           <Empty />
         ) : (
-          <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+          <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
             <table className="w-full text-sm">
               <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                 <tr>
@@ -323,10 +264,10 @@ export default function PortfolioOverviewPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {enriched.map((h, i) => (
-                  <tr key={i} className="text-slate-700">
+                {enriched.map((h) => (
+                  <tr key={h.mint} className="text-slate-700">
                     <td className="px-4 py-3">
-                      <p className="font-medium text-slate-900">{h.assetName}</p>
+                      <Link href={assetHref(h.assetPda)} className="font-medium text-brand-700 hover:underline">{h.assetName}</Link>
                       <p className="mt-0.5 text-xs text-slate-500">
                         #{h.classIndex} · {h.assetId}
                       </p>
@@ -347,8 +288,7 @@ export default function PortfolioOverviewPage() {
       </section>
 
       <p className="mt-10 text-xs text-slate-400">
-        USD valuation, P/L and tax-lot tracking arrive once a price oracle is
-        wired up (Faza F backlog).
+        Balances show the share units held in this wallet. Market value and returns are not estimated.
       </p>
     </main>
   );
@@ -359,14 +299,16 @@ export default function PortfolioOverviewPage() {
 function PassportCard({
   state,
   now,
-  openRequest,
+  requestState,
+  onRetry,
   onApply,
   onResumeUpload,
   resumeBusy,
 }: {
   state: PassportState;
   now: number;
-  openRequest: OpenPassportRequest | null;
+  requestState: RequestState;
+  onRetry: () => void;
   onApply: () => void;
   onResumeUpload: () => void;
   resumeBusy: boolean;
@@ -379,6 +321,17 @@ function PassportCard({
       </div>
     );
   }
+
+  if (state.phase === "error") {
+    return (
+      <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+        <p className="font-semibold">Verification status unavailable</p>
+        <p className="mt-1">We could not verify your investor passport. Reload its status before starting a new application.</p>
+        <button type="button" onClick={onRetry} className="btn-brand mt-3">Try again</button>
+      </div>
+    );
+  }
+  const openRequest = requestState.phase === "ready" ? requestState.request : null;
 
   if (state.phase === "none") {
     return (
@@ -394,7 +347,7 @@ function PassportCard({
           {navHrefVisible("/portfolio/conversion") && " Complete KYC before converting tokens into company shares."}
           {navHrefVisible("/portfolio/delivery") && " Physical delivery also requires KYC."}
         </p>
-        {openRequest ? (
+        {requestState.phase !== "ready" ? <RequestReadStatus state={requestState} onRetry={onRetry} /> : openRequest ? (
           <>
             <PendingRequestNote request={openRequest} />
             <div className="mt-2">
@@ -436,15 +389,6 @@ function PassportCard({
 
   type BadgeCfg = { label: string; badge: string; dot: string; border: string; header: string };
   const cfg: BadgeCfg = (() => {
-    if (isExpired || entry.status === KycStatus.Expired) {
-      return {
-        label: "Expired",
-        badge: "border-orange-200 bg-orange-50 text-orange-700",
-        dot: "bg-orange-500",
-        border: "border-orange-200",
-        header: "text-orange-700",
-      };
-    }
     if (entry.status === KycStatus.Revoked) {
       return {
         label: "Revoked",
@@ -461,6 +405,15 @@ function PassportCard({
         dot: "bg-amber-400",
         border: "border-amber-200",
         header: "text-amber-700",
+      };
+    }
+    if (isExpired || entry.status === KycStatus.Expired) {
+      return {
+        label: "Expired",
+        badge: "border-orange-200 bg-orange-50 text-orange-700",
+        dot: "bg-orange-500",
+        border: "border-orange-200",
+        header: "text-orange-700",
       };
     }
     // Approved
@@ -523,14 +476,33 @@ function PassportCard({
         </div>
       </dl>
 
-      {(entry.status === KycStatus.Revoked || isExpired || entry.status === KycStatus.Expired) && (
+      {entry.status === KycStatus.Approved && !isExpired && (
+        <div className="mt-5 border-t border-slate-100 pt-4">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">Next step</p>
+          <p className="mt-2 text-sm text-slate-600">Your verification is active. Review your holdings and the eligibility requirements for any selected offering.</p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            {navHrefVisible("/marketplace/launchpad") && <Link href="/marketplace/launchpad" className="btn-brand">Explore offerings</Link>}
+            {navHrefVisible("/portfolio/vesting") && <Link href="/portfolio/vesting" className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">View vesting</Link>}
+          </div>
+        </div>
+      )}
+      {entry.status === KycStatus.Pending && (
+        <div className="mt-4 text-sm text-slate-600">
+          <p>Your verification is awaiting a decision. Complete any requested documents, then refresh to check for an update.</p>
+          {requestState.phase !== "ready" ? <RequestReadStatus state={requestState} onRetry={onRetry} /> : (
+            <button type="button" onClick={onResumeUpload} disabled={resumeBusy} className="btn-brand mt-3">{resumeBusy ? "Opening…" : "Continue verification"}</button>
+          )}
+        </div>
+      )}
+
+      {entry.status !== KycStatus.Pending && (entry.status === KycStatus.Revoked || isExpired || entry.status === KycStatus.Expired) && (
         <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
           <p className="text-[12px] text-slate-500">
             {entry.status === KycStatus.Revoked
               ? "Your verification has been revoked. Contact support or verify again."
               : "Your verification has expired. Renew it before using services that require an approved investor passport."}
             {" "}
-            {openRequest ? (
+            {requestState.phase !== "ready" ? <RequestReadStatus state={requestState} onRetry={onRetry} /> : openRequest ? (
               <>
                 <span className="font-medium text-slate-600">
                   Reapplication under review.
@@ -558,6 +530,11 @@ function PassportCard({
       )}
     </div>
   );
+}
+
+function RequestReadStatus({ state, onRetry }: { state: Exclude<RequestState, { phase: "ready" }>; onRetry: () => void }) {
+  if (state.phase === "loading") return <span role="status" className="mt-3 block text-sm text-slate-500">Checking existing verification requests…</span>;
+  return <span role="alert" className="mt-3 block text-sm text-amber-800">We could not check whether you already have a verification request in review. <button type="button" onClick={onRetry} className="font-semibold underline">Retry verification status</button></span>;
 }
 
 function PendingRequestNote({ request }: { request: OpenPassportRequest }) {

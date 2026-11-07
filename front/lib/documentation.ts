@@ -21,6 +21,12 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
     description: "Find your way from a first visit to your first action.",
     topics: [
       {
+        href: "/docs/manci-answers",
+        title: "Manci answer library",
+        description: "Source-backed answers about ownership, jurisdictions and the legal process.",
+        keywords: "assistant ai ownership lawyers countries questions",
+      },
+      {
         href: "/investors",
         title: "Investor guide",
         description:

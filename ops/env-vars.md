@@ -396,3 +396,16 @@ nonce. The path to enforcement:
 3. Ship the nonce policy report-only for another week, then rename the
    header to `Content-Security-Policy` on devnet, then on mainnet, keeping
    the report endpoint. Update `front/tests/security-headers.test.ts`.
+
+## Public assistant
+
+- `ANTHROPIC_API_KEY`: server-only Claude credential on the intended Vercel
+  project, Production scope. Never `NEXT_PUBLIC_`; never committed.
+- `ANTHROPIC_MODEL`: optional; defaults to `claude-haiku-4-5`.
+- `MANCI_ASSISTANT_DAILY_LIMIT`: optional shared UTC-day cap, default 500.
+- `MANCI_ASSISTANT_RATE_LIMIT_PER_MINUTE`: optional per-IP/minute cap, default 8.
+
+Apply migration 0083 to the matching Supabase target first. Quota-store failure
+uses prepared answers without making paid requests. The existing server
+Supabase credential and canonical site origin are reused; feature flags,
+network selection and on-chain pause masks are unchanged by this feature.

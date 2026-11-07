@@ -190,16 +190,15 @@ export function nextUpdateDue(vault: PayoutVault, nowSec: number): boolean {
 }
 
 /**
- * Periods overdue = elapsed-since-start (1-based, capped at num_tranches) minus
- * updates already posted. Mirrors the freeze/finalize math on-chain; a value
- * >= 3 (MISSED_FREEZE_THRESHOLD) makes the vault freezable.
+ * Periods since the oldest unfulfilled update became due, including the
+ * current period. Mirrors PayoutVault::overdue_periods and the freeze guards:
+ * no outstanding update or principal means no breach. Do not cap this count
+ * at numTranches — even the final update can become three periods overdue.
  */
 export function periodsOverdue(vault: PayoutVault, nowSec: number): number {
-  const start = Number(vault.startTs);
-  const elapsed =
-    nowSec <= start ? 0 : Math.floor((nowSec - start) / MONTH_SECONDS) + 1;
-  const periodsElapsed = Math.max(0, Math.min(elapsed, vault.numTranches));
-  return Math.max(0, periodsElapsed - vault.updatesPosted);
+  if (vault.updatesPosted >= vault.numTranches || vault.released >= vault.totalAmount) return 0;
+  const due = periodTs(vault, vault.updatesPosted);
+  return nowSec < due ? 0 : Math.floor((nowSec - due) / MONTH_SECONDS) + 1;
 }
 
 export const MISSED_FREEZE_THRESHOLD = 3;

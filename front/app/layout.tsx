@@ -7,6 +7,7 @@ import "./document-library.css";
 import "./account.css";
 import { Providers } from "./providers";
 import { MaintenanceBanner } from "@/components/maintenance-banner";
+import { ManciAssistant } from "@/components/manci-assistant";
 import { indexingAllowed } from "@/lib/indexing";
 
 const geistSans = Geist({
@@ -55,6 +56,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <MaintenanceBanner />
         <Providers>{children}</Providers>
+        <ManciAssistant />
       </body>
     </html>
   );

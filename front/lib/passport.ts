@@ -301,7 +301,9 @@ export async function fetchPassport(
   holder: Address,
 ): Promise<KycEntry | null> {
   const [entryPda] = await findKycEntryPda({ kycRegistry: registry, holder });
-  const maybe = await fetchMaybeKycEntry(rpc, entryPda);
+  const maybe = await fetchMaybeKycEntry(rpc, entryPda, {
+    abortSignal: AbortSignal.timeout(12_000),
+  });
   return maybe.exists ? maybe.data : null;
 }
 
@@ -770,34 +772,33 @@ export type OpenPassportRequest = Pick<
  * (portfolio card). Reads the unsigned minimal /api/passport/status route —
  * the anon-key table read is gone, and a signature prompt on every
  * /portfolio load would be hostile, so the server exposes only
- * id/status/created_at for the open request.
+ * id/status/created_at for the open request. Read failures throw; only a
+ * confirmed empty response returns null.
  */
 export async function getOpenPassportRequest(
   wallet: string,
 ): Promise<OpenPassportRequest | null> {
-  try {
-    const res = await fetch("/api/passport/status", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wallet }),
-    });
-    const json = (await res.json()) as {
-      ok?: boolean;
-      data?: { open: OpenPassportRequest | null };
-      error?: string;
-    };
-    if (!res.ok || json.ok !== true || !json.data) {
-      console.warn(
-        "[passport] status probe failed:",
-        json?.error ?? res.status,
-      );
-      return null;
-    }
-    return json.data.open;
-  } catch (err) {
-    console.warn("[passport] status probe threw:", err);
-    return null;
+  const res = await fetch("/api/passport/status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ wallet }),
+    signal: AbortSignal.timeout(12_000),
+  });
+  const json = (await res.json()) as {
+    ok?: boolean;
+    data?: { open?: OpenPassportRequest | null };
+  } | null;
+  if (!res.ok || json?.ok !== true || !json.data || !("open" in json.data)) {
+    throw new Error("Your passport application status is unavailable. Please retry.");
   }
+  const open = json.data.open;
+  if (open === null) return null;
+  if (!open || typeof open.id !== "string" ||
+      (open.status !== "new" && open.status !== "in_review") ||
+      typeof open.created_at !== "string" || !Number.isFinite(Date.parse(open.created_at))) {
+    throw new Error("Your passport application status could not be read. Please retry.");
+  }
+  return open;
 }
 
 /**

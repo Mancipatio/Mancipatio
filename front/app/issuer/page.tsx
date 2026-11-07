@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useWalletConnection } from "@solana/react-hooks";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fromBytes32, KYB_LABEL } from "@/lib/format";
+import { fromBytes32 } from "@/lib/format";
+import { issuerStatus } from "@/lib/issuer-status";
 import { SkeletonCard } from "@/components/skeleton";
 import { getIssuerProfile, upsertIssuerProfile, type IssuerProfile } from "@/lib/issuer-profiles";
 import type { WalletSession } from "@solana/client";
@@ -48,6 +49,7 @@ export default function IssuerOverviewPage() {
   }, [myIssuerPda, conn.wallet, profileKey]);
   const currentProfile = profileRead?.key === profileKey ? profileRead : null;
   const myAssets = useMemo(() => data?.assets.filter((asset) => asset.issuer.toString() === myIssuerPda) ?? [], [data, myIssuerPda]);
+  const status = issuerStatus(me?.kybStatus);
 
   return <main className="min-w-0 flex-1">
     <IssuerWorkflow workflow={workflow} />
@@ -61,8 +63,17 @@ export default function IssuerOverviewPage() {
           <h2 className="mt-1 text-xl font-semibold text-slate-900">{fromBytes32(me.legalEntityId)}</h2>
           <p className="mt-1 text-xs text-slate-500">Authority: <code className="font-mono">{wallet?.toString().slice(0, 8)}…{wallet?.toString().slice(-6)}</code></p>
         </div>
-        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${me.kybStatus === 1 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>Issuer KYB: {KYB_LABEL[me.kybStatus] ?? "Unknown"}</span>
+        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${status.verified ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>Issuer KYB: {status.label}</span>
       </div>
+      {!status.verified && <section className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900" aria-live="polite">
+        <h3 className="font-semibold">{status.title}</h3>
+        <p className="mt-2">{status.description}</p>
+        <div className="mt-3 flex flex-wrap gap-4">
+          <Link href="/issuer/status" className="font-medium underline underline-offset-2">Open company review</Link>
+          <Link href="/issuer/verification?type=kyb" className="font-medium underline underline-offset-2">Company documents</Link>
+          <button type="button" onClick={() => void refresh()} className="underline underline-offset-2">Refresh issuer status</button>
+        </div>
+      </section>}
       {myIssuerPda && <IssuerRecoveryBanner issuer={myIssuerPda as Address} issuerAuthority={me.authority} onChanged={refresh} />}
       {myIssuerPda && !currentProfile && <SkeletonCard className="mt-6" rows={3} />}
       {currentProfile?.error && <div role="alert" className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900"><p>{currentProfile.error}</p><button type="button" onClick={() => void loadProfile()} className="btn-brand mt-3">Try again</button></div>}

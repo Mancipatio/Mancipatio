@@ -3,32 +3,31 @@
 import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
-import { createNoopSigner, type Address } from "@solana/kit";
+import { type Address } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchMaybeIssuer,
   findIssuerPda,
   getRegisterIssuerInstructionAsync,
 } from "@/lib/generated/asset_registry";
-import { fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/format";
+import { fromBytes32, toBytes32 } from "@/lib/format";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
 import { startFinalityPoll } from "@/lib/finality-poll";
 import type { NewIssuerProfile } from "@/lib/issuer-profiles";
+import { issuerStatus } from "@/lib/issuer-status";
 import {
   createSignedRequest,
   postSignedRequest,
   type SiwsRequestBody,
 } from "@/lib/siws-client";
-
-void createNoopSigner; // tree-shake guard while we keep noop available for future flows
 
 const ISSUER_PROFILE_ROUTE = "/api/issuer-profiles/upsert";
 const ADD_LATER = "Add it from your issuer dashboard (Company profile, 1 signature).";
@@ -49,6 +48,7 @@ function waitForFinalizedIssuer(
   issuerPda: Address,
   opts: { intervalMs?: number; attempts?: number; signal?: AbortSignal } = {},
 ): Promise<boolean> {
+  if (opts.signal?.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: boolean) => {
@@ -102,6 +102,11 @@ type Step = 1 | 2 | 3 | 4;
 
 export default function IssuerOnboardingPage() {
   const conn = useWalletConnection();
+  return <IssuerOnboarding key={conn.wallet?.account.address.toString() ?? "disconnected"} />;
+}
+
+function IssuerOnboarding() {
+  const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
@@ -113,15 +118,24 @@ export default function IssuerOnboardingPage() {
   const [contactEmail, setContactEmail] = useState("");
   const [website, setWebsite] = useState("");
   const [acknowledgedKyb, setAcknowledgedKyb] = useState(false);
-  const [existing, setExisting] = useState<null | "pending" | "verified" | "rejected">(null);
+  const [existing, setExisting] = useState<number | null>(null);
+  const [existingAuthority, setExistingAuthority] = useState<string | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [checkAttempt, setCheckAttempt] = useState(0);
   const [checking, setChecking] = useState(true);
   const [profileState, setProfileState] = useState<ProfileState>({ kind: "idle" });
   // A registration whose company profile is not saved yet: the save alone is offered again.
   const [pendingProfile, setPendingProfile] = useState<{ issuerPda: Address; profile: NewIssuerProfile } | null>(null);
+  const sessionLifetime = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    sessionLifetime.current = controller;
+    return () => controller.abort();
+  }, []);
 
   const wallet = conn.wallet?.account.address;
 
-  // If already registered, skip past step 1 and surface status.
+  // Explicitly re-read the issuer: route refreshes do not repeat client RPC reads.
   useEffect(() => {
     let cancelled = false;
     async function check() {
@@ -133,16 +147,21 @@ export default function IssuerOnboardingPage() {
         const [pda] = await findIssuerPda({
           legalEntityId: toBytes32(legalId.trim()),
         });
-        const maybe = await fetchMaybeIssuer(client.runtime.rpc, pda);
+        const maybe = await fetchMaybeIssuer(client.runtime.rpc, pda, {
+          commitment: "finalized",
+          abortSignal: AbortSignal.timeout(10_000),
+        });
         if (cancelled) return;
         if (maybe.exists) {
-          const k = maybe.data.kybStatus;
-          setExisting(k === 0 ? "pending" : k === 1 ? "verified" : "rejected");
+          setExisting(maybe.data.kybStatus);
+          setExistingAuthority(maybe.data.authority.toString());
         } else {
           setExisting(null);
+          setExistingAuthority(null);
         }
-      } catch {
-        if (!cancelled) setExisting(null);
+        setCheckError(null);
+      } catch (err) {
+        if (!cancelled) setCheckError(errorText(err));
       } finally {
         if (!cancelled) setChecking(false);
       }
@@ -153,7 +172,7 @@ export default function IssuerOnboardingPage() {
     return () => {
       cancelled = true;
     };
-  }, [legalId, conn.isReady, client]);
+  }, [legalId, conn.isReady, client, checkAttempt]);
 
   /**
    * Signs the company profile (one prompt), waits until the Issuer is visible
@@ -163,7 +182,10 @@ export default function IssuerOnboardingPage() {
    */
   async function saveProfile(issuerPda: Address, profile: NewIssuerProfile): Promise<void> {
     if (!conn.wallet) return;
+    const lifetime = sessionLifetime.current?.signal;
+    if (!lifetime || lifetime.aborted) return;
     const fail = (title: string, message: string) => {
+      if (lifetime.aborted) return;
       setProfileState({ kind: "failed", message });
       setPendingProfile({ issuerPda, profile });
       toast.showError(title, `${message} ${ADD_LATER}`);
@@ -177,13 +199,15 @@ export default function IssuerOnboardingPage() {
       fail("Company profile not saved", errorText(err));
       return;
     }
+    if (lifetime.aborted) return;
     setProfileState({
       kind: "working",
       text: "Waiting for the network to finalize the registration (usually under a minute)…",
     });
     const finalized = await waitForFinalizedIssuer(client.runtime.rpc, issuerPda, {
-      signal: AbortSignal.timeout(FINALITY_WAIT_MS),
+      signal: AbortSignal.any([lifetime, AbortSignal.timeout(FINALITY_WAIT_MS)]),
     });
+    if (lifetime.aborted) return;
     if (!finalized) {
       // Nothing was posted, so no nonce is spent: the same details can be saved again.
       fail(
@@ -195,8 +219,10 @@ export default function IssuerOnboardingPage() {
     setProfileState({ kind: "working", text: "Saving the company profile…" });
     try {
       await postSignedRequest(ISSUER_PROFILE_ROUTE, envelope);
+      if (lifetime.aborted) return;
       setProfileState({ kind: "saved" });
       setPendingProfile(null);
+      setCheckAttempt((attempt) => attempt + 1);
       toast.show({ kind: "success", title: "Company profile saved" });
     } catch (err) {
       fail("Company profile not saved", errorText(err));
@@ -205,6 +231,9 @@ export default function IssuerOnboardingPage() {
 
   async function register() {
     if (!wallet || !conn.wallet || !legalId.trim()) return;
+    if (checking || checkError || existing !== null) return;
+    const lifetime = sessionLifetime.current?.signal;
+    if (!lifetime || lifetime.aborted) return;
     const trimmedId = legalId.trim();
     const pendingId = toast.showPending(
       `Registering ${trimmedId}…`,
@@ -213,6 +242,7 @@ export default function IssuerOnboardingPage() {
     let issuerPda: Address;
     try {
       [issuerPda] = await findIssuerPda({ legalEntityId: toBytes32(trimmedId) });
+      if (lifetime.aborted) { toast.dismiss(pendingId); return; }
       const signer = walletSigner(conn.wallet);
       const ix = await getRegisterIssuerInstructionAsync({
         authority: signer,
@@ -220,6 +250,7 @@ export default function IssuerOnboardingPage() {
         jurisdiction: Number(jurisdiction) || 0,
         kybDocHash: new Uint8Array(32),
       });
+      if (lifetime.aborted) { toast.dismiss(pendingId); return; }
       // Returns once the transaction is submitted (not confirmed): the step
       // below says "sent", and the profile waits for finality.
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
@@ -234,7 +265,9 @@ export default function IssuerOnboardingPage() {
       console.error("[register_issuer]", err);
       return;
     }
+    if (lifetime.aborted) return;
     setStep(4);
+    setCheckAttempt((attempt) => attempt + 1);
 
     // The off-chain onboarding profile (company / contact / website), keyed
     // by the Issuer PDA. The route reads the Issuer at `finalized`, so the
@@ -257,6 +290,8 @@ export default function IssuerOnboardingPage() {
   }
 
   if (!wallet) return <main><WalletRequired context="This wallet becomes your issuer authority. Choose the wallet you intend to use to manage the entity." /></main>;
+
+  const status = issuerStatus(existing);
 
   return (
     <main className="min-w-0 flex-1">
@@ -324,8 +359,8 @@ export default function IssuerOnboardingPage() {
           <Card>
             <h2 className="text-lg font-semibold text-slate-900">Legal entity</h2>
             <p className="mt-2 text-sm text-slate-600">
-              The legal entity identifier (max 32 chars) is the PDA seed —
-              choose something stable and unique, e.g. <code className="rounded bg-slate-100 px-1">ACME-DOO-2026</code>.
+              Choose a stable, unique legal entity identifier (up to 32 characters),
+              e.g. <code className="rounded bg-slate-100 px-1">ACME-DOO-2026</code>.
               It cannot be changed once registered.
             </p>
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -336,16 +371,28 @@ export default function IssuerOnboardingPage() {
                 <input
                   value={legalId}
                   maxLength={32}
-                  onChange={(e) => setLegalId(e.target.value)}
+                  onChange={(e) => {
+                    setLegalId(e.target.value);
+                    setExisting(null);
+                    setExistingAuthority(null);
+                    setCheckError(null);
+                    setChecking(true);
+                  }}
                   placeholder="e.g. ACME-DOO-2026"
                   className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
                 />
-                {!checking && existing && (
-                  <p className={`mt-1 text-[11px] ${existing === "verified" ? "text-emerald-700" : "text-amber-700"}`}>
-                    Already registered on-chain — KYB status: <strong>{existing}</strong>.
-                  </p>
+                {!checking && existing !== null && (
+                  <span className="mt-2 block text-xs text-slate-600">
+                    Already registered — issuer KYB: <strong>{status.label}</strong>.
+                    {existingAuthority === wallet.toString() ? (
+                      <Link href="/issuer/status" className="ml-1 underline underline-offset-2">Open issuer review status →</Link>
+                    ) : " This entity is managed by another wallet. Connect its authority wallet or contact the team."}
+                  </span>
                 )}
+                {checking && legalId.trim() && <span className="mt-1 block text-xs text-slate-500">Checking registration…</span>}
+                {checkError && <span role="alert" className="mt-1 block text-xs text-red-700">Could not check registration. {checkError}</span>}
               </label>
+              {checkError && <button type="button" disabled={checking} onClick={() => setCheckAttempt((attempt) => attempt + 1)} className="text-left text-xs underline">Try checking again</button>}
               <label className="block sm:col-span-2">
                 <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
                   Jurisdiction of incorporation
@@ -410,7 +457,7 @@ export default function IssuerOnboardingPage() {
               </button>
               <button
                 type="button"
-                disabled={!legalId.trim() || existing === "verified"}
+                disabled={!legalId.trim() || checking || !!checkError || existing !== null}
                 onClick={() => setStep(3)}
                 className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
               >
@@ -465,7 +512,7 @@ export default function IssuerOnboardingPage() {
               </button>
               <button
                 type="button"
-                disabled={tx.isSending || !acknowledgedKyb}
+                disabled={tx.isSending || !acknowledgedKyb || checking || !!checkError || existing !== null}
                 onClick={() => void register()}
                 className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
               >
@@ -487,10 +534,11 @@ export default function IssuerOnboardingPage() {
                   Registration submitted
                 </h2>
                 <p className="mt-1 text-sm text-slate-600">
-                  Your transaction was sent to {detectNetwork()}. The platform&apos;s Super Admin will
-                  review KYB documents and approve the entity. KYB status:{" "}
-                  <strong>{KYB_LABEL[0]}</strong>.
+                  Your transaction was sent to {detectNetwork()}. Issuer KYB:{" "}
+                  <strong>{existing === null ? "Awaiting network confirmation" : status.label}</strong>.
                 </p>
+                {existing !== null && <p className="mt-3 text-sm text-slate-600">{status.description}</p>}
+                {checkError && <p role="alert" className="mt-3 text-sm text-red-700">The latest issuer status could not be checked. {checkError}</p>}
                 {profileState.kind === "working" && (
                   <p className="mt-3 text-sm text-slate-600" aria-live="polite">
                     {profileState.text}
@@ -536,6 +584,14 @@ export default function IssuerOnboardingPage() {
               >
                 Check status
               </Link>
+              <button
+                type="button"
+                disabled={checking}
+                onClick={() => setCheckAttempt((attempt) => attempt + 1)}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-400 disabled:opacity-50"
+              >
+                {checking ? "Refreshing…" : "Refresh chain status"}
+              </button>
             </div>
             <p className="mt-6 text-xs text-slate-400">
               Reference legal entity ID: <code className="rounded bg-slate-100 px-1">{fromBytes32(toBytes32(legalId))}</code>

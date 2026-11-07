@@ -209,9 +209,11 @@ describe("wiring (read from the sources)", () => {
     expect(issuer).toContain("const workflow = useIssuerWorkflow();");
     expect(issuer).toContain("const { data, me, refresh } = workflow;");
     const issuerWorkflow = src("app/issuer/use-issuer-workflow.ts");
-    // The page now reads through the shared workflow hook. The indexer/RPC
-    // snapshot must pass the assets-only archive filter before entering state.
-    expect(issuerWorkflow).toMatch(/loadNetworkPreferIndexer\(\(\) => loadNetwork\(client\.runtime\.rpc\)\)\.then\(withoutArchivedAssets\)\.then\(\(data\) =>/);
+    // Initial loading can use the indexer, while an explicit refresh reads
+    // chain state directly. Both branches must share the assets-only archive
+    // filter before either snapshot can enter state.
+    expect(issuerWorkflow).toMatch(/const request = chainRevision > 0\s*\? loadNetwork\(client\.runtime\.rpc\)\s*: loadNetworkPreferIndexer\(\(\) => loadNetwork\(client\.runtime\.rpc\)\);/);
+    expect(issuerWorkflow).toMatch(/request\.then\(withoutArchivedAssets\)\.then\(\(data\) =>/);
     expect(issuerWorkflow).toContain("setChain({ key: chainKey, data, failed: false })");
     expect(issuerWorkflow).not.toMatch(/\.then\(withoutArchived\)/);
     expect(src("app/issuer/assets/page.tsx")).toContain("showArchived ? myAssets : myAssets.filter((a) => !isArchived(a))");
