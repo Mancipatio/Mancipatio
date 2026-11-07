@@ -189,6 +189,20 @@ the program's pause bits are the on-chain one (runbook §8, "Pause mask by
 mode": which bits each mode keeps set), and `lib/pause-gate.ts` reads those
 before a wallet signs.
 
+### Module flags and the Terms
+
+A mainnet build rejects any public module flag enabled outside
+`MAINNET_TERMS.offeredModules` in `front/lib/legal/mainnet-copy.ts`.
+The current Terms (2026-10-03) offer no switchable module: primary sales
+and direct issuer transfers are their existing scope and have no module
+flag. This covers all seven pilot module flags, `PAYOUT_AIRDROP` and
+`STARTUP_RAISES`; operational switches and `KYC_ONLY` are separate.
+The check applies even while KYC-only mode hides a module, so leaving that
+mode cannot expose a preconfigured unsupported module. A module offered
+by the Terms may stay disabled for an operational pause or rollback.
+When the Terms change, update their version, wording and `offeredModules`
+together; a flag alone does not expand the published scope.
+
 ### Geoblocking
 
 Which countries the platform does not serve is **counsel's decision**

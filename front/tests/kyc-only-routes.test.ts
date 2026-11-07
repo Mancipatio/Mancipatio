@@ -363,7 +363,7 @@ describe("every API route is classified", () => {
     | "read" // reads only
     | "exit" // winding down an existing position
     | "recording" // records an on-chain fact or finishes an authorized step
-    | "support" // the contact form
+    | "support" // the contact form and public educational assistance
     | "platform"; // health, cron, CSP reports, audit breadcrumbs, a gone route
   const OPEN: Record<string, OpenReason> = {
     "account/email/cancel": "account", "account/email/request": "account", "account/email/verify": "account",
@@ -374,6 +374,9 @@ describe("every API route is classified", () => {
     "account/wallets/transaction": "account",
     "applications/capacity": "read", "applications/eligibility": "read", "applications/mine": "read", "applications/public": "read",
     "archive/check": "read", "archive/list": "read",
+    // Public educational answers have no wallet or transaction side effects;
+    // paid model requests require the assistant's separate durable quota.
+    "assistant": "support",
     "audit": "platform",
     "auth/email/start": "sign-in", "auth/email/verify": "sign-in", "auth/google/start": "sign-in",
     "auth/logout": "sign-in", "auth/me": "sign-in", "auth/session": "sign-in",

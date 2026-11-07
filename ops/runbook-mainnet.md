@@ -4019,12 +4019,12 @@ clear.
      counsel's confirmation of the exact text recorded: the risk warning's
      `status` is `"counsel"` (§17, "State on 2026-10-03", for the
      procedure). A new version makes every mainnet wallet accept again;
-   - a build guard that ties the module flags to the modules the Terms in
-     force offer (not on `main` on 2026-10-18; the work is on
-     `ci/flags-terms-guard`). It is one-way: a flag that reads as on needs
-     its module offered, while an offered module may have its flag off,
-     which is what the rollback below relies on. Until the guard is
-     merged, that check is a reviewer's step on the PR of this item.
+   - the build guard `assertBuildMainnetModules` in `front/next.config.ts`
+     ties enabled module flags to `MAINNET_TERMS.offeredModules`. Keep that
+     metadata equal to the scope in clause 2. It is one-way: an enabled
+     flag needs its module offered, while an offered module may remain
+     disabled for an operational pause or rollback. The guard also checks
+     configured module flags while KYC-only mode is on.
 2. Counsel's signed written opinion that the services offered once this
    module is on need no licence is on file outside the repository
    (`~/mancipatio-mainnet/legal/`) and its reference is recorded (§17). It
