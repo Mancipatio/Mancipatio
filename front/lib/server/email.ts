@@ -64,10 +64,13 @@ async function sendSmtp(config: SmtpConfig, input: SendEmailInput): Promise<Send
     });
     return { sent: true, id: info.messageId };
   } catch (err) {
-    const code = (err as { responseCode?: number; code?: string })?.responseCode ??
-      (err as { code?: string })?.code ?? "unknown";
+    const smtpError = err as { responseCode?: number; code?: string } | null;
+    const code = smtpError?.responseCode ?? smtpError?.code ?? "unknown";
     // SMTP errors can echo recipients; keep logs to the status code.
     console.error(`[email] SMTP failure sending "${input.subject}" — ${code}`);
+    // Nodemailer's connection/greeting/socket timer can beat our whole-send
+    // deadline. Preserve one safe timeout category regardless of which wins.
+    if (smtpError?.code === "ETIMEDOUT") return { sent: false, error: "TIMEOUT" };
     return { sent: false, error: input.redactErrors ? "Delivery failed" : `SMTP ${code}` };
   }
 }
