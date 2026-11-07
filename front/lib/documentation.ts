@@ -46,12 +46,6 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         description: "Short answers and directions to the relevant guide.",
         keywords: "help faq support",
       },
-      {
-        href: "/docs/manci-answers",
-        title: "Manci answer library",
-        description: "The source material behind Ask Manci, with explanations of token rights and the legal process.",
-        keywords: "assistant answers ownership legal jurisdictions",
-      },
     ],
   },
   {
