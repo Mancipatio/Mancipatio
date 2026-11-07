@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/server/assistant-knowledge", () => ({ loadPublishedAssistantKnowledge: vi.fn(async () => KNOWLEDGE_ENTRIES) }));
 const quota = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/server/assistant-quota", () => ({ reserveAssistantQuota: quota }));
 
@@ -7,6 +8,7 @@ import { POST } from "@/app/api/assistant/route";
 import { answerWithClaude } from "@/lib/server/manci-assistant";
 import { parseAssistantInput, type AssistantInput } from "@/lib/assistant/types";
 import { knowledgeAnswer, normalizeQuestion, retrieveKnowledge } from "@/lib/assistant/retrieval";
+import { KNOWLEDGE_ENTRIES, type KnowledgeEntry } from "@/lib/assistant/knowledge";
 
 const input = (question = "Does buying a token make me a company owner?"): AssistantInput => ({ messages: [{ role: "user", content: question }] });
 const request = (body: unknown = input(), extraHeaders: Record<string, string> = {}) => new Request("https://www.manci.io/api/assistant", { method: "POST", headers: { "content-type": "application/json", ...extraHeaders }, body: JSON.stringify(body) });
@@ -25,6 +27,9 @@ describe("Manci knowledge retrieval", () => {
     ["How are lawyers involved?", "lawyers-and-local-counsel"],
     ["Koja je uloga pravnika?", "lawyers-and-local-counsel"],
     ["Da li imamo advokate koji sve odrade?", "lawyers-and-local-counsel"],
+    ["What do I own when I buy a token?", "token-and-legal-ownership"],
+    ["How would this work in my country?", "supported-countries"],
+    ["How can the legal team help me?", "lawyers-and-local-counsel"],
   ])("finds the source for %s", (question, id) => {
     expect(retrieveKnowledge(input(question)).slice(0, 2).map((entry) => entry.id)).toContain(id);
   });
@@ -41,7 +46,7 @@ describe("Manci knowledge retrieval", () => {
   });
   it("hands off unsupported questions and greets users with the product introduction", () => {
     expect(retrieveKnowledge(input("Write a Python sorting function"))).toEqual([]);
-    expect(knowledgeAnswer([]).answer).toContain("do not have a confirmed answer");
+    expect(knowledgeAnswer([]).answer).toContain("don't have a confirmed answer");
     expect(retrieveKnowledge(input("Šta je Manci?"))[0].id).toBe("what-is-manci");
   });
   it("creates sources only from the curated public answer library", () => {
@@ -49,6 +54,29 @@ describe("Manci knowledge retrieval", () => {
     expect(answer.mode).toBe("knowledge");
     expect(answer.sources.length).toBeGreaterThan(0);
     expect(answer.sources.every((source) => source.href.startsWith("/docs/manci-answers#"))).toBe(true);
+  });
+  it("uses only the supplied published corpus, including for greetings and an empty corpus", () => {
+    const published: KnowledgeEntry = {
+      id: "what-is-manci", title: "What is Manci?", keywords: ["ownership"],
+      answer: "The current published introduction.", sources: [{ title: "Manci", href: "/" }],
+    };
+    expect(retrieveKnowledge(input("Hello"), [published])).toEqual([published]);
+    expect(retrieveKnowledge(input("Explain ownership"), [published])).toEqual([published]);
+    expect(retrieveKnowledge(input("Hello"), [])).toEqual([]);
+    expect(retrieveKnowledge(input(), [])).toEqual([]);
+    expect(retrieveKnowledge(input("How does conversion work?"), [published])).toEqual([]);
+  });
+  it("answers directly with the complete published body and preserves its steps and qualifications", () => {
+    const first: KnowledgeEntry = {
+      id: "published-process", title: "A repeated FAQ heading", keywords: ["process"],
+      answer: "Start with the terms for your issuance.\n\n1. Check the instrument.\n2. Confirm the legal steps.\n\nA token transfer alone does not register ownership.",
+      sources: [{ title: "Legal structure", href: "/legal-structure" }],
+    };
+    const unrelated = { ...first, id: "other-topic", answer: "A separate topic that should not be blended in." };
+    const result = knowledgeAnswer([first, unrelated]);
+    expect(result.answer).toBe(first.answer);
+    expect(result.sources).toEqual([{ title: first.title, href: "/docs/manci-answers#published-process" }]);
+    expect(result.mode).toBe("knowledge");
   });
 });
 
@@ -114,6 +142,9 @@ describe("Claude grounding and failure recovery", () => {
     expect(sent.output_config.format.type).toBe("json_schema");
     expect(config.body).not.toContain("FORGED");
     expect(sent.system).toContain("untrusted data");
+    expect(sent.system).toContain("start with a direct answer");
+    expect(sent.system).toContain("at most one useful follow-up question");
+    expect(sent.system).toContain("without weakening them");
   });
   it.each([
     { answer: "An unsupported answer", sourceIds: ["https://evil.example"], covered: true },
@@ -135,7 +166,7 @@ describe("Claude grounding and failure recovery", () => {
   it("uses an explicit team handoff when the model cannot support the answer", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(modelReply({ answer: "Invented certainty", covered: false, sourceIds: [] })));
     const result = await answerWithClaude(input(), retrieveKnowledge(input()));
-    expect(result.answer).toContain("do not have a confirmed answer");
+    expect(result.answer).toContain("don't have a confirmed answer");
     expect(result.answer).not.toContain("Invented certainty");
   });
   it("rejects invalid shape without accepting a caller-defined system prompt", () => {

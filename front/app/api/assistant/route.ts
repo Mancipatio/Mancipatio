@@ -4,6 +4,8 @@ import { knowledgeAnswer, retrieveKnowledge } from "@/lib/assistant/retrieval";
 import { answerWithClaude } from "@/lib/server/manci-assistant";
 import { reserveAssistantQuota } from "@/lib/server/assistant-quota";
 import { boundedRequest } from "@/lib/server/bounded-request";
+import { loadPublishedAssistantKnowledge } from "@/lib/server/assistant-knowledge";
+import { publishedKnowledgeVersion } from "@/lib/assistant/version";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -38,13 +40,21 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ ok: false, error: "Send a question of up to 1,200 characters. Start a new conversation if the history is too long." }, { status: 400, headers });
   }
-  const entries = retrieveKnowledge(input);
+  let corpus;
+  try {
+    corpus = await loadPublishedAssistantKnowledge();
+  } catch {
+    // Never fall back to an old copy of an article an editor has unpublished.
+    return NextResponse.json({ ok: false, error: "Our answer library is temporarily unavailable. Please try again shortly or contact the Manci team." }, { status: 503, headers });
+  }
+  const entries = retrieveKnowledge(input, corpus);
+  const knowledgeVersion = publishedKnowledgeVersion(corpus);
   // No key, no source or unavailable quota store: no paid request is made.
-  if (!process.env.ANTHROPIC_API_KEY?.trim() || !entries.length) return NextResponse.json({ ok: true, data: knowledgeAnswer(entries) }, { headers });
+  if (!process.env.ANTHROPIC_API_KEY?.trim() || !entries.length) return NextResponse.json({ ok: true, data: { ...knowledgeAnswer(entries), knowledgeVersion } }, { headers });
   const quota = await reserveAssistantQuota(request);
   if (quota === "limited") return NextResponse.json({ ok: false, error: "The current question limit has been reached. Try again later or browse the Manci answer library." }, { status: 429, headers: { ...headers, "Retry-After": "60" } });
   const data = quota === "allowed"
     ? await answerWithClaude(input, entries, request.signal)
     : knowledgeAnswer(entries);
-  return NextResponse.json({ ok: true, data }, { headers });
+  return NextResponse.json({ ok: true, data: { ...data, knowledgeVersion } }, { headers });
 }

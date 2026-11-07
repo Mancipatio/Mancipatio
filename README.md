@@ -118,22 +118,39 @@ and in the programs' embedded security.txt. There is no bug bounty yet.
 
 ## Ask Manci
 
-The public, English-only assistant answers from 26 curated topics in
-`front/lib/assistant/knowledge.ts`, with source links to `/docs/manci-answers`.
-The source edition includes the November 2026 presentations and the published
-mainnet operator record. It has no account, document or transaction tools.
+The public, English-only assistant reads published explanations, policies and
+procedures from the `assistant_knowledge` database table. Admins manage it at
+`/admin/assistant` (System → Assistant knowledge): create an entry, add its
+public sources, save a private draft, then review and publish. Changes are
+available on the next request without a website deployment. Drafts never reach
+the public assistant or `/docs/manci-answers`. Unpublish before deleting an
+entry; revision checks prevent overwriting another editor's changes.
 
-Apply `front/supabase/migrations/0083_assistant_quota.sql` before enabling paid
-answers, following the target-specific backup and migration procedure. Set
+Migration 0084 seeds the 26 previously published topics from
+`front/lib/assistant/knowledge.ts`; that file is now seed/reference material,
+not the live content store. Evidence includes the November 2026 presentations
+and published mainnet operator record. Add only reviewed public summaries;
+keep personal documents, private agreements and credentials out of this
+library. The assistant has no account, document or transaction tools.
+
+Apply migrations `0083_assistant_quota.sql` and `0084_assistant_knowledge.sql`
+from `front/supabase/migrations` to the matching deployment database before
+releasing, following the target-specific backup and migration procedure. Set
 server-only `ANTHROPIC_API_KEY` on the relevant Vercel project; never prefix it
 with `NEXT_PUBLIC_`. `ANTHROPIC_MODEL` defaults to `claude-haiku-4-5`.
+For an API key without a workspace scope, also set server-only
+`ANTHROPIC_WORKSPACE_ID` to the intended Claude Console workspace ID; keys
+scoped to that workspace do not need this variable.
 `SUPABASE_SERVICE_ROLE_KEY` and the canonical `NEXT_PUBLIC_SITE_URL` are required.
 
 Shared limits default to 8 model attempts per IP/minute and 500 per UTC day.
 Optional `MANCI_ASSISTANT_RATE_LIMIT_PER_MINUTE` and
 `MANCI_ASSISTANT_DAILY_LIMIT` configure them. Missing credentials or an
-unavailable quota store/provider gives a labelled prepared answer. Limits
-reached return 429. Invalid input is rejected before quota or provider access.
+unavailable quota store/provider gives a labelled answer from the published
+library. If the knowledge store is unavailable, the assistant returns a safe
+503; it never resurrects unpublished material from the static seed. An empty
+published library gives a team handoff without a model call. Limits reached
+return 429. Invalid input is rejected before quota or provider access.
 
 Only the current and up to two preceding user questions and selected reference
 excerpts reach Claude. Manci does not log or persist questions or answers.

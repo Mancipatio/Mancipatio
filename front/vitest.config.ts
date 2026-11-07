@@ -46,6 +46,8 @@ const KYC_ONLY_OPEN_SUITES = [
   // Support.
   "tests/inquiries-create-route.test.ts",
   "tests/manci-assistant.test.ts",
+  "tests/assistant-published-route.test.ts",
+  "tests/assistant-knowledge-admin.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",

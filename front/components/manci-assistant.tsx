@@ -3,23 +3,24 @@
 import Link from "next/link";
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { AssistantMessage as ChatMessage, AssistantSource as Source, AssistantAnswer as Answer, AssistantInput as RetryRequest } from "@/lib/assistant/types";
+import { assistantRequestForTranscript } from "@/lib/assistant/client-history";
 import styles from "./manci-assistant.module.css";
 
 type DisplayMessage = ChatMessage & { id: number; sources?: Source[]; mode?: Answer["mode"] };
 
 const MAX_INPUT = 1_200;
 const COPY = {
-  title: "Ask Manci", subtitle: "Understand what you own.", close: "Close assistant", clear: "Clear chat",
-  greeting: "Make sense of tokenized ownership.",
-  intro: "Ask about ownership, jurisdictions and the legal process behind Manci.",
-  starters: ["What do I actually own with a Manci token?", "How does jurisdiction affect a tokenized asset?", "How are lawyers involved?"],
-  placeholder: "What would you like to understand?", question: "Your question", send: "Send question",
-  thinking: "Finding an answer…", you: "You", assistant: "Manci", materials: "From Manci materials", sources: "Sources",
-  retry: "Try again", error: "The answer could not be loaded. Please try again.",
-  rateLimit: "Please wait a moment before asking again.", stopped: "The response was stopped. You can try again.",
-  unavailable: "Manci is temporarily unavailable. Try again or contact the team.",
-  privacy: "Do not send personal documents or wallet secrets.",
-  basis: "Based on Manci materials. For terms of a specific offer,", contact: "contact the team.",
+  title: "Ask Manci", subtitle: "Clear answers, one question at a time.", close: "Close assistant", clear: "Clear chat",
+  greeting: "Let's make Manci clearer.",
+  intro: "Wondering what a token gives you or how to get started? Ask in your own words.",
+  starters: ["What do I own when I buy a token?", "How would this work in my country?", "How can the legal team help me?"],
+  placeholder: "What's on your mind?", question: "Your question", send: "Send question",
+  thinking: "Checking the Manci materials…", you: "You", assistant: "Manci", materials: "From Manci materials", sources: "Sources",
+  retry: "Try again", error: "I couldn't load that answer. Please try again.",
+  rateLimit: "You've reached the current question limit. Please try again later.", stopped: "That answer was stopped. You can try again when you're ready.",
+  unavailable: "I can't load an answer right now. Please try again or contact the team.",
+  privacy: "Please keep personal documents, private details and wallet secrets out of the chat.",
+  basis: "Based on Manci's published materials. For your specific issuance,", contact: "talk to the team.",
   chars: "characters", keyboard: "Enter to send · Shift + Enter for a new line",
 } as const;
 
@@ -151,11 +152,7 @@ export function ManciAssistant() {
     const next = [...history, message];
     setMessages(next);
     setInput("");
-    const recent = next.slice(-8).map(({ role, content: text }) => ({ role, content: text }));
-    // Keep a long answer from making the next valid question exceed the API's
-    // conversation budget. The complete transcript remains visible locally.
-    while (recent.length > 1 && recent.reduce((total, item) => total + item.content.length, 0) > 16_000) recent.shift();
-    void requestAnswer({ messages: recent });
+    void requestAnswer(assistantRequestForTranscript(next));
     inputRef.current?.focus();
   }
 

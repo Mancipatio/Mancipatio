@@ -402,10 +402,16 @@ nonce. The path to enforcement:
 - `ANTHROPIC_API_KEY`: server-only Claude credential on the intended Vercel
   project, Production scope. Never `NEXT_PUBLIC_`; never committed.
 - `ANTHROPIC_MODEL`: optional; defaults to `claude-haiku-4-5`.
+- `ANTHROPIC_WORKSPACE_ID`: server-only; required for a key that is not scoped
+  to a workspace. Sends the `anthropic-workspace-id` header. Use the intended
+  workspace's ID from Claude Console; omit for a workspace-scoped key.
 - `MANCI_ASSISTANT_DAILY_LIMIT`: optional shared UTC-day cap, default 500.
 - `MANCI_ASSISTANT_RATE_LIMIT_PER_MINUTE`: optional per-IP/minute cap, default 8.
 
-Apply migration 0083 to the matching Supabase target first. Quota-store failure
-uses prepared answers without making paid requests. The existing server
+Apply migrations 0083 and 0084 to the matching Supabase target first. The
+knowledge library is managed at `/admin/assistant`; only published entries
+are used, with no redeployment needed for editorial updates. Database errors
+return 503 rather than old seed answers. Quota-store failure uses published
+prepared answers without making paid requests. The existing server
 Supabase credential and canonical site origin are reused; feature flags,
 network selection and on-chain pause masks are unchanged by this feature.

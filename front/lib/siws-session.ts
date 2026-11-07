@@ -57,6 +57,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "applications.eligibility",
   "applications.mine",
   "archive.check",
+  // Admin-only knowledge list; publishing and deletion require fresh signatures.
+  "assistantKnowledge.list",
   "audit.list",
   "clients.adminDetail",
   "clients.adminList",

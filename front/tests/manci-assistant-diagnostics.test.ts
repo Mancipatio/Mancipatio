@@ -6,14 +6,16 @@ import { knowledgeAnswer, retrieveKnowledge } from "@/lib/assistant/retrieval";
 import type { AssistantInput } from "@/lib/assistant/types";
 
 const KEY = "synthetic-private-provider-key";
+const WORKSPACE = "wrkspc_syntheticprivateworkspace";
 const QUESTION = "Does buying a token make me a company owner? Private visitor detail.";
 const RAW = "private provider body and request identifier";
 const input: AssistantInput = { messages: [{ role: "user", content: QUESTION }] };
 const entries = retrieveKnowledge(input);
-const sensitive = `${KEY} ${QUESTION} ${RAW}`;
+const sensitive = `${KEY} ${WORKSPACE} ${QUESTION} ${RAW}`;
 
 beforeEach(() => {
   vi.stubEnv("ANTHROPIC_API_KEY", KEY);
+  vi.stubEnv("ANTHROPIC_WORKSPACE_ID", undefined);
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -24,7 +26,7 @@ afterEach(() => {
     ...vi.mocked(console.error).mock.calls,
     ...vi.mocked(console.log).mock.calls,
   ]);
-  for (const value of [KEY, QUESTION, RAW]) expect(logs).not.toContain(value);
+  for (const value of [KEY, WORKSPACE, QUESTION, RAW]) expect(logs).not.toContain(value);
   vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 
@@ -36,6 +38,23 @@ async function expectFallback(diagnostic: Record<string, unknown>) {
 }
 
 describe("sanitized Claude diagnostics", () => {
+  it.each([undefined, "", " "])("omits the workspace header when no workspace is configured (%s)", async (workspace) => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", workspace);
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { type: "permission_error" } }), { status: 403 }));
+    vi.stubGlobal("fetch", fetch);
+    await expectFallback({ reason: "provider_http", status: 403, type: "permission_error" });
+    expect(fetch.mock.calls[0][1].headers).not.toHaveProperty("anthropic-workspace-id");
+  });
+
+  it("sends the configured workspace only as a trimmed server-side header", async () => {
+    vi.stubEnv("ANTHROPIC_WORKSPACE_ID", ` ${WORKSPACE} `);
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { type: "permission_error" } }), { status: 403 }));
+    vi.stubGlobal("fetch", fetch);
+    await expectFallback({ reason: "provider_http", status: 403, type: "permission_error" });
+    expect(fetch.mock.calls[0][1].headers).toMatchObject({ "x-api-key": KEY, "anthropic-workspace-id": WORKSPACE });
+    expect(fetch.mock.calls[0][1].body).not.toContain(WORKSPACE);
+  });
+
   it.each([
     [401, "authentication_error"], [403, "permission_error"], [404, "not_found_error"],
     [400, "invalid_request_error"], [429, "rate_limit_error"], [529, "overloaded_error"],
@@ -51,6 +70,31 @@ describe("sanitized Claude diagnostics", () => {
       type: "invalid_request_error", message: `Your credit balance is too low to access the Anthropic API. ${sensitive}`,
     } }), { status: 400 })));
     await expectFallback({ reason: "provider_billing", status: 400, type: "invalid_request_error" });
+  });
+
+  it("identifies a missing workspace scope without exposing the provider message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: {
+      type: "invalid_request_error", message: `This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use. ${sensitive}`,
+    } }), { status: 400 })));
+    await expectFallback({ reason: "provider_workspace_required", status: 400, type: "invalid_request_error" });
+  });
+
+  it.each([
+    "You have reached your specified API usage limits",
+    "You have reached your specified workspace API usage limits",
+  ])("classifies the configured spend limit: %s", async (prefix) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: {
+      type: "invalid_request_error", message: `${prefix}. ${sensitive}`,
+    } }), { status: 400 })));
+    await expectFallback({ reason: "provider_spend_limit", status: 400, type: "invalid_request_error" });
+  });
+
+  it("distinguishes a monthly spend cap from an ordinary rate limit using the documented error code", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: {
+      type: "rate_limit_error", message: sensitive,
+      details: { error_code: "enforced_spend_limit_reached", private_context: sensitive },
+    } }), { status: 429 })));
+    await expectFallback({ reason: "provider_spend_limit", status: 429, type: "rate_limit_error" });
   });
 
   it("does not emit unrecognized error types", async () => {

@@ -159,7 +159,7 @@ export function memorySupabase(): MemorySupabase {
       }
       if (op === "delete") {
         db.tables[table] = db.rows(table).filter((r) => !matched.includes(r));
-        return { data: null, error: null };
+        return { data: returning ? (single ? matched[0] ?? null : matched) : null, error: null };
       }
       if (head) return { data: null, error: null, count: matched.length };
       // Copies, like a real response: a later update must not change them.

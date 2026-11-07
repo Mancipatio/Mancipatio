@@ -18,6 +18,8 @@ export const KNOWLEDGE_VERSION = "2026-11-07";
 
 export type KnowledgeEntry = {
   id: string;
+  updatedAt?: string;
+  category?: "answer" | "policy" | "procedure";
   title: string;
   keywords: string[];
   answer: string;
@@ -57,6 +59,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   // distinguish the intended flow from historical pilot chronology.
   {
     id: "conversion-process",
+    category: "procedure",
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 13: Conversion into registered ownership", "date": "2026-11-05"}],
     title: "How does token conversion into a registered interest work?",
     keywords: ["convert", "conversion", "redeem", "konverzija", "konver", "pretvaranje", "pretvar", "vlasnič", "vlasnička struktura", "registracija", "APR", "burn", "spaljivanje", "pravni prenos", "koraci"],
@@ -147,6 +150,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   // /how-it-works "The issuance process"; partner deck slide 10 "Token issuance".
   {
     id: "issuer-getting-started",
+    category: "procedure",
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 10: Token issuance", "date": "2026-11-05"}],
     title: "How can my company start tokenizing?",
     keywords: ["start", "apply", "issue", "issuer onboarding", "početak", "početi", "tokenizujem", "izdavanje", "prijava", "moja kompanija", "my company", "KYB"],
@@ -157,6 +161,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   // /investors and the current account/verification flow.
   {
     id: "kyc-wallet-and-privacy",
+    category: "policy",
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 11: Investor verification and wallet eligibility", "date": "2026-11-05"}],
     title: "Why do I need KYC and a wallet passport?",
     keywords: ["KYC", "passport", "verification", "verify", "identity", "pasoš", "identitet", "verifikacija", "dokumenti lični", "privacy", "privatnost", "wallet povezivanje"],
@@ -167,6 +172,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   // "Transfer checks depend on the class" is the newer canonical guide.
   {
     id: "transfer-restrictions",
+    category: "policy",
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 14: Wallet allowlists and transfer policy", "date": "2026-11-05"}],
     title: "Can tokens be transferred freely?",
     keywords: ["transfer", "restriction", "allowlist", "whitelist", "blocklist", "Open", "KycGated", "prenos", "slobodno", "ograničenja", "blokiran", "istekao", "revoked"],
@@ -204,10 +210,11 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   // /solutions/rights-vesting and /investors "After a purchase".
   {
     id: "vesting-and-claims",
+    category: "procedure",
     title: "How do vesting and claims work?",
     keywords: ["vesting", "claim", "unlock", "schedule", "cliff", "raspored", "otključavanje", "preuzimanje", "dospeće", "push", "alokacija"],
     answer: "Vesting releases an allocation according to the recorded schedule and series conditions. Review your position for the token, exact amount, unlock times, delivery mode and any approval, cancellation or recovery conditions. Use Portfolio's Vesting page for eligible claims. A scheduled amount is not proof that the escrow is funded or that a push executor has delivered it; those states must be checked separately.",
-    sources: [{ title: "Vesting & claims", href: "/solutions/rights-vesting" }, { title: "Open my vesting", href: "/portfolio/vesting" }],
+    sources: [{ title: "Vesting & claims", href: "/solutions/rights-vesting" }],
   },
   // Public /markets/types comparison and lib/instruments.ts. Availability and
   // rights must not be inherited from the existence of a category page.
@@ -244,7 +251,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
     title: "Is Manci live, and can I transact now?",
     keywords: ["live", "available", "mainnet", "devnet", "production", "paused", "ready", "radi", "dostupno", "sada", "aktivno", "pauzirano", "pilot", "testnet"],
     answer: "Implemented features and currently enabled public operations are different. The November 2026 presentation describes a mainnet pilot with onboarding and browsing available, while new financial operations were paused at that snapshot. Older guides describe devnet. This knowledge base cannot confirm today's deployment or permission to transact: check the network and notices in the app and confirm the specific operation with the team. Devnet test tokens have no economic value.",
-    sources: [{ title: "Open the app and check its network", href: "/app" }, { title: "Confirm current availability", href: "/contact" }],
+    sources: [{ title: "Confirm current availability", href: "/contact" }],
   },
   // Partner deck slide 18 "Integration with Metaplex"; technical deck slide 2
   // "Three routes on the same Solana network", slide 6 "Responsibilities after

@@ -101,6 +101,7 @@ export const ADMIN_MENU: AdminNavGroup[] = withRoles([
       { href: "/admin/platform", label: "Platform", icon: <IconSettings /> },
       { href: "/admin/jurisdictions", label: "Jurisdictions", icon: <IconGlobe /> },
       { href: "/admin/documents", label: "Documents", icon: <IconFile /> },
+      { href: "/admin/assistant", label: "Assistant knowledge", icon: <IconClipboard /> },
       { href: "/admin/notifications", label: "Notifications", icon: <IconBell /> },
       { href: "/admin/integrations", label: "Integrations", icon: <IconPlug /> },
       { href: "/admin/services", label: "Services", icon: <IconGavel /> },
