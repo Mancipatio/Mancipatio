@@ -11,12 +11,31 @@ Explain the legal team's role only as documented. For the terms of a specific is
 No wallet, account, legal-document or transaction access is available to you. Do not ask for seed phrases, private keys, passport copies or other personal documents. No web search or external tools are available.
 If the references do not answer the question, set covered=false, sourceIds=[], and do not speculate. If covered=true, sourceIds must contain at least one provided reference ID. Return JSON matching the schema.`;
 
+const PROVIDER_ERROR_TYPES = new Set([
+  "authentication_error", "permission_error", "not_found_error", "invalid_request_error",
+  "rate_limit_error", "overloaded_error", "api_error", "request_too_large",
+]);
+type ProviderFailure = "provider_http" | "provider_billing" | "provider_timeout" |
+  "provider_network" | "provider_aborted" | "provider_invalid_output";
+
+/** Fixed diagnostics only: never pass an Error, provider body or user input. */
+function logProviderFailure(reason: ProviderFailure, status?: number, errorType?: unknown) {
+  console.warn("[assistant] provider_failure", {
+    reason,
+    ...(status === undefined ? {} : {
+      status,
+      type: typeof errorType === "string" && PROVIDER_ERROR_TYPES.has(errorType) ? errorType : "unknown",
+    }),
+  });
+}
+
 export async function answerWithClaude(
   input: AssistantInput,
   entries: readonly KnowledgeEntry[],
   signal?: AbortSignal,
 ): Promise<AssistantAnswer> {
   const fallback = () => knowledgeAnswer(entries);
+  const invalidOutput = () => { logProviderFailure("provider_invalid_output"); return fallback(); };
   const key = process.env.ANTHROPIC_API_KEY?.trim();
   if (!key || !entries.length) return fallback();
   try {
@@ -42,21 +61,36 @@ export async function answerWithClaude(
         } } },
       }),
     });
-    if (!response.ok) return fallback();
+    if (!response.ok) {
+      // Inspect only for an allowlisted type and a fixed billing category.
+      // The message and body are never emitted or returned to the visitor.
+      let body: unknown;
+      try { body = await response.json(); } catch { /* HTTP status is sufficient. */ }
+      const error = body && typeof body === "object" && "error" in body &&
+        body.error && typeof body.error === "object" ? body.error as Record<string, unknown> : null;
+      const billing = response.status === 400 && typeof error?.message === "string" &&
+        error.message.toLowerCase().includes("credit balance is too low");
+      logProviderFailure(billing ? "provider_billing" : "provider_http", response.status, error?.type);
+      return fallback();
+    }
     const result = await response.json();
-    if (result.stop_reason !== "end_turn" || !Array.isArray(result.content)) return fallback();
+    if (!result || typeof result !== "object" || result.stop_reason !== "end_turn" || !Array.isArray(result.content) ||
+        result.content.some((block: unknown) => !block || typeof block !== "object")) return invalidOutput();
     const text = result.content.filter((block: { type?: string }) => block.type === "text").map((block: { text?: string }) => block.text ?? "").join("");
     const answer: unknown = JSON.parse(text);
-    if (!answer || typeof answer !== "object" || Array.isArray(answer)) return fallback();
+    if (!answer || typeof answer !== "object" || Array.isArray(answer)) return invalidOutput();
     const value = answer as Record<string, unknown>;
     if (value.covered === false) return handoffAnswer();
-    if (value.covered !== true || typeof value.answer !== "string" || !value.answer.trim() || value.answer.length > 6000 || !Array.isArray(value.sourceIds) || !value.sourceIds.length || value.sourceIds.length > entries.length) return fallback();
+    if (value.covered !== true || typeof value.answer !== "string" || !value.answer.trim() || value.answer.length > 6000 || !Array.isArray(value.sourceIds) || !value.sourceIds.length || value.sourceIds.length > entries.length) return invalidOutput();
     const cited = entries.filter((entry) => (value.sourceIds as unknown[]).includes(entry.id));
-    if (value.sourceIds.some((id) => typeof id !== "string" || !entries.some((entry) => entry.id === id))) return fallback();
+    if (value.sourceIds.some((id) => typeof id !== "string" || !entries.some((entry) => entry.id === id))) return invalidOutput();
     return { answer: value.answer.trim(), sources: knowledgeSources(cited), mode: "claude", knowledgeVersion: KNOWLEDGE_VERSION };
-  } catch {
+  } catch (error) {
     // Never log questions, credentials, upstream bodies or personal content.
     // The UI labels this as an answer from materials, not a Claude response.
+    logProviderFailure(error instanceof SyntaxError ? "provider_invalid_output"
+      : error instanceof Error && error.name === "TimeoutError" ? "provider_timeout"
+      : error instanceof Error && error.name === "AbortError" ? "provider_aborted" : "provider_network");
     return fallback();
   }
 }
