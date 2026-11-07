@@ -18,7 +18,7 @@ const COPY = {
   retry: "Try again", error: "The answer could not be loaded. Please try again.",
   rateLimit: "Please wait a moment before asking again.", stopped: "The response was stopped. You can try again.",
   unavailable: "Manci is temporarily unavailable. Try again or contact the team.",
-  privacy: "Do not send personal documents or wallet secrets.",
+  privacy: "Questions may be sent to Anthropic to generate an answer. Do not send personal documents or wallet secrets.",
   basis: "Based on Manci materials. For terms of a specific offer,", contact: "contact the team.",
   chars: "characters", keyboard: "Enter to send · Shift + Enter for a new line",
 } as const;
