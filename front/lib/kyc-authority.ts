@@ -219,7 +219,9 @@ async function fetchKycAuthorityContext(
   pinned: Address | null,
 ): Promise<KycAuthorityContext> {
   const [platformPda] = await findPlatformPda();
-  const platform = await fetchMaybePlatform(rpc, platformPda);
+  const platform = await fetchMaybePlatform(rpc, platformPda, {
+    abortSignal: AbortSignal.timeout(12_000),
+  });
   const platformAdmin = platform.exists ? platform.data.admin : null;
   let registries: KycRegistryRecord[];
   if (pinned) {

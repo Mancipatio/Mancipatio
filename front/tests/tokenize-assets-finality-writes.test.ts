@@ -35,10 +35,23 @@ describe("/issuer/onboarding company profile after register_issuer", () => {
     expect(page).toContain("abortSignal: AbortSignal.timeout(8_000)");
   });
 
-  it("bounds the whole wait inside the signed envelope's window", () => {
-    expect(page).toContain("const FINALITY_WAIT_MS = 240_000;");
-    expect(page).toContain("signal: AbortSignal.timeout(FINALITY_WAIT_MS)");
-    expect(240_000).toBeLessThan(SIWS_MAX_AGE_MS);
+  it("bounds the whole wait inside the signed envelope's window and cancels a departed wallet's save", () => {
+    const configuredWait = page.match(/const FINALITY_WAIT_MS = ([\d_]+);/);
+    expect(configuredWait).not.toBeNull();
+    const waitMs = Number(configuredWait![1].replaceAll("_", ""));
+    expect(waitMs).toBeGreaterThan(0);
+    expect(waitMs).toBeLessThan(SIWS_MAX_AGE_MS);
+    const save = page.slice(page.indexOf("async function saveProfile("), page.indexOf("async function register()"));
+    // The timeout still bounds finality; adding the component lifetime makes
+    // switching wallet cancel the old flow without spending its signed nonce.
+    expect(save).toMatch(/signal: AbortSignal\.any\(\[lifetime, AbortSignal\.timeout\(FINALITY_WAIT_MS\)\]\)/);
+    expect(page).toContain("return () => controller.abort();");
+    const wait = save.indexOf("await waitForFinalizedIssuer(");
+    const cancelled = save.indexOf("if (lifetime.aborted) return;", wait);
+    const post = save.indexOf("await postSignedRequest(");
+    expect(wait).toBeGreaterThan(-1);
+    expect(cancelled).toBeGreaterThan(wait);
+    expect(post).toBeGreaterThan(cancelled);
     // Polls every 4 s, at most 45 times (3 min), as waitForFinalizedAsset does.
     expect(page).toContain("intervalMs: opts.intervalMs ?? 4_000, attempts: opts.attempts ?? 45");
   });

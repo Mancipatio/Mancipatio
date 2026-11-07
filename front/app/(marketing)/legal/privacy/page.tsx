@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { detectNetwork } from "@/lib/network";
 import { DevnetPrivacy } from "./devnet-privacy";
 import { MainnetPrivacy } from "./mainnet-privacy";
+import { AssistantPrivacyNotice } from "@/components/assistant-privacy-notice";
 
 /**
  * Privacy Policy, per network: the devnet pilot's text on devnet, testnet and
@@ -17,5 +18,5 @@ export const metadata: Metadata = {
 };
 
 export default function PrivacyPage() {
-  return detectNetwork() === "mainnet" ? <MainnetPrivacy /> : <DevnetPrivacy />;
+  return <>{detectNetwork() === "mainnet" ? <MainnetPrivacy /> : <DevnetPrivacy />}<AssistantPrivacyNotice /></>;
 }

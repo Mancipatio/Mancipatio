@@ -45,6 +45,7 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/route-guard-matrix.test.ts",
   // Support.
   "tests/inquiries-create-route.test.ts",
+  "tests/manci-assistant.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",

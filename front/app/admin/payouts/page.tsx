@@ -58,6 +58,7 @@ import { useToast } from "@/lib/toast";
 import { features } from "@/lib/features";
 import {
   isFreezable,
+  MISSED_FREEZE_THRESHOLD,
   loadPayoutVaults,
   loadVaultVoteHistory,
   vaultVotePda,
@@ -1066,7 +1067,7 @@ function VaultOversightDetail({
               onClick={() => setConfirmFreeze(true)}
               title={
                 !freezable
-                  ? `Needs ${MISSED_UPDATES_TO_FREEZE}+ overdue updates (currently ${overdue}).`
+                  ? `Requires unreleased principal and an outstanding update at least ${MISSED_FREEZE_THRESHOLD} periods overdue (currently ${overdue}).`
                   : undefined
               }
               className="rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-900 hover:bg-rose-100 disabled:opacity-50"
@@ -1123,9 +1124,9 @@ function VaultOversightDetail({
         description={
           <>
             <p>
-              Freezing halts founder tranche releases after{" "}
-              {MISSED_UPDATES_TO_FREEZE}+ missed monthly updates (currently{" "}
-              {overdue} overdue). Investors can then vote to return capital or
+              Freezing halts founder tranche releases when the oldest outstanding
+              update is at least {MISSED_FREEZE_THRESHOLD} monthly periods overdue
+              (currently {overdue}). Investors can then vote to return capital or
               resume.
             </p>
             <p className="mt-2 text-xs text-slate-500">
@@ -1183,7 +1184,6 @@ function VaultOversightDetail({
   );
 }
 
-const MISSED_UPDATES_TO_FREEZE = 3;
 
 type PreparedVaultSnapshot = SnapshotMerkle & { snapshot: PreparedPayoutSnapshot };
 /** Persist the approved original investor list before creating an on-chain root. */

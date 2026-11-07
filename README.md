@@ -115,3 +115,33 @@ on devnet or with your own funds, give us reasonable time before
 disclosure) is at <https://www.manci.io/security>; the same contact is in
 [`/.well-known/security.txt`](https://www.manci.io/.well-known/security.txt)
 and in the programs' embedded security.txt. There is no bug bounty yet.
+
+## Ask Manci
+
+The public, English-only assistant answers from 26 curated topics in
+`front/lib/assistant/knowledge.ts`, with source links to `/docs/manci-answers`.
+The source edition includes the November 2026 presentations and the published
+mainnet operator record. It has no account, document or transaction tools.
+
+Apply `front/supabase/migrations/0083_assistant_quota.sql` before enabling paid
+answers, following the target-specific backup and migration procedure. Set
+server-only `ANTHROPIC_API_KEY` on the relevant Vercel project; never prefix it
+with `NEXT_PUBLIC_`. `ANTHROPIC_MODEL` defaults to `claude-haiku-4-5`.
+`SUPABASE_SERVICE_ROLE_KEY` and the canonical `NEXT_PUBLIC_SITE_URL` are required.
+
+Shared limits default to 8 model attempts per IP/minute and 500 per UTC day.
+Optional `MANCI_ASSISTANT_RATE_LIMIT_PER_MINUTE` and
+`MANCI_ASSISTANT_DAILY_LIMIT` configure them. Missing credentials or an
+unavailable quota store/provider gives a labelled prepared answer. Limits
+reached return 429. Invalid input is rejected before quota or provider access.
+
+Only the current and up to two preceding user questions and selected reference
+excerpts reach Claude. Manci does not log or persist questions or answers.
+Quota storage contains HMAC IP identifiers and counters only. The browser keeps
+the conversation in memory. See `/legal/privacy#ask-manci` for the data-flow notice.
+
+Tests cover retrieval, request boundaries, provider-output validation, fallback,
+and durable quota limits. With `RUN_LOCAL_POSTGRES_TESTS=1`, the PostgreSQL
+suites exercise concurrency, privileges, persistence and the full migration
+chain. After deployment, verify a live Claude answer and its source links for
+ownership, jurisdiction and lawyers, plus an unsupported question.

@@ -59,7 +59,12 @@ export function useIssuerWorkflow() {
   useEffect(() => {
     if (!chainKey) return;
     let cancelled = false;
-    void loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)).then(withoutArchivedAssets).then((data) => {
+    // A user-requested status refresh must read current chain state, even if
+    // the indexer still has the previous KYB decision or issuer authority.
+    const request = chainRevision > 0
+      ? loadNetwork(client.runtime.rpc)
+      : loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc));
+    void request.then(withoutArchivedAssets).then((data) => {
       if (!cancelled && detectNetwork() === network) setChain({ key: chainKey, data, failed: false });
     }).catch(() => {
       if (!cancelled && detectNetwork() === network) setChain({ key: chainKey, data: null, failed: true });

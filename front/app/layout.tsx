@@ -8,6 +8,7 @@ import "./account.css";
 import { Providers } from "./providers";
 import { ManciAssistant } from "@/components/manci-assistant";
 import { MaintenanceBanner } from "@/components/maintenance-banner";
+import { ManciAssistant } from "@/components/manci-assistant";
 import { indexingAllowed } from "@/lib/indexing";
 
 const geistSans = Geist({

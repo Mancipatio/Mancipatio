@@ -333,7 +333,7 @@ export default function IssuerPayoutsPage() {
                       <span className="font-mono">{v.updatesPosted}</span>
                       {v.state === PayoutVaultState.Active && overdue > 0 && (
                         <span className="ml-1.5 text-[11px] text-rose-600">
-                          {overdue} overdue
+                          {overdue} period{overdue === 1 ? "" : "s"} overdue
                         </span>
                       )}
                     </td>
@@ -801,16 +801,17 @@ function VaultDetail({
 
       {v.state === PayoutVaultState.Frozen && (
         <div className="mt-5 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
-          This vault is <strong>frozen</strong> after {overdue} missed update
-          {overdue === 1 ? "" : "s"}. An investor vote decides whether capital is
-          returned or the schedule resumes — handled by admins.
+          This vault is <strong>frozen</strong>. The oldest outstanding update is{" "}
+          {overdue} period{overdue === 1 ? "" : "s"} overdue. An investor vote
+          decides whether capital is returned or the schedule resumes — handled
+          by admins.
         </div>
       )}
       {v.state === PayoutVaultState.Active && freezable && (
         <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-          {overdue} update{overdue === 1 ? "" : "s"} overdue — at the freeze
-          threshold. Post your update now to keep payouts flowing and avoid an
-          investor freeze.
+          The oldest outstanding update is {overdue} periods overdue — at the
+          freeze threshold. Post the overdue updates to keep payouts flowing and
+          avoid an investor freeze.
         </div>
       )}
 

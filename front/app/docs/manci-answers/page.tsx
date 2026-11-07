@@ -5,7 +5,7 @@ import { PageHeader, Section, H2, Body } from "@/components/mx";
 import { KNOWLEDGE_ENTRIES, KNOWLEDGE_VERSION } from "@/lib/assistant/knowledge";
 
 export const metadata = {
-  title: "Manci answer library · Mancipatio",
+  title: "Manci answer library · Manci",
   description: "Source-backed explanations of token rights, registered ownership, jurisdictions and the Manci process in English.",
 };
 

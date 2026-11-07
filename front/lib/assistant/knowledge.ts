@@ -10,8 +10,8 @@
  *
  * Do not infer country authorisation, an appointed law firm, a licence, legal
  * sufficiency, guaranteed return, or live availability from these summaries.
- * Current operational availability must be checked in the app. Historical
- * presentation evidence and class-specific controls qualify general claims.
+ * Older guides contain devnet-only and freely-transferable generalisations;
+ * newer presentation evidence and class-specific controls qualify those claims.
  * No wallet inventories, personal documents, keys or operational state belong here.
  */
 export const KNOWLEDGE_VERSION = "2026-11-07";
@@ -26,6 +26,14 @@ export type KnowledgeEntry = {
 };
 
 export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
+  {
+    id: "platform-operator",
+    title: "Where is the Manci platform operator registered?",
+    keywords: ["operator", "registered company", "headquarters", "incorporated", "BVI", "British Virgin Islands", "Manci International", "platform jurisdiction"],
+    answer: "The published mainnet operator record identifies Manci International Ltd., incorporated in the British Virgin Islands, company number 2219023. The mainnet service Terms use BVI law and courts. The platform operator is distinct from the issuer and the company whose shares are tokenized: their jurisdictions and the legal transfer process are determined by the specific issuance. A Serbian company-interest pilot does not make the platform operator a Serbian company or establish worldwide offering permissions. See Company & licence and the applicable Terms for the published details.",
+    sources: [{ title: "Company & licence", href: "/legal/company" }, { title: "Terms of Service", href: "/legal/terms" }],
+    provenance: [{ title: "Published Manci mainnet operator record", section: "Platform entity, governing law and issuer distinction", date: "2026-11-07" }],
+  },
   // Partner deck, slide 2 "Manci on Solana"; slide 17 "System responsibilities".
   {
     id: "what-is-manci",
@@ -93,7 +101,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 4: The documented pilot", "date": "2026-11-05"}, {"title": "Manci — Partner Integration presentation", "section": "Slide 7: The APR decision is anchored in the conversion", "date": "2026-11-05"}],
     title: "Has the token-to-ownership process been demonstrated?",
     keywords: ["pilot", "proven", "demonstrated", "example", "first conversion", "dokazano", "primer", "prva konverzija", "APR odluka", "mainnet pilot"],
-    answer: "The November 2026 presentation documents a pilot using Manci's own company, with an APR ownership-change decision and a separate Solana custody-and-burn record linked by the document hash. Those are distinct legal and blockchain records, with separate dates; the legal decision preceded the token burn. This is a related-party demonstration, not external customer traction. The case does not establish automatic registry updates or approval of every future issuance. Ask the team for the evidence and terms relevant to your proposed issuance.",
+    answer: "The 5 November 2026 presentation documents a pilot using Manci's own company, with an APR ownership-change decision and a separate Solana custody-and-burn record linked by the document hash. Those are distinct legal and blockchain records, with separate dates; the legal decision preceded the token burn. This is a related-party demonstration, not external customer traction. It does not establish automatic registry updates or approval of every future issuance. Ask the team for the appropriate public evidence and the terms relevant to your proposed issuance.",
     sources: [{ title: "Ask the team for pilot evidence", href: "/contact" }, { title: "Legal structure", href: "/legal-structure" }],
   },
   // Partner deck, slide 15 "Geographic access and jurisdiction rules"; intro
@@ -118,14 +126,6 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
   },
   // Intro deck slide 9 "A lean team, raising a seed round" identifies legal
   // roles. It is not a verified directory of retained firms or local mandates.
-  {
-    id: "team-and-roles",
-    provenance: [{ title: "Manci team update", section: "Founder commitment and advisory roles", date: "2026-11-07" }],
-    title: "Who is building Manci?",
-    keywords: ["team", "founder", "cofounder", "full time", "advisor", "Mladen", "Vladimir", "Dušan", "tim", "osnivač", "savetnik", "puno radno vreme"],
-    answer: "Mladen Rakić and Vladimir Rajković work full time on Manci. Mladen leads the product and engineering work; Vladimir leads legal structuring and documentation. Dušan Romčević is an advisor. The role of a team member or advisor does not establish regulatory approval, a country-specific licence or a mandate to act as your lawyer. Contact the team to agree the responsible people and scope for a particular issuance.",
-    sources: [{ title: "Contact the Manci team", href: "/contact" }, { title: "Legal structure", href: "/legal-structure" }],
-  },
   {
     id: "lawyers-and-local-counsel",
     provenance: [{ title: "From token to registered owner", section: "Slide 9: A lean team, raising a seed round — legal roles only; no country-specific engagement mandate", date: "2026-10-22" }],
@@ -154,13 +154,13 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
     sources: [{ title: "Issuing an asset", href: "/how-it-works" }, { title: "Issuer registration & KYB", href: "/solutions/issuer-registry" }, { title: "Apply for an equity raise", href: "/apply" }],
   },
   // Partner deck slide 11 "Investor verification and wallet eligibility";
-  // /investors "Connect and check verification" and account verification.
+  // /investors and the current account/verification flow.
   {
     id: "kyc-wallet-and-privacy",
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 11: Investor verification and wallet eligibility", "date": "2026-11-05"}],
     title: "Why do I need KYC and a wallet passport?",
     keywords: ["KYC", "passport", "verification", "verify", "identity", "pasoš", "identitet", "verifikacija", "dokumenti lični", "privacy", "privatnost", "wallet povezivanje"],
-    answer: "KYC reviews the investor's identity; KYB reviews the issuing business. Wallet eligibility is a separate record, with status, jurisdiction and expiry. Verifying an account does not automatically approve every wallet or every offering. Use Portfolio to review the connected wallet's status and follow the requested checks. Identity documents remain off-chain; do not paste passports, identity numbers, seed phrases or private keys into this assistant.",
+    answer: "KYC reviews the investor's identity; KYB reviews the issuing business. Wallet eligibility is a separate record, with status, jurisdiction and expiry. Verifying an account does not automatically approve every wallet or every offering. Use the verification page for account checks and Portfolio to review the connected wallet's status. Identity documents remain off-chain; do not paste passports, identity numbers, seed phrases or private keys into this assistant.",
     sources: [{ title: "Investor guide", href: "/investors" }, { title: "Eligibility & passports", href: "/solutions/compliance" }, { title: "Privacy policy", href: "/legal/privacy" }],
   },
   // Partner deck slide 14 "Wallet allowlists and transfer policy"; /security
@@ -243,7 +243,7 @@ export const KNOWLEDGE_ENTRIES: KnowledgeEntry[] = [
     provenance: [{"title": "Manci — Partner Integration presentation", "section": "Slide 16: What is implemented and what is available", "date": "2026-11-05"}],
     title: "Is Manci live, and can I transact now?",
     keywords: ["live", "available", "mainnet", "devnet", "production", "paused", "ready", "radi", "dostupno", "sada", "aktivno", "pauzirano", "pilot", "testnet"],
-    answer: "Implemented features and currently enabled public operations are different. The 5 November 2026 presentation describes a mainnet pilot with onboarding and browsing available, while new financial operations were paused at that snapshot. This knowledge base cannot confirm today's deployment or permission to transact: check the network and notices in the app and confirm the specific operation with the team. Devnet is a separate test environment; its test tokens have no economic value.",
+    answer: "Implemented features and currently enabled public operations are different. The November 2026 presentation describes a mainnet pilot with onboarding and browsing available, while new financial operations were paused at that snapshot. Older guides describe devnet. This knowledge base cannot confirm today's deployment or permission to transact: check the network and notices in the app and confirm the specific operation with the team. Devnet test tokens have no economic value.",
     sources: [{ title: "Open the app and check its network", href: "/app" }, { title: "Confirm current availability", href: "/contact" }],
   },
   // Partner deck slide 18 "Integration with Metaplex"; technical deck slide 2

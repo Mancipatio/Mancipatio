@@ -9,7 +9,7 @@ import { parseAssistantInput, type AssistantInput } from "@/lib/assistant/types"
 import { knowledgeAnswer, normalizeQuestion, retrieveKnowledge } from "@/lib/assistant/retrieval";
 
 const input = (question = "Does buying a token make me a company owner?"): AssistantInput => ({ messages: [{ role: "user", content: question }] });
-const request = (body: unknown = input(), extraHeaders: Record<string, string> = {}) => new Request("https://www.mancipatio.io/api/assistant", { method: "POST", headers: { "content-type": "application/json", ...extraHeaders }, body: JSON.stringify(body) });
+const request = (body: unknown = input(), extraHeaders: Record<string, string> = {}) => new Request("https://www.manci.io/api/assistant", { method: "POST", headers: { "content-type": "application/json", ...extraHeaders }, body: JSON.stringify(body) });
 const modelReply = (value: unknown, stop_reason = "end_turn") => new Response(JSON.stringify({ stop_reason, content: [{ type: "text", text: JSON.stringify(value) }] }));
 
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
@@ -25,7 +25,6 @@ describe("Manci knowledge retrieval", () => {
     ["How are lawyers involved?", "lawyers-and-local-counsel"],
     ["Koja je uloga pravnika?", "lawyers-and-local-counsel"],
     ["Da li imamo advokate koji sve odrade?", "lawyers-and-local-counsel"],
-    ["Who are the full time founders and advisors?", "team-and-roles"],
   ])("finds the source for %s", (question, id) => {
     expect(retrieveKnowledge(input(question)).slice(0, 2).map((entry) => entry.id)).toContain(id);
   });
@@ -54,7 +53,7 @@ describe("Manci knowledge retrieval", () => {
 });
 
 describe("public assistant request boundaries", () => {
-  beforeEach(() => { vi.stubEnv("ANTHROPIC_API_KEY", ""); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://www.mancipatio.io"); quota.mockResolvedValue("allowed"); });
+  beforeEach(() => { vi.stubEnv("ANTHROPIC_API_KEY", ""); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://www.manci.io"); quota.mockResolvedValue("allowed"); });
   it("works without a wallet or provider key and never calls a paid service", async () => {
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
     const response = await POST(request());

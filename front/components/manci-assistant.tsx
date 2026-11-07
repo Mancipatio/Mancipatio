@@ -246,7 +246,7 @@ export function ManciAssistant() {
             <div className={styles.inputMeta}><span>{copy.keyboard}</span><span aria-label={`${input.length} / ${MAX_INPUT} ${copy.chars}`}>{input.length}/{MAX_INPUT}</span></div>
             <p id={`${id}-privacy`} className={styles.privacy}>{copy.privacy}</p>
           </form>
-          <footer className={styles.footer}>{copy.basis} <Link href="/contact" onClick={closePanel}>{copy.contact}</Link>{" · "}<Link href="/legal/privacy" onClick={closePanel}>Privacy</Link></footer>
+          <footer className={styles.footer}>{copy.basis} <Link href="/contact" onClick={closePanel}>{copy.contact}</Link>{" · "}<Link href="/legal/privacy#ask-manci" onClick={closePanel}>Privacy</Link></footer>
         </div>
       </dialog>
     </>
