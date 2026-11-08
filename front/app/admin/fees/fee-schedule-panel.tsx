@@ -15,7 +15,8 @@ import type { FeeChargeRow, FeeScheduleRow } from "@/lib/fees/schedule";
 import { FeeScheduleSection } from "./fee-schedule-section";
 import { FeeChargesSection } from "./fee-charges-section";
 
-export type FeeAdminData = { schedule: FeeScheduleRow[]; charges: FeeChargeRow[] };
+/** `readAt`: when the data was read, what "in effect" is judged against (not the render time). */
+export type FeeAdminData = { schedule: FeeScheduleRow[]; charges: FeeChargeRow[]; readAt: number };
 
 export function FeeSchedulePanel({ clients }: { clients: ClientRow[] | null }) {
   const conn = useWalletConnection();
@@ -25,7 +26,8 @@ export function FeeSchedulePanel({ clients }: { clients: ClientRow[] | null }) {
   const refresh = useCallback(async () => {
     if (!conn.wallet) return;
     try {
-      setData(await listFeeSchedule(conn.wallet));
+      const read = await listFeeSchedule(conn.wallet);
+      setData({ ...read, readAt: Date.now() });
       setError(null);
     } catch (err) {
       // A failed read is shown as such, never as an empty schedule.
@@ -40,10 +42,11 @@ export function FeeSchedulePanel({ clients }: { clients: ClientRow[] | null }) {
 
   return (
     <>
-      <FeeScheduleSection schedule={data?.schedule ?? null} error={error} onChanged={refresh} />
+      <FeeScheduleSection schedule={data?.schedule ?? null} readAt={data?.readAt ?? 0} error={error} onChanged={refresh} />
       <FeeChargesSection
         schedule={data?.schedule ?? null}
         charges={data?.charges ?? null}
+        readAt={data?.readAt ?? 0}
         clients={clients}
         error={error}
         onChanged={refresh}

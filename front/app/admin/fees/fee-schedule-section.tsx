@@ -57,18 +57,21 @@ function amountText(fee: Pick<FeeScheduleRow, "kind" | "fixed_eur" | "rate_bps" 
   }
 }
 
-function effectiveText(fee: FeeScheduleRow): string {
+function effectiveText(fee: FeeScheduleRow, readAt: number): string {
   if (fee.status === "draft") return fee.effective_from ? `Planned ${formatFeeDate(fee.effective_from)}` : "On publication";
   if (!fee.effective_from) return "—";
-  return Date.parse(fee.effective_from) > Date.now() ? `From ${formatFeeDate(fee.effective_from)}` : formatFeeDate(fee.effective_from);
+  return Date.parse(fee.effective_from) > readAt ? `From ${formatFeeDate(fee.effective_from)}` : formatFeeDate(fee.effective_from);
 }
 
 export function FeeScheduleSection({
   schedule,
+  readAt,
   error,
   onChanged,
 }: {
   schedule: FeeScheduleRow[] | null;
+  /** When the schedule was read (what "in effect" is judged against). */
+  readAt: number;
   error: string | null;
   onChanged: () => Promise<void>;
 }) {
@@ -179,7 +182,7 @@ export function FeeScheduleSection({
                   </td>
                   <td className="px-4 py-2 text-xs">{amountText(fee)}</td>
                   <td className="px-4 py-2 text-xs">{FEE_PAYER_LABEL[fee.payer]}</td>
-                  <td className="px-4 py-2 text-xs">{effectiveText(fee)}</td>
+                  <td className="px-4 py-2 text-xs">{effectiveText(fee, readAt)}</td>
                   <td className="px-4 py-2 text-xs">
                     <span className={`inline-flex rounded-full px-2 py-0.5 ring-1 ${STATUS_STYLE[fee.status]}`}>{STATUS_LABEL[fee.status]}</span>
                   </td>
@@ -247,6 +250,7 @@ export function FeeScheduleSection({
       {publishing && (
         <PublishModal
           fee={publishing}
+          readAt={readAt}
           replaces={publishedByKind.get(publishing.kind) ?? null}
           onClose={() => setPublishing(null)}
           onConfirm={async () => {
@@ -508,18 +512,20 @@ function FeeDraftModal({
 /** What publishing commits to, spelled out before the Super Admin signs. */
 function PublishModal({
   fee,
+  readAt,
   replaces,
   onClose,
   onConfirm,
 }: {
   fee: FeeScheduleRow;
+  readAt: number;
   replaces: FeeScheduleRow | null;
   onClose: () => void;
   onConfirm: () => Promise<void>;
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const paidByClient = fee.payer !== "issuer";
-  const from = fee.effective_from && Date.parse(fee.effective_from) > Date.now() ? formatFeeDate(fee.effective_from) : "the moment it is published";
+  const from = fee.effective_from && Date.parse(fee.effective_from) > readAt ? formatFeeDate(fee.effective_from) : "the moment it is published";
   return (
     <ConfirmModal
       open

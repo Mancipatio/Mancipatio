@@ -45,13 +45,14 @@ const TITLE = "Pricing — Manci";
 const LAUNCH_DESCRIPTION =
   "No platform fees during the launch phase. SPV incorporation, legal drafting and regulatory filings are third-party costs, quoted per engagement before any work starts.";
 
-type Schedule = { state: "none" } | { state: "published"; fees: PublicFee[] } | { state: "unavailable" };
+/** `checkedAt`: when the fees were read, what "applies from" is judged against. */
+type Schedule = { state: "none" } | { state: "published"; fees: PublicFee[]; checkedAt: number } | { state: "unavailable" };
 
 /** One read per request, shared by the metadata and the page. */
 const loadSchedule = cache(async (): Promise<Schedule> => {
   try {
     const fees = await loadPublishedFees();
-    return fees.length > 0 ? { state: "published", fees } : { state: "none" };
+    return fees.length > 0 ? { state: "published", fees, checkedAt: Date.now() } : { state: "none" };
   } catch {
     return { state: "unavailable" };
   }
@@ -161,8 +162,8 @@ function feeRows(fees: PublicFee[], now: number): { rows: TableRow[]; upcoming: 
   return { rows, upcoming };
 }
 
-function PublishedPricing({ fees }: { fees: PublicFee[] }) {
-  const { rows, upcoming } = feeRows(fees, Date.now());
+function PublishedPricing({ fees, checkedAt }: { fees: PublicFee[]; checkedAt: number }) {
+  const { rows, upcoming } = feeRows(fees, checkedAt);
   const notes = fees.filter((fee) => fee.public_note.trim());
   return (
     <>
@@ -230,7 +231,7 @@ function UnavailablePricing() {
 
 export default async function PricingPage() {
   const schedule = await loadSchedule();
-  if (schedule.state === "published") return <PublishedPricing fees={schedule.fees} />;
+  if (schedule.state === "published") return <PublishedPricing fees={schedule.fees} checkedAt={schedule.checkedAt} />;
   if (schedule.state === "unavailable") return <UnavailablePricing />;
   return <LaunchPricing />;
 }

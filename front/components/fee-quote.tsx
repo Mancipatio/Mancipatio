@@ -22,7 +22,17 @@ import { describeFee, formatEurCents, formatFeeDate, lowerFirst, quoteFee } from
 import { FEE_KIND_INVOICED_WHEN, FEE_PAYER_LABEL, type FeeKind, type PublicFee } from "@/lib/fees/schedule";
 import { fetchPublishedFees } from "@/lib/fees/client";
 
-type State = { phase: "loading" } | { phase: "ready"; fee: PublicFee | null } | { phase: "failed" };
+/** `checkedAt`: when the fees were read, what "applies from" is judged against (not the render time). */
+export type FeeQuoteState = { phase: "loading" } | { phase: "ready"; fees: PublicFee[]; checkedAt: number } | { phase: "failed" };
+
+type FeeQuoteProps = {
+  kind: FeeKind;
+  /** The EUR value the rate applies to, when the page knows it. */
+  baseEur?: number | string;
+  /** Units of a per-unit fee (migration_per_holder). */
+  quantity?: number;
+  className?: string;
+};
 
 /** The estimate line, or null when the inputs cannot be priced (never a guess). */
 function estimate(fee: PublicFee, baseEur: number | string | undefined, quantity: number | undefined): string | null {
@@ -34,38 +44,15 @@ function estimate(fee: PublicFee, baseEur: number | string | undefined, quantity
   }
 }
 
-export function FeeQuote({
+/** What FeeQuote renders for a given read state (pure). */
+export function FeeQuoteView({
+  state,
   kind,
   baseEur,
   quantity,
   className = "",
-}: {
-  kind: FeeKind;
-  /** The EUR value the rate applies to, when the page knows it. */
-  baseEur?: number | string;
-  /** Units of a per-unit fee (migration_per_holder). */
-  quantity?: number;
-  className?: string;
-}) {
-  const [state, setState] = useState<State>({ phase: "loading" });
-
-  useEffect(() => {
-    let live = true;
-    fetchPublishedFees().then(
-      (fees) => {
-        if (live) setState({ phase: "ready", fee: fees.find((fee) => fee.kind === kind) ?? null });
-      },
-      () => {
-        if (live) setState({ phase: "failed" });
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [kind]);
-
-  if (state.phase === "loading" || (state.phase === "ready" && state.fee === null)) return null;
-
+}: FeeQuoteProps & { state: FeeQuoteState }) {
+  if (state.phase === "loading") return null;
   const box = `rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] leading-relaxed text-slate-600 ${className}`;
   if (state.phase === "failed") {
     return (
@@ -78,9 +65,9 @@ export function FeeQuote({
       </p>
     );
   }
-
-  const fee = state.fee!;
-  const upcoming = Date.parse(fee.effective_from) > Date.now();
+  const fee = state.fees.find((row) => row.kind === kind);
+  if (!fee) return null;
+  const upcoming = Date.parse(fee.effective_from) > state.checkedAt;
   const estimated = estimate(fee, baseEur, quantity);
   return (
     <div className={box} data-fee-quote={kind}>
@@ -101,4 +88,25 @@ export function FeeQuote({
       </p>
     </div>
   );
+}
+
+export function FeeQuote(props: FeeQuoteProps) {
+  const [state, setState] = useState<FeeQuoteState>({ phase: "loading" });
+
+  useEffect(() => {
+    let live = true;
+    fetchPublishedFees().then(
+      (fees) => {
+        if (live) setState({ phase: "ready", fees, checkedAt: Date.now() });
+      },
+      () => {
+        if (live) setState({ phase: "failed" });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return <FeeQuoteView {...props} state={state} />;
 }

@@ -55,8 +55,8 @@ function baseLabel(kind: FeeKind): string {
   return `${noun.charAt(0).toUpperCase()}${noun.slice(1)} (EUR)`;
 }
 
-function inEffect(fee: FeeScheduleRow): boolean {
-  return fee.status === "published" && fee.effective_from !== null && Date.parse(fee.effective_from) <= Date.now();
+function inEffect(fee: FeeScheduleRow, readAt: number): boolean {
+  return fee.status === "published" && fee.effective_from !== null && Date.parse(fee.effective_from) <= readAt;
 }
 
 type Move = { charge: FeeChargeRow; move: FeeChargeMove["status"] };
@@ -64,12 +64,15 @@ type Move = { charge: FeeChargeRow; move: FeeChargeMove["status"] };
 export function FeeChargesSection({
   schedule,
   charges,
+  readAt,
   clients,
   error,
   onChanged,
 }: {
   schedule: FeeScheduleRow[] | null;
   charges: FeeChargeRow[] | null;
+  /** When the data was read (what "in effect" is judged against). */
+  readAt: number;
   clients: ClientRow[] | null;
   error: string | null;
   onChanged: () => Promise<void>;
@@ -79,7 +82,7 @@ export function FeeChargesSection({
   const [creating, setCreating] = useState(false);
   const [moving, setMoving] = useState<Move | null>(null);
 
-  const chargeable = useMemo(() => (schedule ?? []).filter(inEffect), [schedule]);
+  const chargeable = useMemo(() => (schedule ?? []).filter((fee) => inEffect(fee, readAt)), [schedule, readAt]);
   const scheduleById = useMemo(() => new Map((schedule ?? []).map((fee) => [fee.id, fee])), [schedule]);
   const clientById = useMemo(() => new Map((clients ?? []).map((client) => [client.id, client])), [clients]);
 
