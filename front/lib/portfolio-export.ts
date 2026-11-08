@@ -485,7 +485,7 @@ export function classifyPortfolioEvents(
       atSec, mint: c.mint, source: "record", type: "conversion_burn", unitsOut: units(c.amount) ?? ZERO,
       totalMicro: ZERO, signature: c.outcome_tx,
       notes: [
-        `Burned when conversion request ${c.id.slice(0, 8)} was registered: no proceeds on-chain; the registered shares replace these units (record them separately).`,
+        `Burned when conversion request ${c.id.slice(0, 8)} was registered: no proceeds on-chain; the registered shares replace these units (record them separately). The result shown is zero proceeds minus the FIFO cost.`,
       ],
     }));
   }

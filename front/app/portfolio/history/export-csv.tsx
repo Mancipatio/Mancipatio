@@ -55,7 +55,10 @@ export function PortfolioExportButton() {
         throw new Error("Your connected wallet or network changed. Try again.");
       }
       setState({ phase: "busy", step: "Reading share classes…" });
-      const networkData = await loadNetworkPreferIndexer(() => withRpcReadRetry(() => loadNetwork(client.runtime.rpc)));
+      const networkData = await loadNetworkPreferIndexer(() => withRpcReadRetry(() => loadNetwork(client.runtime.rpc))).catch(() => {
+        // Without the share classes no transfer can be told apart: no file rather than a wrong one.
+        throw new Error("Could not read the share classes from the network. Try again in a moment.");
+      });
       const labels = await shareClassLabels(networkData);
       const recordMints = new Set(
         [...records.purchases.map((p) => p.mint), ...records.otc.map((o) => o.mint), ...records.conversions.map((c) => c.mint)]

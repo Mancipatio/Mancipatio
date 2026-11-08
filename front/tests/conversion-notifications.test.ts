@@ -71,6 +71,7 @@ import {
   notifyOperator,
   sendFailureClass,
 } from "@/lib/server/notifications";
+import { SiwsError } from "@/lib/server/siws";
 import { POST as adminUpdate } from "@/app/api/conversion/admin-update/route";
 import { POST as cancel } from "@/app/api/conversion/cancel/route";
 import { POST as deposited } from "@/app/api/conversion/deposited/route";
@@ -411,8 +412,10 @@ describe("routes: the status write first, the email after the response", () => {
 
   it("admin-update: a refused write schedules nothing", async () => {
     seedRequest({ status: "requested" });
-    custody.validateCustodyUpdate.mockRejectedValueOnce(Object.assign(new Error("A verified custody vault is required"), { status: 409 }));
-    await post(adminUpdate, ADMIN, { id: REQUEST, status: "converted" }).catch(() => undefined);
+    custody.validateCustodyUpdate.mockRejectedValueOnce(new SiwsError(409, "A verified custody vault is required"));
+    const res = await post(adminUpdate, ADMIN, { id: REQUEST, status: "converted" });
+    expect(res).toEqual({ status: 409, body: { ok: false, error: "A verified custody vault is required" } });
+    expect(rows("conversion_requests")[0].status).toBe("requested");
     expect(later.tasks).toHaveLength(0);
   });
 
