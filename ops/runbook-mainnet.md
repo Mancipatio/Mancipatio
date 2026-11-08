@@ -4700,10 +4700,16 @@ python3 -c 'import json,hashlib,sys; p=json.load(open(sys.argv[1],encoding="utf-
 
 The signature (base58) is Ed25519 by the signer's public key (base58)
 over the UTF-8 bytes of `Manci certificate v1\nNumber: <number>\nSHA-256:
-<hash>` (format `raw`; for `offchain-v0` the signed bytes are the Solana
-off-chain message around that text, `front/lib/siws-offchain.ts`). The anchor
-transaction's memo is `<number> sha256:<hash>`, signed by the platform's
-Super Admin key.
+<hash>` (format `raw`). A Ledger behind a wallet app signs format
+`offchain-v0` (or the older `offchain-v0-legacy`) instead: a Solana
+off-chain message, version 0, application domain of 32 zero bytes, format 0
+(restricted ASCII) and the signer as its one signatory (the legacy layout
+has no domain and no signatory), whose text is that message with every
+character outside printable ASCII written as `\u` and four lowercase hex
+digits: the two line breaks become `\u000a`, which is also what the device
+shows (`front/lib/siws-offchain.ts`). The stored `signature_format` says
+which. The anchor transaction's memo is `<number> sha256:<hash>`, signed by
+the platform's Super Admin key.
 
 **Personal data**: a holder's name and ID number live only in the
 certificate's payload (admin-only routes, the printed certificate). A signed

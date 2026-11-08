@@ -72,8 +72,9 @@ const REFUSED_READS: ReadonlySet<string> = new Set(["account.wallets.transaction
 // Session actions that write (accepted exceptions in lib/siws-session.ts)
 // and still wait out maintenance: recording a certificate's signature or its
 // anchor changes what the public verification page answers. Nothing is lost
-// meanwhile: the wallet's signature and the recorded anchor stay valid, and
-// the certificate page posts them again afterwards.
+// meanwhile: the admin signs again afterwards (an Ed25519 signature of the
+// same message is the same signature), and the recorded anchor is attached
+// from the certificate page once maintenance is over.
 const REFUSED_SESSION_WRITES: ReadonlySet<string> = new Set(["certificates.sign", "certificates.anchor"]);
 
 /** True when maintenance refuses this signed action. */
