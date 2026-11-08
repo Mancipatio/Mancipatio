@@ -54,8 +54,10 @@ import {
 } from "@/lib/esop-schedule";
 
 /** `at` is a datetime-local value (browser zone); converted to unix UTC on
- *  submit — see parseLocalDateTime. */
-type TrancheRow = { at: string; pct: string };
+ *  submit — see parseLocalDateTime. `units`: the exact base units the ESOP
+ *  preset computed ("Edit tranches manually"), kept while only dates change;
+ *  editing a percentage, or adding or removing a row, drops them all. */
+type TrancheRow = { at: string; pct: string; units?: string };
 
 /** Per-recipient draft: `amount` is text in the form's current unit. */
 type RecipientDraft = { wallet: string; amount: string };
@@ -106,14 +108,35 @@ export function scheduleFromPercents(
     if (i === rows.length - 1) {
       amount = totalAllocated - assigned;
     } else {
+      // 1/10,000 of a percent: the same amounts as basis points for the
+      // two-decimal percentages people type, exact enough for the
+      // four-decimal ones the ESOP preset turns into rows.
       const pct = Number(r.pct);
       amount =
-        (totalAllocated * BigInt(Math.round(pct * 100))) / BigInt(10_000);
+        (totalAllocated * BigInt(Math.round(pct * 10_000))) / BigInt(1_000_000);
     }
     assigned += amount;
     out.push({ unlock_ts: ts, amount: amount.toString() });
   });
   return out;
+}
+
+/**
+ * The manual rows' schedule: the exact `units` when every row still carries
+ * them and they add up to the current total (the ESOP preset turned into
+ * rows, dates edited at most), else the percentages.
+ */
+export function scheduleFromRows(
+  rows: { unlockTs: number; pct: string; units?: string }[],
+  totalAllocated: bigint,
+): ScheduleEntry[] {
+  const exact =
+    rows.length > 0 &&
+    rows.every((r) => r.units !== undefined && /^\d+$/.test(r.units)) &&
+    rows.reduce((n, r) => n + BigInt(r.units as string), BigInt(0)) === totalAllocated;
+  return exact
+    ? rows.map((r) => ({ unlock_ts: r.unlockTs, amount: r.units as string }))
+    : scheduleFromPercents(rows, totalAllocated);
 }
 
 export function SeriesForm({
@@ -275,6 +298,7 @@ export function SeriesForm({
           unlockTs: parsed.ok ? parsed.ts : null,
           timeError: parsed.ok ? null : parsed.error,
           pct: t.pct,
+          units: t.units,
         };
       }),
     [tranches],
@@ -317,9 +341,11 @@ export function SeriesForm({
   function editEsopManually() {
     if (!esop?.ok) return;
     setTranches(
-      esopPercentRows(esop.tranches, esop.total).map((row) => ({
+      esopPercentRows(esop.tranches, esop.total).map((row, i) => ({
         at: unixToLocalDateTime(row.unlockTs),
         pct: row.pct,
+        // The exact amounts travel with the rows (computed on the real total only).
+        ...(esop.nominal ? {} : { units: esop.tranches[i].amount.toString() }),
       })),
     );
     setEsopStart(null);
@@ -388,6 +414,14 @@ export function SeriesForm({
         if (ts <= prev) return "Tranche times must be strictly ascending.";
         prev = ts;
       }
+      // The program refuses a tranche of 0; say so before anything is signed.
+      const amounts = scheduleFromRows(
+        parsedTranches.map((t) => ({ unlockTs: t.unlockTs ?? 0, pct: t.pct, units: t.units })),
+        totalAllocated,
+      );
+      const empty = amounts.findIndex((t) => BigInt(t.amount) <= BigInt(0));
+      if (empty >= 0)
+        return `Tranche #${empty + 1} would unlock 0 base units: use fewer tranches or a larger allocation.`;
     }
     if (timingMode === "approval") {
       const w = Math.round(Number(windowDays) * 86_400);
@@ -406,6 +440,7 @@ export function SeriesForm({
     const rows = parsedTranches.map((t) => ({
       unlockTs: t.unlockTs ?? 0,
       pct: t.pct,
+      units: t.units,
     }));
     const outRecipients: RecipientEntry[] = recipients.map((r, i) => {
       const p = parsedRecipients[i];
@@ -429,7 +464,7 @@ export function SeriesForm({
       schedule:
         esop?.ok && !esop.nominal
           ? esop.tranches.map((t) => ({ unlock_ts: t.unlockTs, amount: t.amount.toString() }))
-          : scheduleFromPercents(rows, totalAllocated),
+          : scheduleFromRows(rows, totalAllocated),
       recipients: outRecipients,
     };
   }
@@ -716,7 +751,7 @@ export function SeriesForm({
                         onChange={(e) =>
                           setTranches((ts) =>
                             ts.map((x, j) =>
-                              j === i ? { ...x, pct: e.target.value } : x,
+                              j === i ? { ...x, pct: e.target.value, units: undefined } : { ...x, units: undefined },
                             ),
                           )
                         }
@@ -727,7 +762,7 @@ export function SeriesForm({
                         <button
                           type="button"
                           onClick={() =>
-                            setTranches((ts) => ts.filter((_, j) => j !== i))
+                            setTranches((ts) => ts.filter((_, j) => j !== i).map((x) => ({ ...x, units: undefined })))
                           }
                           className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:border-slate-400"
                         >
@@ -741,7 +776,7 @@ export function SeriesForm({
                   <button
                     type="button"
                     onClick={() =>
-                      setTranches((ts) => [...ts, { at: "", pct: "" }])
+                      setTranches((ts) => [...ts.map((x) => ({ ...x, units: undefined })), { at: "", pct: "" }])
                     }
                     className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400"
                   >
