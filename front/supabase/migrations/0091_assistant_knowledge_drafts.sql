@@ -524,6 +524,79 @@ from jsonb_to_recordset($manci_knowledge_drafts$
         "date": "2026-11-08"
       }
     ]
+  },
+  {
+    "id": "verify-a-certificate",
+    "title": "How do I check a Manci certificate?",
+    "category": "procedure",
+    "keywords": [
+      "certificate",
+      "verify certificate",
+      "check certificate",
+      "certificate number",
+      "MC-2026",
+      "authority",
+      "proof of holding",
+      "SHA-256",
+      "signature",
+      "anchor",
+      "potvrda",
+      "sertifikat"
+    ],
+    "body": "Manci certificates of tokenized interest carry a number such as MC-2026-0001 and a SHA-256 fingerprint. Open the verification page and enter the number with the SHA-256 printed on the certificate, or choose the certificate's JSON file, which is read in your browser and not uploaded; the link printed on the certificate fills in both. With the number alone the page says only whether the certificate exists and is valid or revoked. With the fingerprint it also shows what the certificate states: the company, the asset and share class, the units and the share of the company at the Solana slot it names, the signer's key, the signature and the anchor transaction. It never shows a holder's name or identification number; if your copy of the JSON matches the fingerprint, the holder details in it are the ones that were signed. A valid certificate states on-chain facts at the slot it names; a holding may have changed since.",
+    "sources": [
+      {
+        "title": "Verify a certificate",
+        "href": "/certificates/verify"
+      }
+    ],
+    "provenance": [
+      {
+        "title": "Pull request #91: Certificates of tokenized interest: issue, sign, anchor, print and verify (0087)",
+        "section": "Assistant knowledge drafts",
+        "date": "2026-11-08"
+      }
+    ]
+  },
+  {
+    "id": "certificate-of-tokenized-interest",
+    "title": "What is a certificate of tokenized interest?",
+    "category": "answer",
+    "keywords": [
+      "certificate",
+      "certificate of tokenized interest",
+      "holding certificate",
+      "issuance certificate",
+      "confirmation for authorities",
+      "proof of ownership",
+      "state authority",
+      "tax office",
+      "court",
+      "bank"
+    ],
+    "body": "A certificate of tokenized interest is a numbered document the platform operator issues, for example for an authority. A holding certificate states how many units of a share class a wallet held at a given Solana slot and what share of the company they stand for on the asset's scale; an issuance certificate states a share class as issued (its maximum supply, the units issued and in circulation). Each certificate is signed with the operator's Super Admin wallet key and its fingerprint is anchored on Solana, so whoever holds it can check it with its number and fingerprint. It is not an extract from a company register and does not by itself transfer or register an interest: the rights attached to the units are those set out in the asset's legal documentation. To ask for one, contact the Manci team.",
+    "sources": [
+      {
+        "title": "Verify a certificate",
+        "href": "/certificates/verify"
+      },
+      {
+        "title": "Contact & support",
+        "href": "/contact"
+      }
+    ],
+    "provenance": [
+      {
+        "title": "Pull request #91: Certificates of tokenized interest: issue, sign, anchor, print and verify (0087)",
+        "section": "Assistant knowledge drafts",
+        "date": "2026-11-08"
+      },
+      {
+        "title": "Counsel review",
+        "section": "Legal wording to be confirmed before publication",
+        "date": "2026-11-08"
+      }
+    ]
   }
 ]
 $manci_knowledge_drafts$::jsonb) as seed
