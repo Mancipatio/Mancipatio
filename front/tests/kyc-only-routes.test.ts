@@ -418,6 +418,8 @@ describe("every API route is classified", () => {
     // The public "Supply and conversions" figures of an asset: aggregates and
     // non-personal register columns, like the asset page that shows them.
     "cap-table/public": "read",
+    // The public check of a certificate the operator issued (no personal data).
+    "certificates/verify": "read",
     "clients/accept-tos": "verification", "clients/link-wallet": "verification", "clients/me": "verification",
     "clients/onboarding-requirements": "verification", "clients/onboarding-view": "verification",
     "conversion/cancel": "exit", "conversion/reclaim": "exit", "conversion/deposited": "recording", "conversion/list-mine": "read",

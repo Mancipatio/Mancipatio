@@ -71,10 +71,17 @@ const ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
 // A read by shape, but it is the pre-send policy check of every wallet
 // transaction (lib/transaction-wallet-policy.ts), so it stops UI sends.
 const REFUSED_READS: ReadonlySet<string> = new Set(["account.wallets.transaction"]);
+// Session actions that write (accepted exceptions in lib/siws-session.ts)
+// and still wait out maintenance: recording a certificate's signature or its
+// anchor changes what the public verification page answers. Nothing is lost
+// meanwhile: the Super Admin signs again afterwards (an Ed25519 signature of
+// the same message is the same signature), and the recorded anchor is
+// attached from the certificate page once maintenance is over.
+const REFUSED_SESSION_WRITES: ReadonlySet<string> = new Set(["certificates.sign", "certificates.anchor"]);
 
 /** True when maintenance refuses this signed action. */
 export function refusedInMaintenance(action: string): boolean {
-  if (REFUSED_READS.has(action)) return true;
+  if (REFUSED_READS.has(action) || REFUSED_SESSION_WRITES.has(action)) return true;
   return !isSessionReadAction(action) && !ALLOWED_ACTIONS.has(action);
 }
 

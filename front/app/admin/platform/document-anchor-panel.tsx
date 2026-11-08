@@ -23,6 +23,13 @@
 //
 // Shown only when the connected wallet is the on-chain Super Admin
 // (Platform.admin, read by the page).
+//
+// With `preset` (the certificate page, app/admin/certificates) the reference
+// and the hash are fixed (a certificate's number and the SHA-256 of its
+// payload), the file chooser and the recent-anchor list are left out, and
+// `onRecorded` hears of the recorded anchor of exactly that reference and
+// hash, so the page can attach it to the certificate. The send, the pending
+// anchor kept in this browser and the record are the same as here.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { WalletSession } from "@solana/client";
@@ -39,6 +46,7 @@ import {
   documentAnchorPanelVisible,
   documentAnchorReferenceError,
   normalizeSha256Input,
+  type DocumentAnchor,
   type DocumentAnchorRecord,
 } from "@/lib/document-anchor";
 import {
@@ -81,22 +89,30 @@ type AnchorList =
   | { state: "error"; text: string }
   | { state: "ready"; rows: DocumentAnchorRecord[] };
 
-export function DocumentAnchorPanel({ superAdmin }: { superAdmin: string }) {
+type PanelPreset = {
+  /** The fixed reference and hash (a certificate's number and payload hash). */
+  preset?: DocumentAnchor;
+  /** The recorded anchor of exactly `preset` (never another one this browser kept). */
+  onRecorded?: (record: RecordedAnchor) => void;
+};
+
+export function DocumentAnchorPanel({ superAdmin, preset, onRecorded }: { superAdmin: string } & PanelPreset) {
   const conn = useWalletConnection();
   const session = conn.wallet;
   const wallet = session?.account.address.toString() ?? null;
   if (!session || !wallet || !documentAnchorPanelVisible(wallet, superAdmin)) return null;
-  return <AnchorForm key={wallet} session={session} wallet={wallet} />;
+  const key = preset ? `${wallet}:${preset.reference}:${preset.sha256}` : wallet;
+  return <AnchorForm key={key} session={session} wallet={wallet} preset={preset} onRecorded={onRecorded} />;
 }
 
-function AnchorForm({ session, wallet }: { session: WalletSession; wallet: string }) {
+function AnchorForm({ session, wallet, preset, onRecorded }: { session: WalletSession; wallet: string } & PanelPreset) {
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const rpc = client.runtime.rpc;
   const [network] = useState<Network>(() => detectNetwork());
-  const [referenceInput, setReferenceInput] = useState("");
-  const [hashInput, setHashInput] = useState("");
+  const [referenceInput, setReferenceInput] = useState(preset?.reference ?? "");
+  const [hashInput, setHashInput] = useState(preset?.sha256 ?? "");
   const [file, setFile] = useState<{ name: string; size: number; sha256: string } | null>(null);
   const [hashing, setHashing] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -132,8 +148,11 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
     [session],
   );
 
-  // An existing wallet session only: opening the page never prompts.
+  // An existing wallet session only: opening the page never prompts. A
+  // preset panel shows no list.
+  const listed = !preset;
   useEffect(() => {
+    if (!listed) return;
     let cancelled = false;
     void listDocumentAnchors(session, false).then(
       (rows) => {
@@ -146,7 +165,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
     return () => {
       cancelled = true;
     };
-  }, [session]);
+  }, [session, listed]);
 
   const reference = referenceInput.trim();
   const referenceError = referenceInput === "" ? null : documentAnchorReferenceError(reference);
@@ -212,7 +231,11 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
       const recorded = await recordDocumentAnchorWithRetry(session, pending);
       clearPendingAnchor(pending.signature);
       setResult((r) => (r && r.anchor.signature === pending.signature ? withRecordedAnchor(r, recorded) : r));
-      void loadAnchors(false);
+      if (preset) {
+        if (recorded.reference === preset.reference && recorded.sha256 === preset.sha256) onRecorded?.(recorded);
+      } else {
+        void loadAnchors(false);
+      }
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
       setResult((r) => (r && r.anchor.signature === pending.signature ? { ...r, recordError: text } : r));
@@ -292,10 +315,12 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
           setBusy(null);
           return;
         }
-        toast.showTx(signature, { title: "Document anchored" });
-        setReferenceInput("");
-        setHashInput("");
-        setFile(null);
+        toast.showTx(signature, { title: preset ? "Certificate anchored" : "Document anchored" });
+        if (!preset) {
+          setReferenceInput("");
+          setHashInput("");
+          setFile(null);
+        }
       },
       record,
     });
@@ -303,77 +328,81 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
 
   return (
     <div className={CARD}>
-      <h2 className="text-lg font-semibold text-slate-900">Anchor a document</h2>
+      <h2 className="text-lg font-semibold text-slate-900">{preset ? "Anchor on chain" : "Anchor a document"}</h2>
       <p className="mt-1 text-[13px] leading-relaxed text-slate-600">
-        Writes a document&apos;s SHA-256 fingerprint with a reference on chain, in a memo signed by the Super Admin
-        wallet, so anyone can later check the fingerprint and the time on an explorer. The document itself is never
-        uploaded: a chosen file is hashed in this browser.
+        {preset
+          ? "Writes the certificate's number and SHA-256 on chain, in a memo signed by the Super Admin wallet, so anyone can check the fingerprint and the time on an explorer. Once the network finalizes it, it is recorded and attached to the certificate."
+          : "Writes a document's SHA-256 fingerprint with a reference on chain, in a memo signed by the Super Admin wallet, so anyone can later check the fingerprint and the time on an explorer. The document itself is never uploaded: a chosen file is hashed in this browser."}
       </p>
 
       <div className="mt-4 space-y-4">
-        <label className="block">
-          <span className="mb-1 block text-xs font-medium text-slate-600">Reference</span>
-          <input
-            value={referenceInput}
-            onChange={(e) => setReferenceInput(e.target.value)}
-            placeholder="MANCI-2026-0001"
-            spellCheck={false}
-            autoComplete="off"
-            // Above the 64-character rule on purpose: a longer paste is shown
-            // with "at most 64 characters", never silently cut into another
-            // reference that would go on chain.
-            maxLength={80}
-            disabled={working}
-            className={`${INPUT} font-mono`}
-            aria-invalid={referenceError ? true : undefined}
-          />
-          <span className="mt-1 block text-xs text-slate-500">
-            Up to 64 characters: letters, digits and . _ : / - (no spaces, no &quot;sha256:&quot;), starting with a letter or a
-            digit.
-          </span>
-          {referenceError && <span className="mt-1 block text-xs text-red-600">{referenceError}</span>}
-          {referenceMissing && (
-            <span className="mt-1 block text-xs text-amber-700">Enter a reference: the memo needs one next to the hash.</span>
-          )}
-        </label>
-
-        <div>
-          <span className="mb-1 block text-xs font-medium text-slate-600">Document</span>
-          <div className="flex flex-wrap items-center gap-2">
+        {!preset && (
+          <>
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-slate-600">Reference</span>
             <input
-              ref={fileInput}
-              type="file"
-              aria-label="Document file (hashed in this browser, not uploaded)"
-              disabled={working || hashing}
-              onChange={(e) => void onFile(e.target.files?.[0])}
-              className="block max-w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-800 hover:file:border-slate-400"
-            />
-            {hashing && <span className="text-xs text-slate-500">Hashing…</span>}
-          </div>
-          {fileError && <p className="mt-1 text-xs text-red-600">{fileError}</p>}
-          {fileMatches && file && (
-            <p className="mt-1 text-xs text-emerald-700">
-              SHA-256 of <span className="font-medium">{file.name}</span> ({file.size.toLocaleString("en-US")} bytes),
-              computed in this browser.
-            </p>
-          )}
-          <label className="mt-3 block">
-            <span className="mb-1 block text-xs text-slate-500">
-              …or paste its SHA-256 (64 hex characters, or the whole <code className="font-mono">shasum -a 256</code> line)
-            </span>
-            <input
-              value={hashInput}
-              onChange={(e) => setHashInput(e.target.value)}
-              placeholder="64 hex characters"
+              value={referenceInput}
+              onChange={(e) => setReferenceInput(e.target.value)}
+              placeholder="MANCI-2026-0001"
               spellCheck={false}
               autoComplete="off"
+              // Above the 64-character rule on purpose: a longer paste is shown
+              // with "at most 64 characters", never silently cut into another
+              // reference that would go on chain.
+              maxLength={80}
               disabled={working}
-              className={`${INPUT} font-mono text-xs`}
-              aria-invalid={hashError ? true : undefined}
+              className={`${INPUT} font-mono`}
+              aria-invalid={referenceError ? true : undefined}
             />
+            <span className="mt-1 block text-xs text-slate-500">
+              Up to 64 characters: letters, digits and . _ : / - (no spaces, no &quot;sha256:&quot;), starting with a letter or a
+              digit.
+            </span>
+            {referenceError && <span className="mt-1 block text-xs text-red-600">{referenceError}</span>}
+            {referenceMissing && (
+              <span className="mt-1 block text-xs text-amber-700">Enter a reference: the memo needs one next to the hash.</span>
+            )}
           </label>
-          {hashError && <p className="mt-1 text-xs text-red-600">{hashError}</p>}
-        </div>
+
+          <div>
+            <span className="mb-1 block text-xs font-medium text-slate-600">Document</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInput}
+                type="file"
+                aria-label="Document file (hashed in this browser, not uploaded)"
+                disabled={working || hashing}
+                onChange={(e) => void onFile(e.target.files?.[0])}
+                className="block max-w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-800 hover:file:border-slate-400"
+              />
+              {hashing && <span className="text-xs text-slate-500">Hashing…</span>}
+            </div>
+            {fileError && <p className="mt-1 text-xs text-red-600">{fileError}</p>}
+            {fileMatches && file && (
+              <p className="mt-1 text-xs text-emerald-700">
+                SHA-256 of <span className="font-medium">{file.name}</span> ({file.size.toLocaleString("en-US")} bytes),
+                computed in this browser.
+              </p>
+            )}
+            <label className="mt-3 block">
+              <span className="mb-1 block text-xs text-slate-500">
+                …or paste its SHA-256 (64 hex characters, or the whole <code className="font-mono">shasum -a 256</code> line)
+              </span>
+              <input
+                value={hashInput}
+                onChange={(e) => setHashInput(e.target.value)}
+                placeholder="64 hex characters"
+                spellCheck={false}
+                autoComplete="off"
+                disabled={working}
+                className={`${INPUT} font-mono text-xs`}
+                aria-invalid={hashError ? true : undefined}
+              />
+            </label>
+            {hashError && <p className="mt-1 text-xs text-red-600">{hashError}</p>}
+          </div>
+          </>
+        )}
 
         {memo && (
           <dl className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-[13px]">
@@ -437,17 +466,19 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
         />
       )}
 
-      <div className="mt-6 border-t border-slate-100 pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Recent anchors · {networkLabel(network)}</p>
-          {anchors.state === "ready" && (
-            <button type="button" className={SMALL_BTN} disabled={refreshing} onClick={() => void refreshAnchors()}>
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
-          )}
+      {listed && (
+        <div className="mt-6 border-t border-slate-100 pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Recent anchors · {networkLabel(network)}</p>
+            {anchors.state === "ready" && (
+              <button type="button" className={SMALL_BTN} disabled={refreshing} onClick={() => void refreshAnchors()}>
+                {refreshing ? "Refreshing…" : "Refresh"}
+              </button>
+            )}
+          </div>
+          <AnchorListView anchors={anchors} network={network} onSignIn={() => void loadAnchors("session-only")} onRetry={() => void loadAnchors(true)} />
         </div>
-        <AnchorListView anchors={anchors} network={network} onSignIn={() => void loadAnchors("session-only")} onRetry={() => void loadAnchors(true)} />
-      </div>
+      )}
 
       <ConfirmModal
         open={confirmOpen && !!memo}

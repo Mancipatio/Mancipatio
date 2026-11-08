@@ -144,6 +144,24 @@ export async function findAnchorRecord(sb: SupabaseClient, network: string, sign
   return row ? recordOf(network, row) : null;
 }
 
+/**
+ * The recorded anchors of `reference` on `network`, oldest first (a
+ * certificate takes the first anchor of its number and hash:
+ * app/api/admin/certificates/anchor). Rows that are not complete anchors of
+ * the record route are left out. 503 when the log cannot be read.
+ */
+export async function findAnchorRecordsForReference(sb: SupabaseClient, network: string, reference: string): Promise<DocumentAnchorRecord[]> {
+  const { data, error } = await anchorRows(sb, network)
+    .eq("target_label", reference)
+    .order("created_at", { ascending: true })
+    .limit(DOCUMENT_ANCHOR_LIST_LIMIT);
+  if (error) throw new SiwsError(503, "Audit log unavailable — try again");
+  return ((data ?? []) as AnchorRowLike[]).flatMap((row) => {
+    const record = recordOf(network, row);
+    return record && record.reference === reference ? [record] : [];
+  });
+}
+
 /** The newest recorded anchors on `network` (rows that are not complete anchors of the record route are left out). */
 export async function listAnchorRecords(sb: SupabaseClient, network: string): Promise<DocumentAnchorRecord[]> {
   const { data, error } = await anchorRows(sb, network)

@@ -42,7 +42,8 @@ export function WalletSigningNotice() {
                   <p className="mt-0.5 text-xs text-slate-600">
                     Your wallet could not sign the plain message, so Manci is asking again as a Solana
                     off-chain message, the format a Ledger shows on its screen. Check that the device shows
-                    the request starting with mancipatio:v2 and this site&apos;s address before you approve.
+                    the request you started before you approve: a site request starts with mancipatio:v2 and
+                    this site&apos;s address, a certificate with Manci certificate v1.
                   </p>
                 </>
               )}

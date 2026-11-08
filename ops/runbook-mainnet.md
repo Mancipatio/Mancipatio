@@ -4841,6 +4841,144 @@ What the server checks, every time (nothing from a browser is trusted):
 - Database: dropping 0085 (the statements in its header) is possible only
   while no campaign has opened.
 
+## 25. Certificates for authorities
+
+The product version of the confirmation made by hand on 2026-10-04
+(`MANCI-2026-0001`, a PDF signed with the operator's key): the Super Admin
+creates a numbered certificate of tokenized interest, signs it with the
+operator's key and anchors its hash on chain, and whoever holds the
+certificate checks it on `/certificates/verify` with its number and SHA-256.
+Two kinds: **holding** (the units of one share class a wallet holds, and the
+share of the company they stand for) and **issuance** (a share class as
+issued: maximum supply, units issued to date, units in circulation). Numbers run per network and year: `MC-2026-0001`,
+`MC-2026-0002`, … (the 2026-10-04 confirmation keeps its own reference and
+anchor). Code: `front/lib/certificates/`, `front/app/api/admin/certificates/`,
+`front/app/admin/certificates/`, `front/app/(marketing)/certificates/verify/`.
+
+**Database: migration `0087_certificates.sql`** (tables `certificates` and
+`certificate_counters`, the allocator `allocate_certificate_number`, the
+lifecycle guard). Expand-only; the certificate pages answer "not set up on
+this database yet (migration 0087)" until it is applied. No environment
+variable. Apply devnet first, then mainnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0087
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0087_certificates.sql
+bash scripts/ops/backup.sh mainnet pre-0087
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f supabase/migrations/0087_certificates.sql
+```
+
+What the database enforces: a row is born a draft; draft → signed →
+anchored, and any status → revoked (with who and why); revoked is final;
+the payload, its hash and the signer never change, a signature or an anchor
+never changes once set, and only a draft can be deleted. The stored hash is
+always the SHA-256 of the stored canonical text, and the row's columns
+(number, kind, network, signer, asset, class, holder wallet) always equal the
+payload's. No browser role can read either table; the counter is written
+only by the allocator.
+
+**Issuing one** (`/admin/certificates`): any admin lists, previews, prints,
+downloads and revokes; only the Super Admin creates, signs and anchors
+(issuing an official certificate is the operator's act; the routes check
+`Platform.admin`, and another admin sees on the page why those buttons are
+off):
+
+1. *New certificate*: the kind, the share class and, for a holding, the
+   holder's wallet. *Preview* reads the chain (finalized) and fills in the
+   company's details and the scale from the last certificate of the asset,
+   else the tokenization record, the issuer profile or the SPV. Check every
+   field against the company register: legal name, registration number,
+   registered address, and *units for 100 %* (MANCI-2026: 10000, so 1 unit =
+   0.01 %). The holder's name and identification number are optional and are
+   personal data: fill them in only when the certificate must name the
+   holder. Evidence transactions (optional, up to 10) must be finalized and
+   successful. Read the statement in the preview.
+2. *Create draft* (the Super Admin's wallet signs the request). The server
+   reads the chain again, takes the next number and stores the canonical
+   payload with a random salt; the draft names the creating wallet as its
+   signer. A draft is not public. A wrong draft is *Discarded* (its number
+   stays on record as discarded, so the series has no silent gaps; only a
+   failed insert right after the allocation can skip a number).
+3. *Sign with your wallet* (the Super Admin who created the draft, its
+   signer). The wallet signs three lines, `Manci certificate v1` /
+   `Number: …` / `SHA-256: …`; a Ledger behind Phantom or Solflare signs
+   them inside a Solana off-chain message, which is accepted and recorded as
+   such. The server verifies the Ed25519 signature
+   against the stored row before it records it. From now on the public page
+   answers "valid".
+4. *Anchor on chain*: with the Super Admin's wallet connected, the certificate
+   panel sends the memo `MC-… sha256:<hash>` through the document-anchor
+   flow (`ops/sop-admin.md` "Document anchors": the same send, finalized
+   check and audit row) and attaches the anchor once it is recorded. If the
+   memo was sent elsewhere (Admin → Platform → *Anchor a document* with the
+   number as the reference and the certificate's SHA-256), the Super Admin
+   clicks *Attach recorded anchor*. As for every document anchor: record it
+   before the Super Admin key is rotated.
+5. *Print view* → *Print or save as PDF* (A4; the PDF takes the number as its
+   file name). *Download JSON* saves the exact signed bytes for the holder;
+   their SHA-256 is the certificate's. Give the authority the PDF (and the
+   JSON when it wants to check the holder's details) and the link printed on
+   it, `/certificates/verify?number=MC-…&sha256=…`: the link carries the
+   certificate's hash, which is what opens its contents on the public page.
+
+**Revoking**: *Revoke certificate* with a reason (a fresh wallet signature).
+The public page then answers "revoked" with the date; the reason stays
+admin-only. An anchor stays on chain; the revocation is recorded off chain.
+Signing and attaching an anchor wait out maintenance mode; creating and
+revoking need a fresh signature and are refused during maintenance like any
+write.
+
+**What the public page shows**: numbers are sequential, so a number alone
+must not list who obtained certificates. With the number only, or with a
+SHA-256 that is not the certificate's, the page (and `POST
+/api/certificates/verify`) answers only whether the certificate exists and
+its status: valid, revoked with the date, or invalid (its stored hash or
+signature fails the re-check); not found for a draft or a draft discarded
+before signing (never issued); and asks for the SHA-256 printed on the
+certificate (or its JSON file, hashed in the browser). No wallet, units,
+percentages, company, asset or class, signer, signature or anchor. With the
+number and the certificate's own SHA-256 (the printed link carries it) it
+shows everything the certificate states: the kind, issue date, company,
+asset and share class, units and percentages, the holder's wallet, the
+signer, the signature (re-verified on every check) and the anchor
+transaction. Never the holder's name or ID number, the statement that
+repeats them, or the revocation reason. The route stays rate-limited per
+client address (a burst limit per instance and a shared limit of 60 checks
+per 10 minutes). Limit: an anchored certificate's memo publishes its number
+and hash on chain, so whoever reads the Super Admin key's memos can open
+anchored certificates one at a time; the units and wallets they show are on
+chain anyway.
+
+**Checking a certificate without the site** (for an authority's own
+script): the hash is SHA-256 over the canonical JSON in UTF-8; the encoding
+(sorted keys, no whitespace, NFC strings, amounts as decimal strings) is
+what Python's `json.dumps(payload, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)` produces:
+
+```
+python3 -c 'import json,hashlib,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); print(hashlib.sha256(json.dumps(p,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")).hexdigest())' MC-2026-0001.json
+```
+
+The signature (base58) is Ed25519 by the signer's public key (base58)
+over the UTF-8 bytes of `Manci certificate v1\nNumber: <number>\nSHA-256:
+<hash>` (format `raw`). A Ledger behind a wallet app signs format
+`offchain-v0` (or the older `offchain-v0-legacy`) instead: a Solana
+off-chain message, version 0, application domain of 32 zero bytes, format 0
+(restricted ASCII) and the signer as its one signatory (the legacy layout
+has no domain and no signatory), whose text is that message with every
+character outside printable ASCII written as `\u` and four lowercase hex
+digits: the two line breaks become `\u000a`, which is also what the device
+shows (`front/lib/siws-offchain.ts`). The stored `signature_format` says
+which. The anchor transaction's memo is `<number> sha256:<hash>`, signed by
+the platform's Super Admin key.
+
+**Personal data**: a holder's name and ID number live only in the
+certificate's payload (admin-only routes, the printed certificate). A signed
+payload cannot change, and the client-dossier erasure
+(`/api/clients/anonymize`) does not reach it: whether and how a certificate's
+holder details are redacted later (for example keeping the hash and dropping
+the stored text) is counsel's decision, not built yet.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):
