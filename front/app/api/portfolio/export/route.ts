@@ -25,8 +25,9 @@
 // whatever the module switches say (the holder's own records, like
 // /api/conversion/list-mine). A record read that fails answers 503: an export
 // without some purchases would be wrong, not partial. Unreadable EUR rates
-// only leave the EUR columns empty. Each list is capped at RECORD_LIMIT rows;
-// reaching the cap sets `truncated`, and the file says so.
+// only leave the EUR columns empty. Each list is read newest first and capped
+// at RECORD_LIMIT rows: reaching the cap drops the oldest rows, sets
+// `truncated`, and the file says older records may be missing.
 
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -77,7 +78,7 @@ async function readPurchases(sb: SupabaseClient, network: Network, wallet: strin
     .eq("investor_wallet", wallet)
     .eq("evidence_verified", true)
     .eq("status", "settled")
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(RECORD_LIMIT)
     .abortSignal(signal);
   if (error) throw new SiwsError(503, UNAVAILABLE);
@@ -129,7 +130,7 @@ async function readOtc(sb: SupabaseClient, network: Network, wallet: string, sig
         .eq("network", network)
         .eq(column, wallet)
         .in("status", ["created", "completed", "cancelled", "expired"])
-        .order("created_at", { ascending: true })
+        .order("created_at", { ascending: false })
         .limit(RECORD_LIMIT)
         .abortSignal(signal),
     ),
@@ -166,7 +167,7 @@ async function readConversions(sb: SupabaseClient, network: Network, wallet: str
     .select("id, created_at, updated_at, share_class_pda, mint, asset_label, amount, status, vault_pda, deposit_tx, outcome_tx")
     .eq("network", network)
     .eq("holder_wallet", wallet)
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(RECORD_LIMIT)
     .abortSignal(signal);
   if (error) throw new SiwsError(503, UNAVAILABLE);

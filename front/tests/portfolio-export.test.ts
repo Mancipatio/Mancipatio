@@ -267,9 +267,61 @@ describe("classification", () => {
     expect(data.events[0].notes.join(" ")).toMatch(/could not be read in full/);
     expect(data.events[1].notes.join(" ")).toMatch(/date recorded by Manci/);
     expect(data.events[1].signature).toBeNull();
-    expect(summaryOf(data)).toMatchObject({ unitsHeld: B(4), walletBalance: null, difference: null });
+    // The burn's deposit was never seen: the escrow stays at zero, never negative.
+    expect(summaryOf(data)).toMatchObject({ unitsHeld: B(4), walletBalance: null, difference: null, escrowUnits: B(0) });
     expect(summaryOf(data).flags).toContain("Wallet balance not read");
     expect(data.notes[0]).toMatch(/could not be read: transfers outside Manci are missing/);
+  });
+
+  it("releases from an escrow only what was seen going in, and reports the unseen deposit as a difference", () => {
+    const data = buildPortfolioExport({
+      records: records({ purchases: [purchase(1, 10, 100)], conversions: [conversion({ amount: "3", deposit_tx: null })] }),
+      chain: chain([move(1, 10)], { [MINT]: 7 }),
+      labels,
+    });
+    expect(data.events.map((e) => e.type)).toEqual(["purchase", "conversion_burn"]);
+    expect(summaryOf(data)).toMatchObject({ unitsHeld: B(7), walletBalance: B(7), escrowUnits: B(0), difference: B(0) });
+    const partly = buildPortfolioExport({
+      records: records({ purchases: [purchase(1, 10, 100)], conversions: [conversion({ amount: "3", status: "returned", deposit_tx: null, outcome_tx: sig(71) })] }),
+      chain: chain([move(1, 10), move(71, 3)], { [MINT]: 10 }),
+      labels,
+    });
+    // A return whose deposit the history lacks: the escrow stays at zero instead of going negative.
+    expect(summaryOf(partly)).toMatchObject({ unitsHeld: B(10), escrowUnits: B(0), difference: B(0) });
+  });
+
+  it("recognizes a conversion escrow by its vault when no transaction is recorded on the request", () => {
+    const data = buildPortfolioExport({
+      records: records({ purchases: [purchase(1, 10, 100)], conversions: [conversion({ status: "deposited", deposit_tx: null, outcome_tx: null })] }),
+      chain: chain([move(1, 10), move(72, -4, { owners: [VAULT] })], { [MINT]: 6 }),
+      labels,
+    });
+    expect(data.events.map((e) => e.type)).toEqual(["purchase", "escrow_deposit_conversion"]);
+    expect(data.events[1].signature).toBe(sig(72));
+    expect(summaryOf(data)).toMatchObject({ unitsHeld: B(10), escrowUnits: B(4), difference: B(0) });
+  });
+
+  it("counts a purchase whose sale has no mint on record once, only into units nothing else explains", () => {
+    const resolved = purchase(1, 10, 100);
+    const unresolved = purchase(1, 5, 50, { id: "p-unresolved", mint: null, share_class_pda: null });
+    const data = buildPortfolioExport({
+      records: records({ purchases: [resolved, unresolved] }),
+      chain: chain([move(1, 10), move(1, 5, { mint: MINT_B })], { [MINT]: 10, [MINT_B]: 5 }),
+      labels,
+    });
+    expect(data.events.map((e) => [e.type, e.mint, e.unitsIn])).toEqual([
+      ["purchase", MINT, B(10)], ["purchase", MINT_B, B(5)],
+    ]);
+    expect(summaryOf(data, MINT)).toMatchObject({ unitsHeld: B(10), costBasisMicro: B(100_000_000), difference: B(0) });
+    expect(summaryOf(data, MINT_B)).toMatchObject({ unitsHeld: B(5), costBasisMicro: B(50_000_000), difference: B(0) });
+    // One that fits no movement is not booked anywhere, and the file says so.
+    const misfit = buildPortfolioExport({
+      records: records({ purchases: [resolved, { ...unresolved, units: "7" }] }),
+      chain: chain([move(1, 10), move(1, 5, { mint: MINT_B })], { [MINT]: 10, [MINT_B]: 5 }),
+      labels,
+    });
+    expect(misfit.events.map((e) => [e.type, e.mint])).toEqual([["purchase", MINT], ["transfer_in", MINT_B]]);
+    expect(misfit.notes.join(" ")).toMatch(/1 recorded purchase\(s\) could not be matched to a share class/);
   });
 
   it("leaves a purchase in another token unpriced and says so", () => {

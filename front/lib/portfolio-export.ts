@@ -17,7 +17,10 @@
 // or return (the request's deposit_tx / outcome_tx, or the vault as the
 // counter-account's owner), an OTC sale, purchase, escrow deposit or refund
 // (the deal PDA owns the counter-account), else a transfer in or out with an
-// unknown price. Three kinds of record have no movement of their own and are
+// unknown price. An escrow the records do not name (an on-chain OTC offer, a
+// delivery vault: both modules are off on mainnet) therefore reads as a
+// transfer, flagged as unknown, never as custody. Three kinds of record have
+// no movement of their own and are
 // added from the record: a conversion's burn (the units leave the escrow,
 // not the wallet), and a verified purchase or a completed OTC deal the chain
 // history did not show (dated by the record and flagged).
@@ -28,9 +31,11 @@
 // and a transfer out unknown proceeds; a conversion burn is a disposal with
 // zero proceeds (the registered stake replaces the units; its value is for
 // the holder's adviser). Escrow deposits and returns are custody: the units
-// stay the holder's and the lots do not move. The summary reconciles the
-// lots with the wallet's balance plus its units in escrow and flags any
-// difference (a history that could not be read in full).
+// stay the holder's and the lots do not move. Units in escrow are counted
+// per escrow, and a burn or return releases at most what was seen going in
+// (never a negative escrow). The summary reconciles the lots with the
+// wallet's balance plus its units in escrow and flags any difference (a
+// history that could not be read in full).
 //
 // Money: USDC amounts are integers of micro-USDC (6 decimals, bigint), never
 // floats. A per-unit price is the total divided by the units, rounded half
@@ -237,6 +242,8 @@ export type ExportEvent = {
   signature: string | null;
   source: "chain" | "record";
   notes: string[];
+  /** Escrow legs and burns: the escrow ("conversion:<id>", "otc:<id>") the units go into or leave. */
+  escrowRef: string | null;
   /** Disposals: the FIFO cost of the units given up; null when any of it is unknown. */
   fifoCostMicro: bigint | null;
   /** Disposals: proceeds minus FIFO cost; null when either is unknown. */
@@ -356,16 +363,20 @@ function usdcMicro(network: Network, paymentMint: string, amount: string, decima
 type Draft = Omit<ExportEvent, "fifoCostMicro" | "resultMicro">;
 
 function draft(over: Partial<Draft> & Pick<Draft, "mint" | "type" | "source">): Draft {
-  return { atSec: null, unitsIn: ZERO, unitsOut: ZERO, totalMicro: null, signature: null, notes: [], ...over };
+  return { atSec: null, unitsIn: ZERO, unitsOut: ZERO, totalMicro: null, signature: null, notes: [], escrowRef: null, ...over };
 }
 
 const OTHER_TOKEN = (mint: string) => `Paid in another token (${short(mint)}): no USDC price.`;
 
-/** One row per event, before FIFO (see the header for the order of the rules). */
+/**
+ * One row per event, before FIFO (see the header for the order of the
+ * rules), and the purchases no share class could take: an unresolved sale
+ * (mint null) that fit no movement of its transaction.
+ */
 export function classifyPortfolioEvents(
   records: PortfolioExportRecords,
   chain: ChainHistory | null,
-): Draft[] {
+): { drafts: Draft[]; unplaced: ExportPurchaseRecord[] } {
   const network = records.network;
   const out: Draft[] = [];
   const purchasesBySig = new Map<string, ExportPurchaseRecord[]>();
@@ -395,8 +406,22 @@ export function classifyPortfolioEvents(
   for (const m of movements) {
     const base = { atSec: m.blockTime, mint: m.mint, signature: m.signature, source: "chain" as const };
     const amount = m.delta < ZERO ? -m.delta : m.delta;
-    // A purchase whose sale the mirror did not resolve (mint null) still matches its own transaction.
-    const purchases = (purchasesBySig.get(m.signature) ?? []).filter((p) => p.mint === m.mint || p.mint === null);
+    // Each purchase counts once: the ones of this mint first, then one whose
+    // sale the mirror did not resolve (mint null), only into units nothing
+    // else in the movement explains.
+    const unmatched = (purchasesBySig.get(m.signature) ?? []).filter((p) => !matchedPurchases.has(p.id));
+    const exact = unmatched.filter((p) => p.mint === m.mint);
+    const exactUnits = exact.reduce((sum, p) => sum + (units(p.units) ?? ZERO), ZERO);
+    const unresolved: ExportPurchaseRecord[] = [];
+    let room = m.delta - exactUnits;
+    for (const p of unmatched.filter((q) => q.mint === null)) {
+      const n = units(p.units) ?? ZERO;
+      if (n > ZERO && n <= room) {
+        unresolved.push(p);
+        room -= n;
+      }
+    }
+    const purchases = [...exact, ...unresolved];
     if (purchases.length > 0 && m.delta > ZERO) {
       let remaining = m.delta;
       for (const p of purchases) {
@@ -419,10 +444,11 @@ export function classifyPortfolioEvents(
       (m.delta < ZERO ? conversionByDeposit.get(m.signature) : conversionByReturn.get(m.signature)) ??
       records.conversions.find((c) => c.vault_pda !== null && m.owners.includes(c.vault_pda));
     if (conversion && conversion.mint === m.mint) {
+      const escrowRef = `conversion:${conversion.id}`;
       out.push(m.delta < ZERO
-        ? draft({ ...base, type: "escrow_deposit_conversion", unitsOut: amount,
+        ? draft({ ...base, type: "escrow_deposit_conversion", unitsOut: amount, escrowRef,
             notes: [`Into the escrow of conversion request ${conversion.id.slice(0, 8)}: still yours until burned or returned.`] })
-        : draft({ ...base, type: "escrow_return_conversion", unitsIn: amount,
+        : draft({ ...base, type: "escrow_return_conversion", unitsIn: amount, escrowRef,
             notes: [`Back from the escrow of conversion request ${conversion.id.slice(0, 8)}.`] }));
       continue;
     }
@@ -441,10 +467,11 @@ export function classifyPortfolioEvents(
         matchedOtc.add(deal.id);
         out.push(draft({ ...base, type: "otc_buy", unitsIn: amount, totalMicro: total, notes: [`OTC deal ${deal.id.slice(0, 8)} settled.`, ...priceNote] }));
       } else if (m.delta < ZERO && deal.side === "seller") {
-        out.push(draft({ ...base, type: "escrow_deposit_otc", unitsOut: amount,
+        out.push(draft({ ...base, type: "escrow_deposit_otc", unitsOut: amount, escrowRef: `otc:${deal.id}`,
           notes: [`Into the escrow of OTC deal ${deal.id.slice(0, 8)} (not completed): still yours until it settles or is refunded.`] }));
       } else if (m.delta > ZERO && deal.side === "seller") {
-        out.push(draft({ ...base, type: "escrow_refund_otc", unitsIn: amount, notes: [`Refunded from the escrow of OTC deal ${deal.id.slice(0, 8)}.`] }));
+        out.push(draft({ ...base, type: "escrow_refund_otc", unitsIn: amount, escrowRef: `otc:${deal.id}`,
+          notes: [`Refunded from the escrow of OTC deal ${deal.id.slice(0, 8)}.`] }));
       } else {
         out.push(transferDraft(base, m.delta));
       }
@@ -454,9 +481,14 @@ export function classifyPortfolioEvents(
   }
 
   const seen = chain !== null && chain.complete;
+  const unplaced: ExportPurchaseRecord[] = [];
   for (const p of records.purchases) {
+    if (matchedPurchases.has(p.id)) continue;
     // Without a mint (an unresolved sale) a record-only purchase has no share class to count in.
-    if (matchedPurchases.has(p.id) || !p.mint) continue;
+    if (!p.mint) {
+      unplaced.push(p);
+      continue;
+    }
     const atSec = chain?.blockTimes.get(p.signature) ?? recordSec(p.created_at);
     const row = purchaseDraft(p, atSec, "record", p.mint);
     row.notes.push(seen
@@ -483,13 +515,13 @@ export function classifyPortfolioEvents(
     const atSec = (c.outcome_tx ? chain?.blockTimes.get(c.outcome_tx) : undefined) ?? recordSec(c.updated_at);
     out.push(draft({
       atSec, mint: c.mint, source: "record", type: "conversion_burn", unitsOut: units(c.amount) ?? ZERO,
-      totalMicro: ZERO, signature: c.outcome_tx,
+      totalMicro: ZERO, signature: c.outcome_tx, escrowRef: `conversion:${c.id}`,
       notes: [
         `Burned when conversion request ${c.id.slice(0, 8)} was registered: no proceeds on-chain; the registered shares replace these units (record them separately). The result shown is zero proceeds minus the FIFO cost.`,
       ],
     }));
   }
-  return out.sort(compareDrafts);
+  return { drafts: out.sort(compareDrafts), unplaced };
 }
 
 function transferDraft(base: { atSec: number | null; mint: string; signature: string; source: "chain" }, delta: bigint): Draft {
@@ -523,7 +555,8 @@ type Book = {
   disposedCostUnknownUnits: bigint;
   realized: bigint;
   realizedUnknown: boolean;
-  escrow: bigint;
+  /** Units seen going into each escrow and not yet out of it; never below zero. */
+  escrow: Map<string, bigint>;
   unmatchedUnits: bigint;
   burns: number;
   otherToken: boolean;
@@ -532,9 +565,27 @@ type Book = {
 function newBook(): Book {
   return {
     lots: [], unitsDisposed: ZERO, proceeds: ZERO, proceedsUnknownUnits: ZERO, disposedCost: ZERO,
-    disposedCostUnknownUnits: ZERO, realized: ZERO, realizedUnknown: false, escrow: ZERO, unmatchedUnits: ZERO,
+    disposedCostUnknownUnits: ZERO, realized: ZERO, realizedUnknown: false, escrow: new Map(), unmatchedUnits: ZERO,
     burns: 0, otherToken: false,
   };
+}
+
+/**
+ * Moves units into (positive) or out of (negative) one escrow. A release
+ * takes at most what was seen going in: a burn or a return whose deposit the
+ * history did not show leaves the escrow at zero, and the summary's
+ * reconciliation reports the missing deposit instead of a negative escrow.
+ */
+function moveEscrow(book: Book, ref: string | null, change: bigint): void {
+  if (ref === null) return;
+  const next = (book.escrow.get(ref) ?? ZERO) + change;
+  book.escrow.set(ref, next > ZERO ? next : ZERO);
+}
+
+function escrowTotal(book: Book): bigint {
+  let total = ZERO;
+  for (const held of book.escrow.values()) total += held;
+  return total;
 }
 
 /** Consumes `amount` units from the oldest lots: the known cost given up and the units whose cost is unknown. */
@@ -567,7 +618,7 @@ export function buildPortfolioExport(input: {
   labels: ReadonlyMap<string, ShareClassLabel>;
 }): PortfolioExport {
   const { records, chain } = input;
-  const drafts = classifyPortfolioEvents(records, chain);
+  const { drafts, unplaced } = classifyPortfolioEvents(records, chain);
   const books = new Map<string, Book>();
   const book = (mint: string) => {
     let b = books.get(mint);
@@ -582,12 +633,12 @@ export function buildPortfolioExport(input: {
     if (effect === "acquisition") {
       b.lots.push({ units: d.unitsIn, cost: d.totalMicro });
     } else if (effect === "custody") {
-      b.escrow += d.unitsOut - d.unitsIn;
+      moveEscrow(b, d.escrowRef, d.unitsOut - d.unitsIn);
     } else {
       const amount = d.unitsOut;
       if (d.type === "conversion_burn") {
         b.burns += 1;
-        b.escrow -= amount;
+        moveEscrow(b, d.escrowRef, -amount);
       }
       const used = consumeFifo(b.lots, amount);
       b.unitsDisposed += amount;
@@ -629,7 +680,8 @@ export function buildPortfolioExport(input: {
       }
     }
     const walletBalance = chain?.balances ? chain.balances.get(mint) ?? ZERO : null;
-    const difference = walletBalance === null ? null : unitsHeld - (walletBalance + b.escrow);
+    const escrowUnits = escrowTotal(b);
+    const difference = walletBalance === null ? null : unitsHeld - (walletBalance + escrowUnits);
     const flags: string[] = [];
     if (unitsHeld - unitsKnownCost > ZERO) flags.push(`Cost unknown for ${(unitsHeld - unitsKnownCost).toString()} units held`);
     if (b.proceedsUnknownUnits > ZERO) flags.push(`Proceeds unknown for ${b.proceedsUnknownUnits.toString()} units disposed`);
@@ -649,7 +701,7 @@ export function buildPortfolioExport(input: {
       unitsDisposed: b.unitsDisposed, proceedsMicro: b.proceeds, proceedsUnknownUnits: b.proceedsUnknownUnits,
       disposedCostMicro: b.disposedCost, disposedCostUnknownUnits: b.disposedCostUnknownUnits,
       realizedMicro: b.realizedUnknown ? null : b.realized,
-      walletBalance, escrowUnits: b.escrow, difference, flags,
+      walletBalance, escrowUnits, difference, flags,
     };
   }).sort((a, b) => a.asset.localeCompare(b.asset) || a.shareClass.localeCompare(b.shareClass) || a.mint.localeCompare(b.mint));
 
@@ -657,7 +709,6 @@ export function buildPortfolioExport(input: {
   if (!chain) notes.push("The on-chain history of this wallet could not be read: transfers outside Manci are missing.");
   else if (!chain.complete) notes.push(`The on-chain history of this wallet is incomplete: ${chain.problem ?? "some transactions could not be read"}.`);
   if (records.truncated) notes.push("Some record lists reached their row limit: older records may be missing.");
-  const unplaced = records.purchases.filter((p) => !p.mint && !events.some((e) => e.type === "purchase" && e.signature === p.signature));
   if (unplaced.length > 0) {
     notes.push(`${unplaced.length} recorded purchase(s) could not be matched to a share class: ${unplaced.map((p) => p.signature).join(" ")}.`);
   }

@@ -13,7 +13,9 @@
 // The work runs after the response (lib/server/notifications.ts
 // afterResponse) and at most once per request, event and recipient
 // (notification_log, migration 0088): a retried recording or a second admin
-// click sends nothing, and an email failure is recorded and swallowed.
+// click sends nothing, and an email failure is recorded and swallowed. The
+// key carries the request id's canonical spelling (canonicalRequestId), so
+// a replay that spells the same uuid differently finds its claim.
 //
 // What an email says. The holder's: the event, the request's short id, the
 // asset label (derived on-chain by the create route) and the units, what
@@ -59,6 +61,19 @@ export const OPERATOR_CONVERSION_EVENTS: ReadonlySet<ConversionEvent> = new Set(
 
 export function isConversionEvent(value: unknown): value is ConversionEvent {
   return typeof value === "string" && (CONVERSION_EVENTS as readonly string[]).includes(value);
+}
+
+/**
+ * A request id in its one canonical spelling (lowercase 8-4-4-4-12), from any
+ * spelling PostgreSQL reads as the same uuid (upper case, braces, hyphens
+ * after any group of four digits or none); null for anything else. The
+ * recording routes echo the caller's id on a replay, and the claim compares
+ * text, so without this a re-spelled id would claim (and email) again.
+ */
+export function canonicalRequestId(value: string): string | null {
+  const hex = value.trim().replace(/^\{(.*)\}$/, "$1").replace(/-/g, "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(hex)) return null;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /** Everything a conversion email may say. No wallet, contact, note or dossier field. */
@@ -222,17 +237,22 @@ function factsOf(row: ConversionNoticeRow, network: Network): ConversionNoticeFa
  * request or a deposit, the operator's), each at most once. Never throws.
  */
 export async function sendConversionNotifications(
-  requestId: string,
+  rawRequestId: string,
   event: ConversionEvent,
   opts: { sb?: SupabaseClient } = {},
 ): Promise<{ holder: NotificationOutcome; operator: NotificationOutcome | null }> {
   const network = detectNetwork();
   const origin = notificationSiteOrigin();
+  const unavailable = { holder: "unavailable", operator: OPERATOR_CONVERSION_EVENTS.has(event) ? "unavailable" : null } as const;
+  // The claim's key is the id's ONE spelling: a replayed recording that spells
+  // the same uuid differently must find the key it claimed before.
+  const requestId = canonicalRequestId(rawRequestId);
+  if (!requestId) return unavailable;
   let sb: SupabaseClient;
   try {
     sb = opts.sb ?? getSupabaseAdmin();
   } catch {
-    return { holder: "unavailable", operator: OPERATOR_CONVERSION_EVENTS.has(event) ? "unavailable" : null };
+    return unavailable;
   }
   // Read once, only after the holder's key is claimed (address and facts).
   let row: Promise<ConversionNoticeRow | null> | null = null;

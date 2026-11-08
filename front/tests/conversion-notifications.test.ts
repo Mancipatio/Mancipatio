@@ -60,6 +60,7 @@ vi.mock("@/lib/server/custody-evidence", () => custody);
 import { CONVERSION_TYPICAL_DURATIONS } from "@/lib/conversion-timeline";
 import {
   CONVERSION_EVENTS,
+  canonicalRequestId,
   conversionHolderMessage,
   conversionOperatorMessage,
   sendConversionNotifications,
@@ -419,14 +420,36 @@ describe("routes: the status write first, the email after the response", () => {
     expect(later.tasks).toHaveLength(0);
   });
 
-  it("an email failure never reaches the route's answer", async () => {
+  it("a failing send never reaches the route's answer: it is recorded and swallowed", async () => {
     seedRequest({ status: "requested" });
-    delete db.ref!.rpcs.claim_notification;
-    mail.sendEmail.mockRejectedValue(new Error("down"));
+    seedDossier();
+    mail.sendEmail.mockRejectedValue(new Error("connection reset by office@example.org"));
     const res = await post(cancel, HOLDER, { id: REQUEST });
     expect(res).toEqual({ status: 200, body: { ok: true, data: { id: REQUEST, status: "cancelled" } } });
     await expect(runLater()).resolves.toBeUndefined();
+    expect(mail.sendEmail).toHaveBeenCalledTimes(1);
+    expect(log()).toEqual(["cancelled|holder|failed|TRANSPORT|dossier"]);
+  });
+
+  it("an unavailable log (0088 not applied) sends nothing and leaves the route's answer alone", async () => {
+    seedRequest({ status: "requested" });
+    seedDossier();
+    delete db.ref!.rpcs.claim_notification;
+    const res = await post(cancel, HOLDER, { id: REQUEST });
+    expect(res.status).toBe(200);
+    await expect(runLater()).resolves.toBeUndefined();
     expect(mail.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("a replay that spells the request id differently finds the claim it made before", async () => {
+    seedRequest({ status: "deposited" });
+    seedDossier();
+    for (const id of [REQUEST, REQUEST.toUpperCase(), REQUEST.replace(/-/g, "")]) {
+      expect((await post(deposited, HOLDER, { id, deposit_tx: TX })).status).toBe(200);
+      await runLater();
+    }
+    expect(mail.sendEmail).toHaveBeenCalledTimes(2);
+    expect(rows("notification_log").map((r) => r.ref_id)).toEqual([REQUEST, REQUEST]);
   });
 
   it("cancel: the holder's own cancel is confirmed by email", async () => {
@@ -459,15 +482,17 @@ describe("routes: the status write first, the email after the response", () => {
     expect(sent().map((input) => input.subject)).toEqual(["Manci: your escrowed units were returned"]);
   });
 
-  it("create: schedules the request's emails after the insert, before answering", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(`${process.cwd()}/app/api/conversion/create/route.ts`, "utf8");
-    const insert = src.indexOf('.from("conversion_requests")\n      .insert(');
-    const notify = src.indexOf('notifyConversionStatus(data.id as string, "requested")');
-    const answer = src.indexOf("return NextResponse.json({ ok: true, data: { id: data.id as string, request: data } })");
-    expect(insert).toBeGreaterThan(-1);
-    expect(notify).toBeGreaterThan(src.indexOf("Could not save the conversion request"));
-    expect(notify).toBeGreaterThan(insert);
-    expect(answer).toBeGreaterThan(notify);
+  // The create route and the real replay branches of deposited / reclaim:
+  // tests/conversion-notifications-replay.test.ts.
+});
+
+describe("canonicalRequestId", () => {
+  it("maps every spelling PostgreSQL reads as the same uuid to one key, and refuses the rest", () => {
+    for (const spelling of [REQUEST, REQUEST.toUpperCase(), REQUEST.replace(/-/g, ""), `{${REQUEST}}`, " 6F9619FF8B864D11-B42D-00C04FC964FF "]) {
+      expect(canonicalRequestId(spelling), spelling).toBe(REQUEST);
+    }
+    for (const bad of ["", "row-1", `${REQUEST}0`, REQUEST.slice(1), "6f9619ff-8b86-4d11-b42d-00c04fc964fg", "../etc"]) {
+      expect(canonicalRequestId(bad), bad).toBeNull();
+    }
   });
 });
