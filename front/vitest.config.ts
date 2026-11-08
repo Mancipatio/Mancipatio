@@ -8,7 +8,8 @@ import { defineConfig } from "vitest/config";
  * The suites of what KYC-only mode keeps open (lib/features.ts kycOnly):
  * sign-in, the account, the Terms, the verification (KYC and KYB) request, the
  * passport, the contact form, the admin console's KYC processing, purchase
- * recovery and the exits of existing positions. Run a second time with the
+ * recovery, the exits of existing positions and the holder's read-only
+ * portfolio records (the CSV export). Run a second time with the
  * mode ON (project "kyc-only-on"), as mainnet runs: a gate that lands on one
  * of these paths by mistake fails here, not on the mainnet deploy.
  * tests/kyc-only*.test.ts stub the mode themselves and run once.
@@ -43,17 +44,28 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/kyc-provider-gate.test.ts",
   "tests/kyc-provider-routes.test.ts",
   "tests/route-guard-matrix.test.ts",
+  // The published price list (GET /api/fees/public, /pricing) and the fee admin.
+  "tests/fee-schedule-routes.test.ts",
+  "tests/pricing-page.test.ts",
+  // Certificates of tokenized interest: the admin's issuance and the public check.
+  "tests/certificate-routes.test.ts",
+  "tests/certificate-verify-route.test.ts",
   // Support.
   "tests/inquiries-create-route.test.ts",
   "tests/manci-assistant.test.ts",
   "tests/assistant-published-route.test.ts",
   "tests/assistant-knowledge-admin.test.ts",
+  // Read-only browsing (an asset's public supply figures), the admin
+  // console's cap table and an issuer's read of its own.
+  "tests/cap-table-routes.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",
   "tests/onchain-screening.test.ts",
   "tests/reclaim-rent.test.ts",
   "tests/reclaim-ui-gates.test.ts",
+  // Read-only portfolio features: the holder's own records (CSV export).
+  "tests/portfolio-export-route.test.ts",
 ];
 
 export default defineConfig({

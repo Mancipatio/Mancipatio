@@ -46,6 +46,15 @@ jobs:
   # anchor build-time crates). (LiteSVM 0.10 also pulled rand 0.7,
   # RUSTSEC-2026-0097: gone.) An ignore added later names its advisory and
   # why here, never a blanket flag.
+  # 2026-11-08: RUSTSEC-2026-0385 (ctutils, non-constant-time masks) is fixed
+  # by the lock update to ctutils 0.4.4. RUSTSEC-2026-0387 (crypto-bigint
+  # timing variability) is ignored: it is patched only in 0.7.6, and 0.5.5
+  # enters solely as a dev-dependency (litesvm -> solana-syscalls ->
+  # solana-secp256k1-recover -> k256 0.13 -> elliptic-curve 0.13, which pins
+  # crypto-bigint 0.5). Neither program links it (`cargo tree -p
+  # asset_registry -e normal,build --target all -i crypto-bigint` prints
+  # nothing) and the test harness handles no secrets. Drop the ignore when
+  # litesvm moves to elliptic-curve 0.14.
   audit:
     name: cargo audit (RustSec)
     runs-on: ubuntu-24.04
@@ -59,7 +68,7 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Audit program/Cargo.lock
-        run: cargo audit --file Cargo.lock
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0387
 
   check:
     name: Fresh SBF build + tests + IDL

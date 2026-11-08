@@ -34,6 +34,22 @@ const MATRIX: Record<string, Gate> = {
   "compliance/list": "requireAdmin",
   "compliance/create": "requireAdmin",
   "compliance/resolve": "requireAdmin",
+  // The cap table: dossier links in the reconciliation, holder names in the
+  // personal-data export, and the register writes (0086).
+  "cap-table/admin-read": "requireAdmin",
+  "cap-table/export": "requireAdmin",
+  "cap-table/register-create": "requireAdmin",
+  "cap-table/register-void": "requireAdmin",
+  // Certificates of tokenized interest: Admin only (a payload may carry a
+  // holder's name and identification number); creating, signing and
+  // anchoring one is the operator's act, the Super Admin's alone.
+  "admin/certificates/list": "requireAdmin",
+  "admin/certificates/read": "requireAdmin",
+  "admin/certificates/preview": "requireAdmin",
+  "admin/certificates/create": "requireSuperAdmin",
+  "admin/certificates/sign": "requireSuperAdmin",
+  "admin/certificates/anchor": "requireSuperAdmin",
+  "admin/certificates/revoke": "requireAdmin",
   // Super Admin only.
   "clients/anonymize": "requireSuperAdmin",
   // The passport write-back: the registry authority only.

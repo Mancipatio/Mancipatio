@@ -23,8 +23,23 @@
 // (app/api/admin/document-anchor). Its params (signature, reference, hash)
 // are unsigned, but the row is written only when the chain shows exactly that
 // memo signed by the session wallet, so holding the Super Admin's session
-// cookie only lets one record an anchor that wallet already signed. Any new
-// exception must meet the same bar and be listed here.
+// cookie only lets one record an anchor that wallet already signed.
+// issuerUpdates.anchor is the same record for an issuer update: its only
+// write is the update's anchor_tx, set once, after the server re-read the
+// finalized transaction and found exactly the memo it computes itself for
+// that published update, signed by the session wallet alone, that wallet
+// being the issuer's on-chain authority (app/api/issuer-updates/anchor). Two
+// more meet the same bar, the certificate steps after a wallet already acted
+// (app/api/admin/certificates): certificates.sign, whose only write is a
+// certificate's signature after the server verified that the session wallet
+// itself signed exactly that certificate (its number and the hash of its
+// stored payload, the draft naming that wallet as signer), and
+// certificates.anchor, whose only write is the anchor transaction of a
+// signed certificate, taken only from an anchor the record route above
+// already verified on chain for that number and hash. Both are the Super
+// Admin's alone (requireSuperAdmin) and refused during maintenance all the
+// same (lib/maintenance.ts). Any new exception
+// must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";
 
@@ -60,6 +75,20 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // Admin-only knowledge list; publishing and deletion require fresh signatures.
   "assistantKnowledge.list",
   "audit.list",
+  // The cap table of one asset, read only: the admin's reconciliation, and an
+  // issuer's own asset (wallets, units and decision references). Recording,
+  // voiding and the CSV export require fresh signatures.
+  "capTable.adminRead",
+  "capTable.issuerRead",
+  // Certificates (app/api/admin/certificates): list, detail and preview are
+  // admin reads (the preview reads the chain and writes nothing). sign and
+  // anchor are the accepted exceptions in the header: each records only
+  // evidence the server verifies first. create and revoke need a signature.
+  "certificates.anchor",
+  "certificates.list",
+  "certificates.preview",
+  "certificates.read",
+  "certificates.sign",
   "clients.adminDetail",
   "clients.adminList",
   "clients.doc-url",
@@ -87,13 +116,27 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "distribution-plans.adminRead",
   "distribution-plans.proof",
   "fees.list",
+  // The fee schedule (drafts included) and charges; every fee write signs afresh.
+  "fees.scheduleList",
   "inquiries.list",
   "issuer-profiles.read",
+  // Investor relations (0090): the issuer's own list, the admins' moderation
+  // list, a holder's read (balances checked on chain) and ONE document link
+  // signed on click; none of them writes anything.
+  "issuerUpdates.adminList",
+  "issuerUpdates.documentUrl",
+  "issuerUpdates.holderRead",
+  "issuerUpdates.mine",
+  // Records the anchor of a published update (an accepted exception, see the header).
+  "issuerUpdates.anchor",
   "otc.adminScreen",
   "otc.list",
   "passport.list",
   "payout-snapshots.adminRead",
   "payout-snapshots.proof",
+  // The signer's own purchases, OTC deals and conversions plus daily EUR
+  // rates, for the portfolio CSV export (app/api/portfolio/export).
+  "portfolio.export",
   "profiles.read",
   // The seller's own listings or the admin board (0082: a listing is public only while active).
   "resell.list",

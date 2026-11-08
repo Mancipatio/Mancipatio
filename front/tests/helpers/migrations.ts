@@ -94,6 +94,10 @@ export const DYNAMIC_DEFAULT_TABLES = [
 export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   // 0084 admin-managed assistant knowledge
   "assistant_knowledge",
+  // 0086 company-register entries (cap table)
+  "register_entries",
+  // 0087 certificates of tokenized interest and their yearly counters
+  "certificates", "certificate_counters",
   // 0072 on-chain alarms
   "onchain_event_jobs", "worker_leases", "worker_heartbeats", "alarm_incidents",
   // 0073 ledger jobs and holds
@@ -105,6 +109,12 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "blocklist_authority_proposals", "blocklist_recoveries",
   // 0080 automatic EUR rate
   "fx_auto_rates", "fx_rate_observations", "fx_auto_runs",
+  // 0088 notification log (conversion emails)
+  "notification_log",
+  // 0089 published fee schedule and the charges booked against it
+  "fee_schedule", "fee_charges",
+  // 0090 investor relations: issuer updates and their documents
+  "issuer_updates", "issuer_update_documents",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

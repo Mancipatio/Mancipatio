@@ -595,6 +595,12 @@ describe("GDPR export (/api/clients/export)", () => {
       { id: 2, network: "devnet", holder_wallet: STRANGER, client_id: null, status: "converted" },
     ];
     state.tables.spvs = [{ id: "s1", network: "devnet", client_id: CLIENT_ID, name: "Carol SPV d.o.o.", notes: "" }];
+    // Company-register entries (0086) recorded for the dossier.
+    state.tables.register_entries = [
+      { id: "r1", network: "devnet", holder_client_id: CLIENT_ID, units: "250", status: "voided", created_by: ADMIN, voided_by: ADMIN, void_reason: "Typo" },
+      { id: "r2", network: "devnet", holder_client_id: "someone-else", units: "5", created_by: ADMIN },
+      { id: "r3", network: "mainnet", holder_client_id: CLIENT_ID, units: "7", created_by: ADMIN },
+    ];
     state.tables.vesting_series = [
       { id: "v1", network: "devnet", client_wallet: OTHER_WALLET, client_id: null, reviewed_by: ADMIN, status: "created" },
       { id: "v2", network: "devnet", client_wallet: STRANGER, client_id: null, status: "created" },
@@ -611,6 +617,7 @@ describe("GDPR export (/api/clients/export)", () => {
     expect(bundle.conversion_requests).toEqual([expect.objectContaining({ id: 1, decided_by: "operator", admin_note: "Paid out" })]);
     expect(bundle.spvs).toEqual([expect.objectContaining({ id: "s1", name: "Carol SPV d.o.o." })]);
     expect(bundle.vesting_series).toEqual([expect.objectContaining({ id: "v1", reviewed_by: "operator" })]);
+    expect(bundle.register_entries).toEqual([expect.objectContaining({ id: "r1", units: "250", created_by: "operator", voided_by: "operator" })]);
     expect((bundle.account as { wallets: Row[] }).wallets.map((w) => w.wallet)).toEqual([CLIENT_WALLET, OTHER_WALLET]);
     // The person's own wallet is not an operator.
     expect((bundle.notes as Row[]).map((n) => n.author)).toEqual(["operator", CLIENT_WALLET]);

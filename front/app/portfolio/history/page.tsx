@@ -9,6 +9,11 @@ import { getSupabase } from "@/lib/supabase";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { SkeletonTable } from "@/components/skeleton";
 import { navHrefVisible } from "@/lib/pilot-scope";
+import { PortfolioExportButton } from "./export-csv";
+
+// The CSV export (./export-csv.tsx) reads its own sources: the holder's
+// records through a signed read and the wallet's on-chain history. The list
+// below stays the indexer's recent events.
 
 type Event = {
   id: number;
@@ -67,20 +72,24 @@ export default function PortfolioHistoryPage() {
 
   return (
     <main className="min-w-0 flex-1">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-          Activity
-        </p>
-        <h1 className="mt-1 text-2xl font-semibold text-slate-900">
-          Transaction history
-        </h1>
-        <p className="mt-2 text-sm text-slate-600">
-          On-chain activity that touched{" "}
-          <code className="font-mono text-xs">
-            {wallet.toString().slice(0, 6)}…{wallet.toString().slice(-4)}
-          </code>
-          , newest first.
-        </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+            Activity
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold text-slate-900">
+            Transaction history
+          </h1>
+          <p className="mt-2 text-sm text-slate-600">
+            On-chain activity that touched{" "}
+            <code className="font-mono text-xs">
+              {wallet.toString().slice(0, 6)}…{wallet.toString().slice(-4)}
+            </code>
+            , newest first.
+          </p>
+        </div>
+        {/* A new wallet or network starts a fresh export (no stale message). */}
+        <PortfolioExportButton key={`${detectNetwork()}:${wallet.toString()}`} />
       </div>
 
       {failed ? (

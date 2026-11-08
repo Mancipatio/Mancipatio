@@ -15,7 +15,15 @@
 // "fail" (users are affected). The deployment is healthy (HTTP 200) unless a
 // check fails (HTTP 503):
 //   indexer       ready → ok; warming / not initialized / degraded → warn
-//                 (the browser falls back to chain reads, see lib/indexer.ts)
+//                 (the browser falls back to chain reads, see lib/indexer.ts).
+//                 `fresh` is what the browser decides (lib/indexer-freshness.ts:
+//                 checked_at at most 5 minutes old and not more than 30 s
+//                 ahead); `heartbeat` says why it is not: the 0075
+//                 heartbeat's mode, last outcome and reason code (runbook §16).
+//                 In mode observe the heartbeat proves but never moves
+//                 checked_at, so a quiet network is fresh only for 5 minutes
+//                 after a job or a reconcile. Informational: it never changes
+//                 the status, and null when it cannot be read (before 0075).
 //   rpc           server RPC answers getSlot → ok; else fail
 //   indexerQueue  oldest pending webhook job ≥ 5 min → warn (backlog),
 //                 ≥ 30 min → warn (stalled). Never fail: indexer jobs have
@@ -73,6 +81,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { NetworkIdentityError } from "@/lib/network-identity";
 import { defaultPaymentMint } from "@/lib/payment-mints";
 import { fxRowFresh, resolveFxRate, type FxOrigin } from "@/lib/fx-effective";
+import { isIndexerStateFresh } from "@/lib/indexer-freshness";
 import { intervalSeconds } from "@/lib/pg-interval";
 import { readFxTables } from "@/lib/server/fx-rates";
 import { readMaintenance } from "@/lib/server/maintenance";
@@ -83,13 +92,24 @@ export type CheckStatus = "ok" | "warn" | "fail";
 export type FailureReason = "not_configured" | "timeout" | "unavailable" | "wrong_network";
 type Check = { status: CheckStatus; reason?: string };
 
+/** The freshness heartbeat (0075) as last recorded: fixed codes and ages only. */
+export type HeartbeatState = {
+  mode: "off" | "observe" | "on" | null;
+  lastOutcome: "bumped" | "would_bump" | "declined" | null;
+  /** The first failing proof condition of the last run (runbook §16), or null. */
+  lastReason: string | null;
+  lastAttemptAgeSeconds: number | null;
+  lastProvenAgeSeconds: number | null;
+};
 export type IndexerCheck = Check & {
   state: "ready" | "warming" | "degraded" | null;
   lastSlot: number | null;
   checkedAgeSeconds: number | null;
   completedAgeSeconds: number | null;
-  /** Whether browsers read the index right now (mirrors lib/indexer.ts). */
+  /** Whether browsers read the index right now (lib/indexer-freshness.ts, the rule lib/indexer.ts applies). */
   fresh: boolean;
+  /** Why the index is (not) kept fresh on a quiet network; null when unreadable. */
+  heartbeat: HeartbeatState | null;
 };
 export type RpcCheck = Check & { slot: number | null; latencyMs: number | null };
 export type QueueCheck = Check & { pending: number | null; oldestPendingAgeSeconds: number | null };
@@ -133,8 +153,6 @@ export const QUEUE_WARN_SECONDS = 5 * 60;
 export const QUEUE_FAIL_SECONDS = 30 * 60;
 /** A rate row warns once this share of its max age has passed. */
 export const FX_WARN_FRACTION = 0.8;
-/** lib/indexer.ts stops trusting the index after this long without a check. */
-const INDEX_FRESH_SECONDS = 5 * 60;
 const CACHE_MS = 5_000;
 
 export const TIMEOUT = Symbol("timeout");
@@ -171,29 +189,71 @@ function safeInteger(value: unknown): number | null {
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
+const HEARTBEAT_MODES = ["off", "observe", "on"] as const;
+const HEARTBEAT_OUTCOMES = ["bumped", "would_bump", "declined"] as const;
+
+function oneOf<T extends string>(list: readonly T[], value: unknown): T | null {
+  return (list as readonly unknown[]).includes(value) ? (value as T) : null;
+}
+
+/**
+ * The network's 0075 heartbeat row as codes and ages (indexer_heartbeat_state,
+ * service role only). null when there is no row, the table is missing (before
+ * 0075), or the read fails or times out. Never throws.
+ */
+async function readHeartbeat(sb: SupabaseClient, network: Network, now: number): Promise<HeartbeatState | null> {
+  try {
+    const result = await bounded((signal) => sb.from("indexer_heartbeat_state")
+      .select("mode,last_outcome,last_reason,last_attempt_at,last_proven_at")
+      .eq("network", network)
+      .abortSignal(signal)
+      .maybeSingle(), HEALTH_DB_TIMEOUT_MS);
+    if (result === TIMEOUT || result.error || !result.data) return null;
+    const row = result.data as {
+      mode?: unknown; last_outcome?: unknown; last_reason?: unknown; last_attempt_at?: unknown; last_proven_at?: unknown;
+    };
+    return {
+      mode: oneOf(HEARTBEAT_MODES, row.mode),
+      lastOutcome: oneOf(HEARTBEAT_OUTCOMES, row.last_outcome),
+      // Fixed codes only (the column's own check); anything else is not echoed.
+      lastReason: typeof row.last_reason === "string" && /^[A-Z_]{1,40}$/.test(row.last_reason) ? row.last_reason : null,
+      lastAttemptAgeSeconds: ageSeconds(row.last_attempt_at, now),
+      lastProvenAgeSeconds: ageSeconds(row.last_proven_at, now),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function checkIndexer(sb: SupabaseClient | null, network: Network, now: number): Promise<IndexerCheck> {
   const empty = { state: null, lastSlot: null, checkedAgeSeconds: null, completedAgeSeconds: null, fresh: false } as const;
-  if (!sb) return { status: "fail", reason: "not_configured", ...empty };
+  if (!sb) return { status: "fail", reason: "not_configured", ...empty, heartbeat: null };
+  // In parallel and never failing the check: the heartbeat only explains `fresh`.
+  const heartbeatRead = readHeartbeat(sb, network, now);
   try {
     const result = await bounded((signal) => sb.from("indexer_sync_state")
       .select("status,last_slot,checked_at,completed_at")
       .eq("network", network)
       .abortSignal(signal)
       .maybeSingle(), HEALTH_DB_TIMEOUT_MS);
-    if (result === TIMEOUT) return { status: "fail", reason: "timeout", ...empty };
-    if (result.error) return { status: "fail", reason: "unavailable", ...empty };
+    const heartbeat = await heartbeatRead;
+    if (result === TIMEOUT) return { status: "fail", reason: "timeout", ...empty, heartbeat };
+    if (result.error) return { status: "fail", reason: "unavailable", ...empty, heartbeat };
     const row = result.data as { status?: unknown; last_slot?: unknown; checked_at?: unknown; completed_at?: unknown } | null;
-    if (!row) return { status: "warn", reason: "not_initialized", ...empty };
+    if (!row) return { status: "warn", reason: "not_initialized", ...empty, heartbeat };
     const state: IndexerCheck["state"] = row.status === "ready" || row.status === "warming" || row.status === "degraded" ? row.status : null;
     const checkedAgeSeconds = ageSeconds(row.checked_at, now);
     const completedAgeSeconds = ageSeconds(row.completed_at, now);
-    const fresh = state === "ready" && completedAgeSeconds !== null
-      && checkedAgeSeconds !== null && checkedAgeSeconds <= INDEX_FRESH_SECONDS;
-    const check = { state, lastSlot: safeInteger(row.last_slot), checkedAgeSeconds, completedAgeSeconds, fresh };
+    // The browser's own rule (lib/indexer-freshness.ts), so `fresh` cannot
+    // disagree with what the site does (a check stamped in the future, say).
+    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    const fresh = isIndexerStateFresh(
+      { status: text(row.status), checked_at: text(row.checked_at), completed_at: text(row.completed_at) }, now);
+    const check = { state, lastSlot: safeInteger(row.last_slot), checkedAgeSeconds, completedAgeSeconds, fresh, heartbeat };
     if (state === "ready") return { status: "ok", ...check };
     return { status: "warn", reason: state ?? "unknown_state", ...check };
   } catch {
-    return { status: "fail", reason: "unavailable", ...empty };
+    return { status: "fail", reason: "unavailable", ...empty, heartbeat: await heartbeatRead };
   }
 }
 
