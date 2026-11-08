@@ -100,7 +100,10 @@ export function IssuerJourneyTracker({
           data-journey-next={next.id}
         >
           <p className="font-semibold text-slate-900">
-            Next: {ACTOR_LABEL[audience][next.actor]} · {next.title}
+            {/* Nothing waits on anyone: say what is under way instead of a "next". */}
+            {next.state === "in_progress"
+              ? `In progress · ${next.title}`
+              : `Next: ${ACTOR_LABEL[audience][next.actor]} · ${next.title}`}
           </p>
           {next.href && next.linkLabel && (
             <Link href={next.href} className="text-xs font-semibold text-slate-900 underline decoration-slate-300 underline-offset-2 hover:decoration-slate-500">

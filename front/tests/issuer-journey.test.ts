@@ -121,12 +121,27 @@ describe("issuer audience: from a first visit to holders", () => {
     expect(step(j, "application").state).toBe("done");
   });
 
-  it("documents approved, no issuer yet: register the wallet, and the application is the company's to submit", () => {
+  it("documents approved, no issuer yet: apply first, then register the issuer wallet", () => {
     const j = journey({ issuer: null, application: null });
-    expect(step(j, "kyb")).toMatchObject({ state: "waiting_on_you", href: "/issuer/onboarding" });
+    expect(step(j, "kyb")).toMatchObject({ state: "in_progress", href: "/issuer/onboarding" });
     expect(step(j, "application")).toMatchObject({ state: "waiting_on_you", href: "/apply" });
+    expect(j.next?.id).toBe("application");
     expect(step(j, "legal_structure").state).toBe("not_started");
     expect(step(j, "legal_structure").href).toBe("/solutions/serbian-spv");
+    // Approved, a Serbian company registers its own issuer wallet.
+    const approved = journey({ issuer: null });
+    expect(step(approved, "kyb")).toMatchObject({ state: "waiting_on_you", href: "/issuer/onboarding" });
+    expect(approved.next?.id).toBe("kyb");
+  });
+
+  it("through an SPV the issuer is the SPV: the applicant is never told to register its own company", () => {
+    const asked = { status: "approved", applicantKind: "company", incorporation: "BVI", companyFormationRequested: true } as const;
+    const approved = journey({ issuer: null, application: asked });
+    expect(step(approved, "kyb")).toMatchObject({ state: "waiting_on_manci", actor: "manci", href: "/issuer/status" });
+    expect(step(approved, "kyb").explanation).toContain("the SPV Manci incorporates is registered and verified as the issuer");
+    const pending = journey({ issuer: null, application: { ...asked, status: "pending" } });
+    expect(step(pending, "kyb")).toMatchObject({ state: "in_progress", href: "/issuer/status" });
+    expect(pending.next?.id).toBe("application");
   });
 
   it("a company outside Serbia that asked for an SPV: Manci reviews, then incorporates off-chain", () => {
@@ -218,7 +233,9 @@ describe("issuer audience: from a first visit to holders", () => {
 
   it("an open sale: units being created and placed, holders arriving", () => {
     const j = journey({ assets: [asset({}, [cls({ openSales: 1, sold: BigInt(1_500), lifetimeMinted: BigInt(1_500), circulatingSupply: BigInt(1_500) })])] });
-    expect(step(j, "minted")).toMatchObject({ state: "in_progress", explanation: "1,500 of 10,000 units are created; the rest are created only when they are sent or sold." });
+    // Buyers create units by buying while the sale is open.
+    expect(step(j, "minted")).toMatchObject({ state: "in_progress", actor: "holders", explanation: "1,500 of 10,000 units are created; the rest are created only when they are sent or sold." });
+    expect(step(j, "on_chain").explanation).toBe("ACME-2027 is active on-chain with its share class and token mint.");
     expect(step(j, "placement")).toMatchObject({ state: "in_progress", actor: "holders", explanation: "A primary sale is open: 1,500 units sold so far." });
     expect(step(j, "holders").state).toBe("in_progress");
   });
@@ -306,6 +323,11 @@ describe("admin audience", () => {
     expect(step(j, "placement").href).toBe("/admin/launchpad");
     expect(step(j, "holders").href).toBe(null); // no holders yet
     for (const s of j.steps) if (s.href) expect(s.href.startsWith("/admin/"), s.id).toBe(true);
+    // Units sent directly: the evidence is the "Send to wallets" rows of the audit log.
+    const direct = admin({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(50), circulatingSupply: BigInt(50), treasury: BigInt(0) })])] });
+    expect(step(direct, "placement")).toMatchObject({ state: "done", href: "/admin/audit" });
+    const sold = admin({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(50), circulatingSupply: BigInt(50), treasury: BigInt(0), sold: BigInt(50) })])] });
+    expect(step(sold, "placement").href).toBe("/admin/launchpad");
   });
 
   it("a pending KYB is Manci's to decide, from the dossier", () => {
@@ -490,6 +512,13 @@ describe("the panel (components/issuer-journey.tsx)", () => {
     expect(html).toContain("Try again");
     expect(journeyStateLabel({ state: "waiting_on_you", unknown: false }, "issuer")).toBe("Your turn");
     expect(journeyStateLabel({ state: "waiting_on_you", unknown: false }, "admin")).toBe("Waiting on the issuer");
+  });
+
+  it("nothing waiting on anyone: the banner says what is under way", () => {
+    const selling = journey({ assets: [asset({}, [cls({ openSales: 1, sold: BigInt(5), lifetimeMinted: BigInt(5), circulatingSupply: BigInt(5) })])] });
+    const html = render(selling, "issuer");
+    expect(html).toContain("In progress · Units minted");
+    expect(html).not.toContain("Next: ");
   });
 
   it("paused: says the status is for reference and offers no hidden link", () => {

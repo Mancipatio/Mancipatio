@@ -305,11 +305,25 @@ function kybStep(input: JourneyInput): Draft {
       explanation: "Sign in and submit your company's documents (KYB), or verify your identity (KYC) if you do not have a company yet." };
   }
   if (v.kyb === "verified") {
-    return issuer
-      ? { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink,
-          explanation: "Your company documents are approved; Manci records the verification on-chain." }
-      : { state: "waiting_on_you", actor: "issuer", offChain, link: ["/issuer/onboarding", "Issuer onboarding"],
-          explanation: "Your company documents are approved; register your issuer wallet in Issuer onboarding so Manci can record the verification on-chain." };
+    if (issuer) {
+      return { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink,
+        explanation: "Your company documents are approved; Manci records the verification on-chain." };
+    }
+    const app = input.application;
+    // Through an SPV, the issuer is the SPV Manci incorporates, not the applicant's own company.
+    if (app && (app.companyFormationRequested || app.applicantKind === "individual")) {
+      return app.status === "approved"
+        ? { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink,
+            explanation: "Your company documents are approved; the SPV Manci incorporates is registered and verified as the issuer once it exists." }
+        : { state: "in_progress", actor: "manci", offChain, link: statusLink,
+            explanation: "Your company documents are approved; the issuer will be the SPV Manci incorporates, verified once it exists." };
+    }
+    const onboarding = ["/issuer/onboarding", "Issuer onboarding"] as const;
+    return app?.status === "approved"
+      ? { state: "waiting_on_you", actor: "issuer", offChain, link: onboarding,
+          explanation: "Your company documents are approved; register your issuer wallet in Issuer onboarding so Manci can record the verification on-chain." }
+      : { state: "in_progress", actor: "issuer", offChain, link: onboarding,
+          explanation: "Your company documents are approved; once the application is approved, register your issuer wallet so Manci can record the verification on-chain." };
   }
   // A decision beats an open document request (as lib/issuer-workflow.ts puts "blocked" first).
   if (v.kyb === "rejected" || v.kyb === "suspended" || v.kyb === "expired") {
@@ -500,7 +514,9 @@ function onChainStep(input: JourneyInput, kybVerified: boolean): Draft {
     return { state: "done", actor: "manci", offChain, link: assetLink(a),
       explanation: active.length > 1
         ? `${active.length} assets are active on-chain, each share class with its own token mint.`
-        : `${a.name} is active on-chain with ${plural(classes, "share class", "share classes")}, each with its own token mint.` };
+        : classes === 1
+          ? `${a.name} is active on-chain with its share class and token mint.`
+          : `${a.name} is active on-chain with ${classes} share classes, each with its own token mint.` };
   }
   const frozen = input.assets.find((a) => a.status === "frozen");
   if (frozen) {
@@ -545,7 +561,8 @@ function mintedStep(input: JourneyInput, f: Facts, onChainDone: boolean): Draft 
           ? `${plural(f.minted, "unit is", "units are")} created and the supply is locked, so no more can be created.`
           : `All ${plural(f.minted, "unit", "units")} the share classes allow are created.` };
     }
-    return { state: "in_progress", actor: "issuer", offChain, link,
+    // During an open sale, buyers create units by buying.
+    return { state: "in_progress", actor: f.openSales > 0 ? "holders" : "issuer", offChain, link,
       explanation: f.cap !== null
         ? `${formatUnits(f.minted)} of ${plural(f.cap, "unit", "units")} are created; the rest are created only when they are sent or sold.`
         : `${plural(f.minted, "unit is", "units are")} created; more are created only when they are sent or sold.` };
@@ -565,9 +582,11 @@ function placementStep(input: JourneyInput, f: Facts, onChainDone: boolean): Dra
   const offChain = false;
   const firstActive = input.assets.find((a) => a.status === "active");
   const sales = you ? (["/issuer/launchpad", "Primary sales"] as const) : (["/admin/launchpad", "Launchpad"] as const);
+  // Direct issuance happens on the asset's Distribute panel; the admin finds its
+  // "Send to wallets" transactions in the audit log.
   const distribute = you
     ? firstActive ? ([`/issuer/assets/${firstActive.address}`, "Distribute"] as const) : sales
-    : sales;
+    : (["/admin/audit", "Audit log"] as const);
   const direct = f.direct !== null && f.direct > ZERO ? f.direct : null;
   if (f.openSales > 0) {
     return { state: "in_progress", actor: "holders", offChain, link: sales,
@@ -591,11 +610,11 @@ function placementStep(input: JourneyInput, f: Facts, onChainDone: boolean): Dra
       explanation: `${plural(placed, "unit has", "units have")} been placed with holders${parts.length > 0 ? `: ${parts.join(" and ")}` : ""}.` };
   }
   if (f.requestDeclined) {
-    return { state: "waiting_on_you", actor: "issuer", offChain, link: distribute,
+    return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? distribute : sales,
       explanation: you ? "Manci declined the public-sale request; see the reason and choose the next step." : "The public-sale request was declined." };
   }
   if (onChainDone) {
-    return { state: "waiting_on_you", actor: "issuer", offChain, link: distribute,
+    return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? distribute : sales,
       explanation: you
         ? "Choose how units reach holders: send them to named holders, or request an approved primary sale."
         : "The issuer has not placed any units yet." };
