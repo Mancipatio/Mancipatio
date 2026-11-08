@@ -15,8 +15,9 @@
 //
 // Accepted exceptions, each a record of evidence that grants nothing and
 // changes no business data, so that the caller is not asked to sign twice
-// for one step: compliance.screenWallet, compliance.screenRecipients and
-// compliance.distributionEvidence (screening records, see their entries), and
+// for one step: compliance.screenWallet, compliance.screenRecipients,
+// compliance.distributionEvidence and tokenMigration.precheck (screening
+// records or the alert of a hit, see their entries), and
 // admin.documentAnchorRecord, whose only write is the audit row of a document
 // anchor the server first re-reads from the chain and verifies: finalized,
 // signed by the session wallet alone, that wallet being Platform.admin
@@ -28,8 +29,18 @@
 // write is the update's anchor_tx, set once, after the server re-read the
 // finalized transaction and found exactly the memo it computes itself for
 // that published update, signed by the session wallet alone, that wallet
-// being the issuer's on-chain authority (app/api/issuer-updates/anchor). Any
-// new exception must meet the same bar and be listed here.
+// being the issuer's on-chain authority (app/api/issuer-updates/anchor). Two
+// more meet the same bar, the certificate steps after a wallet already acted
+// (app/api/admin/certificates): certificates.sign, whose only write is a
+// certificate's signature after the server verified that the session wallet
+// itself signed exactly that certificate (its number and the hash of its
+// stored payload, the draft naming that wallet as signer), and
+// certificates.anchor, whose only write is the anchor transaction of a
+// signed certificate, taken only from an anchor the record route above
+// already verified on chain for that number and hash. Both are the Super
+// Admin's alone (requireSuperAdmin) and refused during maintenance all the
+// same (lib/maintenance.ts). Any new exception
+// must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";
 
@@ -70,6 +81,15 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // voiding and the CSV export require fresh signatures.
   "capTable.adminRead",
   "capTable.issuerRead",
+  // Certificates (app/api/admin/certificates): list, detail and preview are
+  // admin reads (the preview reads the chain and writes nothing). sign and
+  // anchor are the accepted exceptions in the header: each records only
+  // evidence the server verifies first. create and revoke need a signature.
+  "certificates.anchor",
+  "certificates.list",
+  "certificates.preview",
+  "certificates.read",
+  "certificates.sign",
   "clients.adminDetail",
   "clients.adminList",
   "clients.doc-url",
@@ -130,6 +150,17 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "spvs.capacity",
   "spvs.issuances",
   "storage.documents.list",
+  // Token migration (app/api/token-migrations): the admin's chain read of an
+  // old mint and its excluded wallets, and the campaigns with their deposits
+  // (every write needs a fresh signature).
+  "tokenMigration.adminInspect",
+  "tokenMigration.adminList",
+  // The holder's own pre-deposit check (module, window, cap, excluded wallet,
+  // its balance, the Terms), like compliance.screenWallet: its only write is
+  // the compliance alert of a sanctions hit on the caller's own wallet. The
+  // deposit itself is the holder's wallet transaction, and its record
+  // (tokenMigration.recordDeposit) needs a fresh signature.
+  "tokenMigration.precheck",
   // Signs ONE confidential document on click; its only write is the access-log row.
   "storage.documents.url",
   "vesting-series.admin-list",

@@ -124,6 +124,7 @@ const ROUTES: Array<[string, string, () => Promise<{ POST: (r: Request) => Promi
   ["distribution-plans/bind", "distributions", () => import("@/app/api/distribution-plans/bind/route")],
   ["conversion/create", "custodyConversion", () => import("@/app/api/conversion/create/route")],
   ["delivery/create", "custodyDelivery", () => import("@/app/api/delivery/create/route")],
+  ["token-migrations/precheck", "tokenMigration", () => import("@/app/api/token-migrations/precheck/route")],
 ];
 
 describe("entry routes of a switched-off module answer 403 before any work", () => {

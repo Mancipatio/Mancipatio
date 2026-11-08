@@ -357,6 +357,11 @@ export const MODULE_FLOWS: readonly ModuleFlow[] = [
   // and the simulation gate shows that refusal before the wallet opens.
   { module: "custodyConversion", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(true) },
   { module: "custodyDelivery", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(false) },
+  // Token migration has no Manci program entry: deposits, refunds and the
+  // burn are plain SPL transfers that no pause bit covers. Its gates are the
+  // holder's precheck route and the admin's campaign opening
+  // (app/api/token-migrations; lib/token-migration/model.ts).
+  { module: "tokenMigration", instructions: [] },
 ];
 
 /** The switched-off module that holds `instruction` back for `subject`, or null. */

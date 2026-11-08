@@ -4596,6 +4596,389 @@ public.fee_charges_guard();` (the front then reads "nothing published").
 After a publication or a charge, keep the tables (they are the price and
 billing history): retire prices and waive charges instead.
 
+## 24. Token migration (V1, operator-delivered)
+
+A company that already issued a token on Solana (an SPL Token or Token-2022
+mint on another platform) moves its community onto Manci. During an opt-in
+window of 60–90 days (75 by default) its holders deposit exact multiples of
+a published **lot** of the old token into a **deposit account** that a
+Manci-controlled owner holds, and the operator sends each of them units of
+the company's Manci share class from the **treasury wallet**. The ratio:
+`lib/token-migration/ratio.ts` (E = the shareholders' decision in basis
+points, G = the units that make 100 %, the lot rounded **up** to a nice
+number so the effective equity never exceeds E; the units cap is
+`floor(S_old / L)`). G is 1,000,000 by default and may be any whole number
+from 100 to 10^12: a joint-stock company uses its **number of shares**, so
+one unit is one share (*Custom* in the draft's G list). The ratio stays
+exact for any G; a percentage of a G that does not divide evenly (one share
+of 37,000 is 0.0027027… %) is shown rounded and marked "≈" on the screens
+and in the final report. Campaigns and deposits live in migration 0085
+(`token_migrations`, `token_migration_deposits`); the routes are
+`app/api/token-migrations/*`; the screens are `/admin/migrations`,
+`/portfolio/migration` and the public `/migrations`.
+
+What V1 is not: no program change, no EVM chain, no Merkle claim (V2), no
+fee, no email. **No program pause bit covers it**: deposits, refunds and
+the burn are plain SPL transfers outside `asset_registry`. The platform's
+switches are the module flag (`NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION`: it
+stops the holder's precheck, the only path the holder page offers, and the
+opening of campaigns) and each campaign's status. A holder can still send
+old tokens to an open campaign's deposit account by hand; such a deposit is
+recorded (by the holder or the reconcile) and accepted or refunded by the
+campaign's rules. To stop a campaign at once, **cancel it** (below).
+
+What the server checks, every time (nothing from a browser is trusted):
+
+- **Draft** (`admin/save`, Admin): the share class (registry-owned, an
+  initialized 0-decimal Token-2022 mint, asset and issuer PDAs), the old
+  mint (refused, with the reason, for TransferFeeConfig, TransferHook,
+  NonTransferable, PermanentDelegate, confidential transfers on by default,
+  confidential mint/burn, DefaultAccountState frozen, Pausable and any
+  extension V1 does not know; warned for a live freeze or mint authority),
+  the excluded wallets' balances (a token account counts itself, any other
+  address the sum of its token accounts), the ratio, and a class
+  `max_supply` at least the units cap. A draft can change; from the opening
+  on, what the campaign published is frozen by the database.
+- **Opening** (`admin/transition` to `open`, Admin, module on): the Swap
+  Terms hash and https link set, the window not ended (and opened at most a
+  day ago), the old mint checked again, and the deposit account existing as
+  the deposit owner's ATA of the old mint, not frozen, without delegate or
+  close authority, and **empty** (every token in it must be a recorded
+  deposit). The opening stores the finalized slot it read: no transfer
+  before it is ever a deposit of the campaign. A deposit account belongs to
+  one campaign for good (a campaign that opened keeps it, even cancelled).
+- **Holder's precheck** (`precheck`, module on): campaign open, window
+  started and not ended, not an excluded wallet, sanctions clear (403 on a
+  hit, 503 on mainnet while the list cannot answer), units left under the
+  cap, the balance in the wallet's own ATA, the Terms in force accepted.
+  The wallet then signs [create the deposit account (idempotent), the memo
+  `manci:migration:v1:<campaign id>:<lots>`, TransferChecked of lots × lot].
+- **Recording a deposit** (`record` by the holder, rate-limited per wallet;
+  `admin/reconcile` by the operator): the transaction read at **finalized**,
+  at or after the opening slot; the deposit account of the old mint grew by
+  exactly what the source owner's accounts sent, nothing else of the old mint
+  moved, and no account's owner changed inside the transaction. Then: accepted (k lots → k units), or
+  **irregular** with the first reason that applies (campaign not open,
+  excluded wallet, block time outside the window, not signed by the source
+  owner, not a whole number of lots, memo missing or wrong), the depositing
+  wallet screened report-only (a hit: **compliance hold**, neither
+  delivered nor refunded without the compliance team), and the insert
+  serialized per campaign so the cap is never passed (an accepted deposit
+  over it is recorded irregular `over_cap`). A screen that cannot answer on
+  mainnet refuses the record (retry later): nothing is accepted unscreened.
+- **Deliveries, refunds, the burn** (`admin/record`): proven from the
+  finalized transaction's balances, signers not required (a Squads vault
+  signs inside its CPI), and later than the deposits they settle. A delivery
+  or refund signature is never reused for other deposits; one refund
+  transaction may return several irregular deposits of ONE holder. The burn
+  is recorded only once every deposit is delivered or refunded and its
+  block time is not before the close; a campaign whose tokens were burned is
+  never cancelled.
+
+**Prerequisites** (all before the opening):
+
+1. The shareholders' decision: E (the share for the holders) and the source
+   of the units (transfer from the founders' shares, or a capital increase),
+   recorded off chain. For a joint-stock company G is its number of shares,
+   from the share register (with a capital increase as the source, the
+   count the decision fixes after the increase; counsel confirms it). Check
+   that one unit of the share class is the same share of the company the
+   asset's other pages state (its tokenize figures), so no page says two
+   different things about one unit.
+2. The **Swap Terms**, counsel's document for this campaign: the ratio and
+   lot (from the saved draft), the window dates, the excluded supply, the
+   treatment of irregular deposits (refund), of unclaimed units (back to the
+   source, or never issued) and of the collected old tokens (burned). Its
+   SHA-256 (`shasum -a 256 swap-terms.pdf`) and an https link go into the
+   draft. The platform Terms must offer the module (counsel's clause; the
+   PR that added the module carries a draft for counsel).
+3. The share class: an initialized mint (Open class recommended: a
+   KycGated class would need a passport for every recipient), `max_supply`
+   at least the units cap (or none), and the units in the **treasury
+   wallet**: for a transfer from the founders, the founders send the units
+   cap to the treasury up front; for a capital increase with "never
+   issued", mint to the treasury (`/admin/share-classes`, Treasury mint)
+   only what the accepted deposits owe, before each delivery batch, so no
+   unclaimed unit is ever minted.
+4. The **deposit owner**: a Squads vault is recommended (no single key can
+   move the deposits; refunds and the burn are then multisig proposals,
+   recorded on `/admin/migrations`), and a fresh one per campaign (its own
+   vault index): the database gives a deposit account to one campaign for
+   good, so a re-run after a cancel needs a new deposit owner. The page warns
+   when the deposit owner is the admin's own wallet. Decide who signs the deliveries (the treasury
+   wallet connected on `/admin/migrations`, or a Squads treasury whose
+   transactions are recorded by signature).
+5. Migration 0085 applied (devnet first: `bash scripts/ops/backup.sh devnet
+   pre-0085`, then `MANCI_TARGET=devnet bash scripts/db.sh -f
+   supabase/migrations/0085_token_migrations.sql`; check with `select
+   count(*) from public.token_migrations;` (0) and that both tables are
+   listed by `mancipatio_ops.install_network_guards()`; the mainnet project
+   gets it with the rest of the chain, before the front that uses it).
+6. On mainnet: KYC-only mode off and `NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION=true`
+   in the **same production build** as the Terms that offer the module
+   (`ops/env-vars.md`, "Pilot scope"). Check: `/portfolio/migration` and
+   `/admin/migrations` without the "not available" notice.
+7. Rehearsed on devnet end to end with a devnet SPL token: draft →
+   open → a holder's deposit of 1 and of 2 lots → an irregular deposit (not
+   a whole lot) → reconcile of a deposit recorded by nobody → delivery →
+   refund → close → burn → complete → the report's hash checked with
+   `shasum -a 256` against the campaign page.
+
+**Opening**
+
+1. `/admin/migrations` → *+ New draft*: pick the share class, enter the old
+   mint and the excluded wallets (team, treasury, liquidity pools,
+   exchanges), *Read the token*. Enter E and choose G (a preset, or
+   *Custom* with a joint-stock company's number of shares). The calculator
+   shows S_old, N_target, the lot, the units cap, E_eff and the warnings
+   (too few units: raise G, for a joint-stock company only after a share
+   split; a lot that is not a whole number of tokens; E_eff more than 5 %
+   below E). An E below one unit of a small G is refused with the smallest
+   E that works.
+   Fill the window (60–90 days), the source, the unclaimed policy, the
+   deposit owner and the treasury, *Save as draft*. The server reads the
+   chain again and stores its own numbers: read them back on the campaign.
+2. Counsel finalizes the Swap Terms with those numbers; add their SHA-256
+   and link to the draft (*Edit draft*), save again.
+3. *Create the deposit account and open*: your wallet creates the deposit
+   owner's ATA of the old mint if it does not exist (you pay its rent), the
+   server checks it and opens the campaign. Publish `/migrations/<slug>`.
+
+**Daily**
+
+- *Reconcile deposits* (at least once a day, and before every delivery
+  batch): it records the deposits nobody recorded (a closed tab, a manual
+  transfer) and lists the transactions that are not deposits. It sweeps the
+  deposit account's history backwards in bounded runs (at most 40 unknown
+  transactions or 40 seconds each) and stores where it stopped on the
+  campaign, so noise sent to the public deposit account can slow it but
+  never stall it; run it again until it says the history is read up to now.
+  A deposit seen on an explorer can also be recorded alone (*Record a
+  transaction made elsewhere* → Deposit). A transfer into the deposit
+  account that cannot be attributed to one wallet (several source wallets,
+  tokens also moved elsewhere, a fee on the way, an owner change) is never
+  recorded: the deposit owner returns it by hand to its sender, and the
+  case file records the transaction.
+- Read the deposits table: irregular deposits are refunded (below); a
+  compliance hold goes to the compliance team (`/admin/compliance` has the
+  alert).
+- Watch the treasury's units against the units due (the delivery panel).
+
+**Delivery batches**
+
+1. Connect the treasury wallet on `/admin/migrations` → the campaign →
+   *Deliver units*. Holders are delivered whole: all of a holder's accepted
+   deposits in one transfer.
+2. The panel checks every recipient on chain, screens them under the run's
+   id (a hit leaves that holder's deposits accepted, for compliance), takes
+   the server's screening evidence, packs and test-runs the transfers, then
+   one wallet prompt per transaction. Each transaction is recorded once
+   finalized; a receipt that is not recorded yet stays for *Retry recording*
+   (do not send again).
+3. A Squads treasury: execute the same transfers through a proposal, then
+   *Record a transaction made elsewhere* → Delivery → the signature.
+
+**Refunds**
+
+- An irregular deposit (and, in a cancelled campaign, every accepted one)
+  goes back to the wallet that made it, in full. With the deposit owner's
+  wallet connected: *Refund* on the row. A Squads deposit owner: a proposal
+  with the same transfer, then *Record a transaction made elsewhere* →
+  Refund → the signature and the deposit ids. One refund transaction may
+  return several irregular deposits of ONE holder (their total, in one
+  transfer): many tiny deposits from one wallet cost one refund. Every
+  recorded irregular deposit must be refunded before the campaign completes,
+  however small (the Swap Terms may set a de minimis rule; counsel's call).
+- A compliance hold is refunded only on the compliance team's decision (the
+  page asks for the confirmation; the server refuses without it).
+
+**Closing**
+
+- After the window (or once every unit is claimed): *Close*. Run
+  *Reconcile* once more: a deposit landing after the window is recorded
+  irregular and refunded.
+- Deliver every accepted deposit and refund every irregular one.
+
+**Burn of the collected old tokens**
+
+- Only after the last refund (the deposit account must hold only exchanged
+  deposits; the server refuses to record a burn while any deposit is
+  accepted or irregular, or one made before the close): the deposit owner
+  burns its balance (*Burn the collected tokens* with that wallet connected,
+  or a Squads proposal with BurnChecked from the deposit account, then
+  *Record a transaction made elsewhere* → Burn). Recorded once; burn before
+  completing so the final report names the burn.
+
+**Final report**
+
+- *Complete and publish the report* (closed, every deposit delivered or
+  refunded): the server builds the report (every deposit, the totals, the
+  ratio, the hashes), stores it with its SHA-256, and the campaign page
+  links it (`/api/token-migrations/report?slug=<slug>`, header
+  `X-Content-SHA256`). Download it and check `shasum -a 256` against the
+  page. It never changes.
+- Unclaimed units (cap minus delivered, in the report): back to their
+  source (the treasury returns them to the founders) or never issued (burn
+  any minted surplus from the treasury), as the Swap Terms say. Record the
+  transaction in the company's records.
+
+**Rollback and cancel**
+
+- A draft: *Cancel the campaign* (nothing exists on chain but, at most, an
+  empty deposit account).
+- An open or closed campaign with nothing delivered: *Cancel the campaign*.
+  Deposits recorded afterwards are irregular (`not_open`); refund every
+  accepted and irregular deposit. Switching the module off stops new
+  prechecks but not a manual transfer: cancel the campaign to stop deposits
+  being accepted.
+- Once any unit was delivered, or the collected tokens were burned, the
+  database refuses a cancel: close the campaign after its window, settle
+  every deposit, complete it. A re-run of a cancelled campaign needs a fresh
+  deposit owner.
+- A late deposit into a completed campaign's deposit account is not
+  recorded (the report is final): the deposit owner refunds it by hand and
+  the case file records it.
+- Database: dropping 0085 (the statements in its header) is possible only
+  while no campaign has opened.
+
+## 25. Certificates for authorities
+
+The product version of the confirmation made by hand on 2026-10-04
+(`MANCI-2026-0001`, a PDF signed with the operator's key): the Super Admin
+creates a numbered certificate of tokenized interest, signs it with the
+operator's key and anchors its hash on chain, and whoever holds the
+certificate checks it on `/certificates/verify` with its number and SHA-256.
+Two kinds: **holding** (the units of one share class a wallet holds, and the
+share of the company they stand for) and **issuance** (a share class as
+issued: maximum supply, units issued to date, units in circulation). Numbers run per network and year: `MC-2026-0001`,
+`MC-2026-0002`, … (the 2026-10-04 confirmation keeps its own reference and
+anchor). Code: `front/lib/certificates/`, `front/app/api/admin/certificates/`,
+`front/app/admin/certificates/`, `front/app/(marketing)/certificates/verify/`.
+
+**Database: migration `0087_certificates.sql`** (tables `certificates` and
+`certificate_counters`, the allocator `allocate_certificate_number`, the
+lifecycle guard). Expand-only; the certificate pages answer "not set up on
+this database yet (migration 0087)" until it is applied. No environment
+variable. Apply devnet first, then mainnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0087
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0087_certificates.sql
+bash scripts/ops/backup.sh mainnet pre-0087
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f supabase/migrations/0087_certificates.sql
+```
+
+What the database enforces: a row is born a draft; draft → signed →
+anchored, and any status → revoked (with who and why); revoked is final;
+the payload, its hash and the signer never change, a signature or an anchor
+never changes once set, and only a draft can be deleted. The stored hash is
+always the SHA-256 of the stored canonical text, and the row's columns
+(number, kind, network, signer, asset, class, holder wallet) always equal the
+payload's. No browser role can read either table; the counter is written
+only by the allocator.
+
+**Issuing one** (`/admin/certificates`): any admin lists, previews, prints,
+downloads and revokes; only the Super Admin creates, signs and anchors
+(issuing an official certificate is the operator's act; the routes check
+`Platform.admin`, and another admin sees on the page why those buttons are
+off):
+
+1. *New certificate*: the kind, the share class and, for a holding, the
+   holder's wallet. *Preview* reads the chain (finalized) and fills in the
+   company's details and the scale from the last certificate of the asset,
+   else the tokenization record, the issuer profile or the SPV. Check every
+   field against the company register: legal name, registration number,
+   registered address, and *units for 100 %* (MANCI-2026: 10000, so 1 unit =
+   0.01 %). The holder's name and identification number are optional and are
+   personal data: fill them in only when the certificate must name the
+   holder. Evidence transactions (optional, up to 10) must be finalized and
+   successful. Read the statement in the preview.
+2. *Create draft* (the Super Admin's wallet signs the request). The server
+   reads the chain again, takes the next number and stores the canonical
+   payload with a random salt; the draft names the creating wallet as its
+   signer. A draft is not public. A wrong draft is *Discarded* (its number
+   stays on record as discarded, so the series has no silent gaps; only a
+   failed insert right after the allocation can skip a number).
+3. *Sign with your wallet* (the Super Admin who created the draft, its
+   signer). The wallet signs three lines, `Manci certificate v1` /
+   `Number: …` / `SHA-256: …`; a Ledger behind Phantom or Solflare signs
+   them inside a Solana off-chain message, which is accepted and recorded as
+   such. The server verifies the Ed25519 signature
+   against the stored row before it records it. From now on the public page
+   answers "valid".
+4. *Anchor on chain*: with the Super Admin's wallet connected, the certificate
+   panel sends the memo `MC-… sha256:<hash>` through the document-anchor
+   flow (`ops/sop-admin.md` "Document anchors": the same send, finalized
+   check and audit row) and attaches the anchor once it is recorded. If the
+   memo was sent elsewhere (Admin → Platform → *Anchor a document* with the
+   number as the reference and the certificate's SHA-256), the Super Admin
+   clicks *Attach recorded anchor*. As for every document anchor: record it
+   before the Super Admin key is rotated.
+5. *Print view* → *Print or save as PDF* (A4; the PDF takes the number as its
+   file name). *Download JSON* saves the exact signed bytes for the holder;
+   their SHA-256 is the certificate's. Give the authority the PDF (and the
+   JSON when it wants to check the holder's details) and the link printed on
+   it, `/certificates/verify?number=MC-…&sha256=…`: the link carries the
+   certificate's hash, which is what opens its contents on the public page.
+
+**Revoking**: *Revoke certificate* with a reason (a fresh wallet signature).
+The public page then answers "revoked" with the date; the reason stays
+admin-only. An anchor stays on chain; the revocation is recorded off chain.
+Signing and attaching an anchor wait out maintenance mode; creating and
+revoking need a fresh signature and are refused during maintenance like any
+write.
+
+**What the public page shows**: numbers are sequential, so a number alone
+must not list who obtained certificates. With the number only, or with a
+SHA-256 that is not the certificate's, the page (and `POST
+/api/certificates/verify`) answers only whether the certificate exists and
+its status: valid, revoked with the date, or invalid (its stored hash or
+signature fails the re-check); not found for a draft or a draft discarded
+before signing (never issued); and asks for the SHA-256 printed on the
+certificate (or its JSON file, hashed in the browser). No wallet, units,
+percentages, company, asset or class, signer, signature or anchor. With the
+number and the certificate's own SHA-256 (the printed link carries it) it
+shows everything the certificate states: the kind, issue date, company,
+asset and share class, units and percentages, the holder's wallet, the
+signer, the signature (re-verified on every check) and the anchor
+transaction. Never the holder's name or ID number, the statement that
+repeats them, or the revocation reason. The route stays rate-limited per
+client address (a burst limit per instance and a shared limit of 60 checks
+per 10 minutes). Limit: an anchored certificate's memo publishes its number
+and hash on chain, so whoever reads the Super Admin key's memos can open
+anchored certificates one at a time; the units and wallets they show are on
+chain anyway.
+
+**Checking a certificate without the site** (for an authority's own
+script): the hash is SHA-256 over the canonical JSON in UTF-8; the encoding
+(sorted keys, no whitespace, NFC strings, amounts as decimal strings) is
+what Python's `json.dumps(payload, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)` produces:
+
+```
+python3 -c 'import json,hashlib,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); print(hashlib.sha256(json.dumps(p,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")).hexdigest())' MC-2026-0001.json
+```
+
+The signature (base58) is Ed25519 by the signer's public key (base58)
+over the UTF-8 bytes of `Manci certificate v1\nNumber: <number>\nSHA-256:
+<hash>` (format `raw`). A Ledger behind a wallet app signs format
+`offchain-v0` (or the older `offchain-v0-legacy`) instead: a Solana
+off-chain message, version 0, application domain of 32 zero bytes, format 0
+(restricted ASCII) and the signer as its one signatory (the legacy layout
+has no domain and no signatory), whose text is that message with every
+character outside printable ASCII written as `\u` and four lowercase hex
+digits: the two line breaks become `\u000a`, which is also what the device
+shows (`front/lib/siws-offchain.ts`). The stored `signature_format` says
+which. The anchor transaction's memo is `<number> sha256:<hash>`, signed by
+the platform's Super Admin key.
+
+**Personal data**: a holder's name and ID number live only in the
+certificate's payload (admin-only routes, the printed certificate). A signed
+payload cannot change, and the client-dossier erasure
+(`/api/clients/anonymize`) does not reach it: whether and how a certificate's
+holder details are redacted later (for example keeping the hash and dropping
+the stored text) is counsel's decision, not built yet.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):

@@ -60,6 +60,7 @@ export const config = {
     "/api/conversion/create",
     "/api/delivery/create",
     "/api/vesting-series/create",
+    "/api/token-migrations/precheck",
     "/api/clients/accept-tos",
     "/api/tos/accept",
     "/marketplace/:path*",
