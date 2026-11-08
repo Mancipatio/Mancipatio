@@ -36,6 +36,15 @@ export async function getToken2022Balance(
   owner: string,
   mint: string,
 ): Promise<bigint> {
+  return (await getToken2022Balances(owner)).get(mint) ?? BigInt(0);
+}
+
+/**
+ * Every Token-2022 balance (base units) the owner holds, per mint, summed
+ * across its token accounts, from one RPC read. Throws SiwsError(503) when
+ * the RPC is unreachable; a mint the owner never held is simply absent.
+ */
+export async function getToken2022Balances(owner: string): Promise<Map<string, bigint>> {
   let res;
   try {
     res = await getRpc()
@@ -49,7 +58,7 @@ export async function getToken2022Balance(
     console.error("[token-holdings] RPC failure:", err);
     throw new SiwsError(503, "On-chain balance check unavailable — try again");
   }
-  let total = BigInt(0);
+  const totals = new Map<string, bigint>();
   for (const item of res.value ?? []) {
     // jsonParsed shape: account.data.parsed.info.{ mint, tokenAmount: { amount } }
     const data = item.account?.data as unknown;
@@ -60,10 +69,12 @@ export async function getToken2022Balance(
       }
     ).parsed;
     const info = parsed?.info;
-    if (info?.mint !== mint || !info?.tokenAmount?.amount) continue;
-    total += BigInt(info.tokenAmount.amount);
+    const amount = info?.tokenAmount?.amount;
+    // An unreadable amount counts as nothing held (never as a balance).
+    if (typeof info?.mint !== "string" || typeof amount !== "string" || !/^\d+$/.test(amount)) continue;
+    totals.set(info.mint, (totals.get(info.mint) ?? BigInt(0)) + BigInt(amount));
   }
-  return total;
+  return totals;
 }
 
 /**

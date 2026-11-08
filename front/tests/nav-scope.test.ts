@@ -117,7 +117,7 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
 
     expect(hrefs(tabs(shell("marketplace", "/marketplace")))).toEqual(["/marketplace", "/marketplace/launchpad"]);
     const issuer = hrefs(tabs(shell("issuer", "/issuer")));
-    expect(issuer).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets", "/issuer/cap-table"]);
+    expect(issuer).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets", "/issuer/cap-table", "/issuer/updates"]);
     for (const href of ["/issuer/payouts", "/issuer/vesting", "/issuer/vesting-series"]) expect(issuer).not.toContain(href);
   });
 
@@ -134,7 +134,7 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
   it("devnet shows enabled portfolio entries and the ordered issuer process", () => {
     const links = [...hrefs(sidebar(shell("portfolio", "/portfolio"))), ...hrefs(tabs(shell("portfolio", "/portfolio")))];
     for (const href of OFF_ON_MAINNET_USER.filter((h) => h.startsWith("/portfolio") || h === "/marketplace/otc")) expect(links, href).toContain(href);
-    expect(hrefs(tabs(shell("issuer", "/issuer")))).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets", "/issuer/cap-table"]);
+    expect(hrefs(tabs(shell("issuer", "/issuer")))).toEqual(["/issuer", "/issuer/verification", "/issuer/status", "/issuer/request", "/issuer/launchpad", "/issuer/assets", "/issuer/cap-table", "/issuer/updates"]);
   });
 
   it("an off module's page is still served by URL, with its notice", () => {

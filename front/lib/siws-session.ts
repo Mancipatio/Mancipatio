@@ -23,8 +23,13 @@
 // (app/api/admin/document-anchor). Its params (signature, reference, hash)
 // are unsigned, but the row is written only when the chain shows exactly that
 // memo signed by the session wallet, so holding the Super Admin's session
-// cookie only lets one record an anchor that wallet already signed. Any new
-// exception must meet the same bar and be listed here.
+// cookie only lets one record an anchor that wallet already signed.
+// issuerUpdates.anchor is the same record for an issuer update: its only
+// write is the update's anchor_tx, set once, after the server re-read the
+// finalized transaction and found exactly the memo it computes itself for
+// that published update, signed by the session wallet alone, that wallet
+// being the issuer's on-chain authority (app/api/issuer-updates/anchor). Any
+// new exception must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";
 
@@ -94,6 +99,15 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "fees.list",
   "inquiries.list",
   "issuer-profiles.read",
+  // Investor relations (0090): the issuer's own list, the admins' moderation
+  // list, a holder's read (balances checked on chain) and ONE document link
+  // signed on click; none of them writes anything.
+  "issuerUpdates.adminList",
+  "issuerUpdates.documentUrl",
+  "issuerUpdates.holderRead",
+  "issuerUpdates.mine",
+  // Records the anchor of a published update (an accepted exception, see the header).
+  "issuerUpdates.anchor",
   "otc.adminScreen",
   "otc.list",
   "passport.list",

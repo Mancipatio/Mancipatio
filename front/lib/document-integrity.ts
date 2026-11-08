@@ -2,6 +2,13 @@
  * the server verifies the stored bytes and returns a version ID. */
 export const DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
 export const DOCUMENT_STAGING_BUCKET = "document-uploads";
+/**
+ * Issuer update attachments (migration 0090): issuer-updates/<issuer>/<file>
+ * becomes issuer-updates/<issuer>/<network>/<sha256>/<file>, in the private
+ * bucket (app/api/storage/_lib.ts bucketForPrefix). Only that issuer's
+ * authority may upload there (app/api/storage/upload).
+ */
+export const ISSUER_UPDATE_PREFIX = "issuer-updates";
 export function documentDestination(
   path: string,
   sha256: string,
@@ -17,6 +24,13 @@ export function documentDestination(
     parts.some((p) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p))
   )
     throw new Error("Invalid document path");
+  if (parts[0] === ISSUER_UPDATE_PREFIX) {
+    if (parts.length !== 3 || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(parts[1]))
+      throw new Error("Invalid issuer update document path");
+    const filename =
+      parts[2].replace(/^[0-9a-f]{8,64}-/, "").slice(0, 140) || "document";
+    return `${ISSUER_UPDATE_PREFIX}/${parts[1]}/${network}/${sha256}/${filename}`;
+  }
   if (parts[0] !== "whitepapers") return path;
   if (parts.length < 3 || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(parts[1]))
     throw new Error("Invalid whitepaper asset");

@@ -17,6 +17,8 @@
 
 import "server-only";
 
+import { ISSUER_UPDATE_PREFIX } from "@/lib/document-integrity";
+
 export const PUBLIC_BUCKET = "documents";
 export const CONFIDENTIAL_BUCKET = "documents-confidential";
 
@@ -38,9 +40,15 @@ export const CONFIDENTIAL_CATEGORIES = new Set([
   "other",
 ]);
 
-/** Physical bucket for a storage path's top-level prefix (category). */
+/**
+ * Physical bucket for a storage path's top-level prefix (category). Issuer
+ * update attachments (0090) are private whatever the update's visibility:
+ * every read is a signed URL handed out after /api/issuer-updates checked the
+ * update's status, visibility and the reader's holding, so a withdrawal (or
+ * moderation) cuts access to the files as well.
+ */
 export function bucketForPrefix(prefix: string): string {
-  return CONFIDENTIAL_CATEGORIES.has(prefix)
+  return CONFIDENTIAL_CATEGORIES.has(prefix) || prefix === ISSUER_UPDATE_PREFIX
     ? CONFIDENTIAL_BUCKET
     : PUBLIC_BUCKET;
 }

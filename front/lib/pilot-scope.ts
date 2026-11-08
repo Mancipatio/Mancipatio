@@ -113,6 +113,8 @@ export const KYC_ONLY_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/issuer/payouts", modules: ["issuance"], mode: "notice" },
   // The issuer's cap table is a read of its own assets: it stays, under the notice.
   { prefix: "/issuer/cap-table", modules: ["issuance"], mode: "notice" },
+  // Investor relations: composing pauses; reading, discarding and withdrawing stay.
+  { prefix: "/issuer/updates", modules: ["issuance"], mode: "notice" },
 ];
 
 /** KYC-only mode: guides of what it pauses leave every menu (the pages stay, without a notice). */

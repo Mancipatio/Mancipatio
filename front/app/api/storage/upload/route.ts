@@ -9,13 +9,20 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireProfileOwner } from "@/lib/server/profile-read";
 import { requireArea } from "@/lib/server/feature-gate";
-import { documentDestination,DOCUMENT_MAX_BYTES,DOCUMENT_STAGING_BUCKET } from "@/lib/document-integrity";
+import { documentDestination,DOCUMENT_MAX_BYTES,DOCUMENT_STAGING_BUCKET,ISSUER_UPDATE_PREFIX } from "@/lib/document-integrity";
 import { bucketForPrefix } from "../_lib";
 
 const MIME_ALLOWLIST=new Set(["application/pdf","image/png","image/jpeg","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
 const ADMIN_PREFIXES=new Set(["legal","kyb-template","issuer-agreement","compliance","marketing","other"]);
 async function requireUploader(wallet:string,path:string) {
   const parts=path.split("/");
+  // Issuer update attachments (0090): the issuer's own authority only, never an
+  // admin on its behalf; composing an update is issuance activity (KYC-only mode).
+  if(parts[0] === ISSUER_UPDATE_PREFIX) {
+    requireArea("issuance");
+    await requireProfileOwner(wallet,parts[1],"issuer");
+    return;
+  }
   if(parts[0] !== "whitepapers") {
     if(!ADMIN_PREFIXES.has(parts[0])) throw new SiwsError(400,"Unknown document category");
     await requireAdmin(wallet);return;
