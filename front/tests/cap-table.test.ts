@@ -1,7 +1,10 @@
 // The cap table's pure logic (lib/cap-table.ts, lib/register-entries.ts):
 // exact percent and basis-point arithmetic, every reconciliation check in
 // each of its states, the issuer and public projections (no personal data),
-// the CSV export and the register-entry input narrowing.
+// the CSV export and the register-entry input narrowing. max_supply is the
+// class cap in units: a percentage of the company is units × the share of
+// one unit from the tokenize figures, never units ÷ max_supply (MANCI-2026,
+// a class that is 17.5 % of its company, below).
 import { describe, expect, it } from "vitest";
 import {
   bpsConsistent,
@@ -15,20 +18,23 @@ import {
   issuerReconciliation,
   normalizeBps,
   parseBps,
-  percentOfSupply,
+  percentForUnits,
   percentToBps,
   publicSupplyClass,
-  ratioText,
   reconcileAsset,
   reconcileShareClass,
-  unitsToBps,
+  unitPercentE4,
+  unitShareOf,
   worstState,
   type CheckId,
   type CheckState,
   type ClassChainFacts,
   type ConversionFacts,
   type RegisterEntryFacts,
+  type UnitShareFigures,
 } from "@/lib/cap-table";
+import { companyFiguresFrom } from "@/lib/distribution-rows";
+import { CLASS_INDEX } from "@/lib/tokenize-shares";
 import {
   parseRegisterEntryInput,
   parseRegisterVoidInput,
@@ -48,7 +54,10 @@ const TX_1 = "1".repeat(87) + "A";
 const TX_2 = "2".repeat(87) + "B";
 const SHA = "ab".repeat(32);
 
-/** MANCI-2026: 10,000 units = 100 %, 250 converted (burned) on 2026-10-10. */
+/** The tokenize figures of a class of 10,000 units of 0.01 % each: the whole company. */
+const WHOLE: UnitShareFigures = { classIndex: 0, tokens: n(10_000), tokenE4: n(100) };
+
+/** A whole-company class (10,000 units, 1 unit = 0.01 % with WHOLE), 250 converted (burned) on 2026-10-10. */
 function chain(over: Partial<ClassChainFacts> = {}): ClassChainFacts {
   return {
     shareClassPda: CLASS,
@@ -112,31 +121,66 @@ function entry(over: Partial<RegisterEntryFacts> = {}): RegisterEntryFacts {
   };
 }
 
+// ── MANCI-2026 as on mainnet (2026-11-08) ──
+// Share class E4Ws…UCz: max_supply 1,750 units = 17.5 % of Mancipatio d.o.o.,
+// cumulative_cap false, 500 issued (5 %), 250 burned by the DeliveryEscrow
+// realize of 2026-10-10 (the registry moved 2.5 percentage points), 250
+// outstanding (2.5 %). Its profile records the figures below (a draft).
+const MANCI_CLASS = "E4WsTffEbUEG4xC5qizVyCgFgHqGHRjWQVR2Cj4yMUCz";
+const MANCI_TOKENIZE = { v: 1, tokens: "1750", percent: "17.5", percent_e4: "175000", granularity_percent: "0.01" };
+const manciCompany = companyFiguresFrom(MANCI_TOKENIZE)!;
+const MANCI: UnitShareFigures = { classIndex: CLASS_INDEX, tokens: manciCompany.tokens, tokenE4: manciCompany.tokenE4 };
+
+function manciChain(over: Partial<ClassChainFacts> = {}): ClassChainFacts {
+  return chain({
+    shareClassPda: MANCI_CLASS,
+    maxSupply: n(1_750),
+    lifetimeMinted: n(500),
+    circulatingSupply: n(250),
+    mintSupply: n(250),
+    holders: [
+      { owner: TREASURY, units: n(150), kind: "treasury" },
+      { owner: BOB, units: n(100), kind: "wallet" },
+    ],
+    ...over,
+  });
+}
+const manciConversion = (over: Partial<ConversionFacts> = {}) => converted({ shareClassPda: MANCI_CLASS, ...over });
+/** The entry the owner records after the registry decision: 250 units, 2.5 % (250 bps). */
+const manciEntry = (over: Partial<RegisterEntryFacts> = {}) => entry({ shareClassPda: MANCI_CLASS, percentBps: "250", ...over });
+
 const states = (checks: { id: CheckId; state: CheckState }[]) =>
   Object.fromEntries(checks.map((c) => [c.id, c.state])) as Record<CheckId, CheckState>;
 const detail = (checks: { id: CheckId; detail: string }[], id: CheckId) => checks.find((c) => c.id === id)!.detail;
 
 describe("exact percent and basis-point arithmetic", () => {
-  it("formats scaled integers and rounded ratios without floating point", () => {
+  it("formats scaled integers without floating point", () => {
     expect(formatScaled(n(25_000), 4)).toBe("2.5");
     expect(formatScaled(n(2_500_000), 4)).toBe("250");
     expect(formatScaled(n(1), 4)).toBe("0.0001");
     expect(formatScaled(n(0), 6)).toBe("0");
-    expect(ratioText(n(1), n(3), 6)).toBe("0.333333");
-    expect(ratioText(n(2), n(3), 6)).toBe("0.666667");
-    expect(ratioText(n(1), n(8), 2)).toBe("0.13");
-    expect(() => ratioText(n(1), n(0), 2)).toThrow();
     expect(formatUnits("10000")).toBe("10,000");
     expect(formatUnits(n(1_000_000))).toBe("1,000,000");
   });
 
-  it("what one unit is: 0.01 % of 10,000, 0.0001 % of 1,000,000, nothing for an uncapped class", () => {
-    expect(percentOfSupply(n(1), n(10_000))).toBe("0.01");
-    expect(percentOfSupply(n(250), n(10_000))).toBe("2.5");
-    expect(percentOfSupply(n(1), n(1_000_000))).toBe("0.0001");
-    expect(percentOfSupply(n(1), n(3))).toBe("33.333333");
-    expect(percentOfSupply(n(1), null)).toBeNull();
-    expect(percentOfSupply(n(1), n(0))).toBeNull();
+  it("a share of the company is units × the share of one unit, exactly; nothing without that share", () => {
+    expect(percentForUnits(n(250), "0.01")).toBe("2.5");
+    expect(percentForUnits("500", "0.01")).toBe("5");
+    expect(percentForUnits(n(1_750), "0.01")).toBe("17.5");
+    expect(percentForUnits(n(1), "0.0001")).toBe("0.0001");
+    expect(percentForUnits(n(37), "0.0001")).toBe("0.0037");
+    expect(percentForUnits(n(0), "0.01")).toBe("0");
+    expect(percentForUnits(n(1), null)).toBeNull();
+    expect(percentForUnits(null, "0.01")).toBeNull();
+    expect(percentForUnits("1.5", "0.01")).toBeNull();
+    expect(unitPercentE4("0.01")).toBe(n(100));
+    expect(unitPercentE4("0.001")).toBe(n(10));
+    expect(unitPercentE4("0.0001")).toBe(n(1));
+    expect(unitPercentE4("17.5")).toBe(n(175_000));
+    expect(unitPercentE4("100")).toBe(n(1_000_000));
+    for (const bad of [null, undefined, "", "0", "0.0000", "0.00001", "100.0001", "1e-2", "-0.01", ".01", "01"]) {
+      expect(unitPercentE4(bad), String(bad)).toBeNull();
+    }
   });
 
   it("parses basis points with up to four decimals, as written (trailing zeros dropped)", () => {
@@ -161,22 +205,21 @@ describe("exact percent and basis-point arithmetic", () => {
     expect(bpsToPercent("250")).toBe("2.5");
     expect(bpsToPercent("0.37")).toBe("0.0037");
     expect(bpsToPercent("nope")).toBe("");
-    expect(unitsToBps(n(250), n(10_000))).toBe("250");
-    expect(unitsToBps(n(1), n(3))).toBe("3333.3333");
   });
 
-  it("a percentage is consistent when it equals units ÷ max supply rounded up or down at the precision written", () => {
-    expect(bpsConsistent("250", n(250), n(10_000))).toBe(true);
-    expect(bpsConsistent("250.0000", n(250), n(10_000))).toBe(true);
-    expect(bpsConsistent("251", n(250), n(10_000))).toBe(false);
-    // 1 of 3 = 3333.3333… bps
-    for (const ok of ["3333", "3334", "3333.33", "3333.34", "3333.3333", "3333.3334"]) expect(bpsConsistent(ok, n(1), n(3)), ok).toBe(true);
-    for (const off of ["3332", "3335", "3333.35", "3333.3332"]) expect(bpsConsistent(off, n(1), n(3)), off).toBe(false);
-    // G = 1,000,000: one unit is 0.01 bps.
-    expect(bpsConsistent("0.01", n(1), n(1_000_000))).toBe(true);
-    expect(bpsConsistent("12.34", n(1_234), n(1_000_000))).toBe(true);
-    expect(bpsConsistent("12.35", n(1_234), n(1_000_000))).toBe(false);
-    expect(bpsConsistent("bad", n(1), n(3))).toBe(false);
+  it("a percentage is consistent when it equals units × the share of one unit, rounded up or down at the precision written", () => {
+    // 0.01 % a unit (100 in 1/10,000 of a percent): 250 units are 250 bps.
+    expect(bpsConsistent("250", n(250), n(100))).toBe(true);
+    expect(bpsConsistent("250.0000", n(250), n(100))).toBe(true);
+    expect(bpsConsistent("251", n(250), n(100))).toBe(false);
+    // MANCI-2026: 250 of its 1,750 units are 2.5 %, never 250 ÷ 1,750 = 14.285714 %.
+    expect(bpsConsistent("1428.5714", n(250), n(100))).toBe(false);
+    // 0.0001 % a unit: 1,234 units are 12.34 bps; fewer decimals may round either way.
+    for (const ok of ["12.34", "12.3400", "12.3", "12.4", "12", "13"]) expect(bpsConsistent(ok, n(1_234), n(1)), ok).toBe(true);
+    for (const off of ["12.35", "12.33", "12.5", "11", "14", "12.3401"]) expect(bpsConsistent(off, n(1_234), n(1)), off).toBe(false);
+    // 0.001 % a unit: one unit is 0.1 bps.
+    expect(bpsConsistent("0.1", n(1), n(10))).toBe(true);
+    expect(bpsConsistent("bad", n(1), n(100))).toBe(false);
     expect(bpsConsistent("1", n(1), n(0))).toBe(false);
   });
 
@@ -187,9 +230,105 @@ describe("exact percent and basis-point arithmetic", () => {
   });
 });
 
+describe("the share of one unit", () => {
+  it("only from tokenize figures that match the class: its index, a cap, max_supply = their tokens", () => {
+    expect(unitShareOf(manciChain(), MANCI)).toEqual({
+      e4: n(100), state: "pass",
+      detail: "1 unit = 0.01 % of the company: the tokenize figures (1,750 units = 17.5 %) match the class cap.",
+    });
+    expect(unitShareOf(manciChain(), null)).toMatchObject({ e4: null, state: "pass", detail: expect.stringMatching(/No tokenize figures/) });
+    // Figures written for 10,000 units (as if the cap were the whole company) do not fit a 1,750-unit cap.
+    expect(unitShareOf(manciChain(), WHOLE)).toEqual({
+      e4: null, state: "warn",
+      detail: "The tokenize figures are for 10,000 units of 0.01 % each, but the class cap is 1,750 units: no percentages are shown until they agree.",
+    });
+    expect(unitShareOf(manciChain({ maxSupply: null }), MANCI)).toMatchObject({ e4: null, state: "warn", detail: expect.stringMatching(/no max supply/) });
+    expect(unitShareOf(manciChain({ classIndex: 2 }), MANCI)).toMatchObject({ e4: null, state: "pass", detail: expect.stringMatching(/share class #0: this class shows units only/) });
+    expect(unitShareOf(chain({ maxSupply: n(20_000) }), { classIndex: 0, tokens: n(20_000), tokenE4: n(100) }))
+      .toMatchObject({ e4: null, state: "warn", detail: expect.stringMatching(/more than 100 %/) });
+  });
+});
+
+describe("MANCI-2026: a class that is 17.5 % of its company", () => {
+  it("1 unit = 0.01 %: the cap is 17.5 %, 500 issued are 5 %, 250 outstanding are 2.5 %", () => {
+    const r = reconcileShareClass(manciChain(), [manciConversion()], [], MANCI);
+    expect(r.chain).toMatchObject({ max_supply: "1750", unit_percent: "0.01", lifetime_minted: "500", circulating: "250", burned: "250", burned_by_conversions: "250" });
+    const pct = (units: string | null) => percentForUnits(units, r.chain.unit_percent);
+    expect([pct(r.chain.max_supply), pct(r.chain.lifetime_minted), pct(r.chain.circulating), pct(r.chain.burned_by_conversions)])
+      .toEqual(["17.5", "5", "2.5", "2.5"]);
+    expect(r.holders!.map((h) => [h.owner, h.units, h.percent])).toEqual([[TREASURY, "150", "1.5"], [BOB, "100", "1"]]);
+    expect(states(r.checks)).toMatchObject({
+      units_balance: "warn", entries_for_conversions: "warn", entries_match_chain: "pass", supply_identity: "pass",
+      mint_supply: "pass", within_cap: "pass", unit_share: "pass", entry_percentages: "pass",
+    });
+    expect(detail(r.checks, "supply_identity")).toBe("500 issued − 250 burned through conversions = 250 outstanding.");
+    // The converted units count against the cap while their register entry is still to record.
+    expect(detail(r.checks, "within_cap")).toBe("250 outstanding + 250 converted into registered ownership = 500 of the 1,750-unit class cap (5 % of the company).");
+  });
+
+  it("the register entry the owner records (250 units at 250 bps = 2.5 %) passes every check", () => {
+    const r = reconcileShareClass(manciChain(), [manciConversion()], [manciEntry()], MANCI);
+    expect(r.checks.every((c) => c.state === "pass"), JSON.stringify(r.checks)).toBe(true);
+    expect(detail(r.checks, "entry_percentages")).toBe("Every recorded percentage matches units × 0.01 %.");
+    expect(r.register).toMatchObject({ entries: 1, units: "250", percent_bps: "250", percent: "2.5" });
+    // What the max_supply = 100 % reading would have recorded (250 ÷ 1,750) is flagged.
+    const wrong = reconcileShareClass(manciChain(), [manciConversion()], [manciEntry({ percentBps: "1428.5714" })], MANCI);
+    expect(states(wrong.checks).entry_percentages).toBe("warn");
+    expect(detail(wrong.checks, "entry_percentages")).toMatch(/14\.285714 % recorded, 250 units are 2\.5 %\./);
+  });
+
+  it("figures that do not match the class give no percentage anywhere, and a warn", () => {
+    for (const figures of [WHOLE, { ...MANCI, tokens: n(1_749) }]) {
+      const r = reconcileShareClass(manciChain(), [manciConversion()], [manciEntry()], figures);
+      expect(r.chain.unit_percent).toBeNull();
+      expect(r.holders!.every((h) => h.percent === null)).toBe(true);
+      expect(states(r.checks)).toMatchObject({ unit_share: "warn", entry_percentages: "warn", within_cap: "pass", units_balance: "pass" });
+      expect(detail(r.checks, "entry_percentages")).toMatch(/cannot be checked/);
+      expect(detail(r.checks, "within_cap")).not.toMatch(/%/);
+      expect(r.state).toBe("warn");
+    }
+    // Without any figures: units only; the unit_share check has nothing to compare.
+    const none = reconcileShareClass(manciChain(), [manciConversion()], [], null);
+    expect(none.chain.unit_percent).toBeNull();
+    expect(states(none.checks).unit_share).toBe("pass");
+    expect(capTableCsv(reconcileAsset(
+      { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer11" },
+      "mainnet", [manciChain()], [manciConversion()], [], null, new Date("2026-11-08T10:00:00Z"),
+    ))).toContain(`chain,${MANCI_CLASS},0,${MINT},max_supply,1750,,`);
+  });
+
+  it("minting the converted units again goes over the class cap (fail), counted in units", () => {
+    // Without a cumulative cap the program allows circulating back up to 1,750.
+    const reminted = reconcileShareClass(manciChain({ lifetimeMinted: n(2_000), circulatingSupply: n(1_750), mintSupply: n(1_750), holders: null }),
+      [manciConversion()], [manciEntry()], MANCI);
+    expect(states(reminted.checks).within_cap).toBe("fail");
+    expect(detail(reminted.checks, "within_cap")).toBe(
+      "1,750 outstanding + 250 converted into registered ownership = 2,000 of the 1,750-unit class cap: 250 over the cap. " +
+      "Without a cumulative cap the program lets burned units be minted again: check for a mint into the room a conversion left.");
+    // With one the program cannot, so only entries beyond the conversions take it over.
+    const doubled = reconcileShareClass(manciChain({ cumulativeCap: true, lifetimeMinted: n(1_750), circulatingSupply: n(1_500), mintSupply: n(1_500), holders: null }),
+      [manciConversion()], [manciEntry(), manciEntry({ id: "e0000000-0000-4000-8000-000000000002", conversionRequestId: null })], MANCI);
+    expect(states(doubled.checks).within_cap).toBe("fail");
+    expect(detail(doubled.checks, "within_cap")).toMatch(/= 2,000 of the 1,750-unit class cap: 250 over the cap\. Check the register entries against the conversions\.$/);
+  });
+
+  it("the public view: the published figures give the share of one unit; a draft profile gives units only", () => {
+    const published = publicSupplyClass(manciChain(), [], [manciEntry()], MANCI);
+    expect(published).toEqual({
+      share_class_pda: MANCI_CLASS, class_index: 0, mint: MINT, max_supply: "1750", unit_percent: "0.01",
+      issued: "500", outstanding: "250", in_conversion: "0",
+      converted: { count: 1, units: "250", percent: "2.5" },
+      records: [{ decision_date: "2026-10-09", units: "250", percent: "2.5", registry: "APR", decision_doc_sha256: SHA, realize_tx: TX_1 }],
+    });
+    // A draft profile gives the public no figures: units only, no percentage derived at all.
+    expect(publicSupplyClass(manciChain(), [], [manciEntry()], null).unit_percent).toBeNull();
+    expect(JSON.stringify(published)).not.toMatch(/BD 12345|Jane|d0000000|c0000000|e0000000|A1ice/);
+  });
+});
+
 describe("reconciliation checks", () => {
-  it("MANCI-2026 after its first conversion: every check passes, and the figures add up", () => {
-    const r = reconcileShareClass(chain(), [converted()], [entry()]);
+  it("a whole-company class after a conversion: every check passes, and the figures add up", () => {
+    const r = reconcileShareClass(chain(), [converted()], [entry()], WHOLE);
     expect(r.checks.map((c) => c.id)).toEqual([...CHECK_IDS]);
     expect(r.checks.every((c) => c.state === "pass"), JSON.stringify(r.checks)).toBe(true);
     expect(r.state).toBe("pass");
@@ -204,7 +343,7 @@ describe("reconciliation checks", () => {
     ]);
     expect(r.conversions[0]).toMatchObject({ status: "converted", units: "250", register_entry_id: entry().id, escrow_units: null });
     expect(detail(r.checks, "supply_identity")).toBe("10,000 issued − 250 burned through conversions = 9,750 outstanding.");
-    expect(detail(r.checks, "within_cap")).toBe("9,750 outstanding + 250 registered = 10,000 of 10,000 units (100 %).");
+    expect(detail(r.checks, "within_cap")).toBe("9,750 outstanding + 250 converted into registered ownership = 10,000 of the 10,000-unit class cap (100 % of the company).");
   });
 
   it("no conversions yet: everything passes without register entries", () => {
@@ -220,7 +359,7 @@ describe("reconciliation checks", () => {
   });
 
   it("a converted request without an entry is a to-do (warn), explained in the units balance", () => {
-    const r = reconcileShareClass(chain(), [converted()], []);
+    const r = reconcileShareClass(chain(), [converted()], [], WHOLE);
     expect(states(r.checks)).toMatchObject({
       units_balance: "warn", entries_for_conversions: "warn", entries_match_chain: "pass",
       supply_identity: "pass", within_cap: "pass",
@@ -232,28 +371,28 @@ describe("reconciliation checks", () => {
 
   it("voided entries count for nothing; the corrected entry does", () => {
     const voided = entry({ id: "e0000000-0000-4000-8000-0000000000aa", percentBps: "25", status: "voided", voidReason: "Wrong percent" });
-    const onlyVoided = reconcileShareClass(chain(), [converted()], [voided]);
+    const onlyVoided = reconcileShareClass(chain(), [converted()], [voided], WHOLE);
     expect(states(onlyVoided.checks)).toMatchObject({ units_balance: "warn", entries_for_conversions: "warn", entries_match_chain: "pass", entry_percentages: "pass" });
     expect(onlyVoided.register.entries).toBe(0);
-    const corrected = reconcileShareClass(chain(), [converted()], [voided, entry()]);
+    const corrected = reconcileShareClass(chain(), [converted()], [voided, entry()], WHOLE);
     expect(corrected.state).toBe("pass");
     expect(corrected.entries.map((e) => e.status)).toEqual(["voided", "recorded"]);
     expect(corrected.conversions[0].register_entry_id).toBe(entry().id);
   });
 
   it("an entry whose units differ from its conversion fails, and so does the balance", () => {
-    const r = reconcileShareClass(chain(), [converted()], [entry({ units: n(240), percentBps: "240" })]);
+    const r = reconcileShareClass(chain(), [converted()], [entry({ units: n(240), percentBps: "240" })], WHOLE);
     expect(states(r.checks)).toMatchObject({ units_balance: "fail", entries_match_chain: "fail", entries_for_conversions: "pass", entry_percentages: "pass" });
     expect(detail(r.checks, "entries_match_chain")).toMatch(/registers 240 units; its conversion moved 250/);
   });
 
   it("an entry naming an unknown realize transaction fails; an unlinked entry without one warns", () => {
-    const unknown = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null, realizeTx: TX_2 })]);
+    const unknown = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null, realizeTx: TX_2 })], WHOLE);
     expect(states(unknown.checks)).toMatchObject({ entries_match_chain: "fail", entries_for_conversions: "warn" });
-    const byTx = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null })]);
+    const byTx = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null })], WHOLE);
     expect(byTx.state).toBe("pass");
     expect(byTx.conversions[0].register_entry_id).toBe(entry().id);
-    const loose = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null, realizeTx: null })]);
+    const loose = reconcileShareClass(chain(), [converted()], [entry({ conversionRequestId: null, realizeTx: null })], WHOLE);
     // The totals still agree; the missing link is what the two checks report.
     expect(states(loose.checks)).toMatchObject({ entries_match_chain: "warn", entries_for_conversions: "warn", units_balance: "pass" });
     expect(detail(loose.checks, "entries_match_chain")).toMatch(/not linked to a conversion/);
@@ -261,74 +400,76 @@ describe("reconciliation checks", () => {
 
   it("an entry linked to a request that is not converted (or of another class) fails", () => {
     const open = converted({ status: "deposited", realizeTx: null, burned: null, vaultPda: VAULT_2 });
-    const r = reconcileShareClass(chain(), [open], [entry()]);
+    const r = reconcileShareClass(chain(), [open], [entry()], WHOLE);
     expect(states(r.checks)).toMatchObject({ entries_match_chain: "fail", units_balance: "fail" });
     expect(detail(r.checks, "entries_match_chain")).toMatch(/not a converted request of this class/);
   });
 
   it("two entries registering the same conversion fail", () => {
     const second = entry({ id: "e0000000-0000-4000-8000-000000000002", conversionRequestId: null });
-    const r = reconcileShareClass(chain(), [converted()], [entry(), second]);
+    const r = reconcileShareClass(chain(), [converted()], [entry(), second], WHOLE);
     expect(states(r.checks)).toMatchObject({ entries_match_chain: "fail", units_balance: "fail", within_cap: "fail" });
     expect(detail(r.checks, "entries_match_chain")).toMatch(/2 entries register request/);
   });
 
   it("units burned outside recorded conversions warn; more recorded burns than the chain shows fail", () => {
-    const quarantine = reconcileShareClass(chain({ circulatingSupply: n(9_700), mintSupply: n(9_700), holders: null }), [converted()], [entry()]);
+    const quarantine = reconcileShareClass(chain({ circulatingSupply: n(9_700), mintSupply: n(9_700), holders: null }), [converted()], [entry()], WHOLE);
     expect(states(quarantine.checks).supply_identity).toBe("warn");
     expect(detail(quarantine.checks, "supply_identity")).toMatch(/50 of the 300 burned units/);
-    const short = reconcileShareClass(chain({ circulatingSupply: n(9_800), mintSupply: n(9_800), holders: null }), [converted()], [entry()]);
+    const short = reconcileShareClass(chain({ circulatingSupply: n(9_800), mintSupply: n(9_800), holders: null }), [converted()], [entry()], WHOLE);
     expect(states(short.checks).supply_identity).toBe("fail");
-    const impossible = reconcileShareClass(chain({ circulatingSupply: n(10_001), mintSupply: n(10_001), holders: null }), [], []);
+    const impossible = reconcileShareClass(chain({ circulatingSupply: n(10_001), mintSupply: n(10_001), holders: null }), [], [], WHOLE);
     expect(states(impossible.checks).supply_identity).toBe("fail");
     expect(impossible.chain.burned).toBe("0");
   });
 
   it("a proven burn larger than the request counts as burned, while the balance compares requested units", () => {
-    const surplus = reconcileShareClass(chain({ circulatingSupply: n(9_740), mintSupply: n(9_740), holders: null }), [converted({ burned: n(260) })], [entry()]);
+    const surplus = reconcileShareClass(chain({ circulatingSupply: n(9_740), mintSupply: n(9_740), holders: null }), [converted({ burned: n(260) })], [entry()], WHOLE);
     expect(surplus.chain.burned_by_conversions).toBe("260");
     expect(states(surplus.checks)).toMatchObject({ supply_identity: "pass", units_balance: "pass" });
   });
 
   it("the mint supply against the counters and the holder accounts", () => {
-    const direct = reconcileShareClass(chain({ mintSupply: n(9_700), holders: null }), [converted()], [entry()]);
+    const direct = reconcileShareClass(chain({ mintSupply: n(9_700), holders: null }), [converted()], [entry()], WHOLE);
     expect(states(direct.checks).mint_supply).toBe("warn");
     expect(detail(direct.checks, "mint_supply")).toMatch(/burned with the token program directly/);
-    const over = reconcileShareClass(chain({ mintSupply: n(9_800), holders: null }), [converted()], [entry()]);
+    const over = reconcileShareClass(chain({ mintSupply: n(9_800), holders: null }), [converted()], [entry()], WHOLE);
     expect(states(over.checks).mint_supply).toBe("fail");
-    const partial = reconcileShareClass(chain({ holders: [{ owner: TREASURY, units: n(9_000), kind: "treasury" }] }), [converted()], [entry()]);
+    const partial = reconcileShareClass(chain({ holders: [{ owner: TREASURY, units: n(9_000), kind: "treasury" }] }), [converted()], [entry()], WHOLE);
     expect(states(partial.checks).mint_supply).toBe("warn");
     expect(detail(partial.checks, "mint_supply")).toMatch(/add up to 9,000, not 9,750/);
     // Without a holder scan (the public read) only the counters are compared.
-    const noScan = reconcileShareClass(chain({ holders: null }), [converted()], [entry()]);
+    const noScan = reconcileShareClass(chain({ holders: null }), [converted()], [entry()], WHOLE);
     expect(states(noScan.checks).mint_supply).toBe("pass");
     expect(noScan.chain).toMatchObject({ treasury: null, other_wallets: null, holder_count: null, holders_total: null });
     expect(noScan.holders).toBeNull();
   });
 
-  it("units minted again into the room a conversion left make more than 100 % (fail)", () => {
-    const reminted = reconcileShareClass(chain({ lifetimeMinted: n(10_250), circulatingSupply: n(10_000), mintSupply: n(10_000), holders: null }), [converted()], [entry()]);
+  it("units minted again into the room a conversion left go over the class cap (fail)", () => {
+    const reminted = reconcileShareClass(chain({ lifetimeMinted: n(10_250), circulatingSupply: n(10_000), mintSupply: n(10_000), holders: null }), [converted()], [entry()], WHOLE);
     expect(states(reminted.checks).within_cap).toBe("fail");
-    expect(detail(reminted.checks, "within_cap")).toMatch(/10,250 of 10,000 units: more than 100 %/);
+    expect(detail(reminted.checks, "within_cap")).toMatch(/= 10,250 of the 10,000-unit class cap: 250 over the cap\. Without a cumulative cap/);
   });
 
-  it("an uncapped class cannot define 100 %: the cap and percent checks warn", () => {
-    const r = reconcileShareClass(chain({ maxSupply: null }), [converted()], [entry()]);
-    expect(states(r.checks)).toMatchObject({ within_cap: "warn", entry_percentages: "warn", units_balance: "pass" });
+  it("an uncapped class: no cap to hold the units against, and no figures can match it (warn)", () => {
+    const r = reconcileShareClass(chain({ maxSupply: null }), [converted()], [entry()], WHOLE);
+    expect(states(r.checks)).toMatchObject({ within_cap: "warn", unit_share: "warn", entry_percentages: "warn", units_balance: "pass" });
+    expect(detail(r.checks, "within_cap")).toMatch(/no max supply/);
     expect(r.chain.unit_percent).toBeNull();
     expect(r.holders!.every((h) => h.percent === null)).toBe(true);
   });
 
-  it("a percentage off units ÷ max supply warns, and its rounding at the precision written passes", () => {
-    const third = chain({ maxSupply: n(3), lifetimeMinted: n(3), circulatingSupply: n(2), mintSupply: n(2), holders: null, custodyVaults: [] });
-    const request = converted({ units: n(1), burned: n(1) });
-    expect(states(reconcileShareClass(third, [request], [entry({ units: n(1), percentBps: "3333.33" })]).checks).entry_percentages).toBe("pass");
-    // 3333.4 is 3333.33… rounded up at one decimal: accepted; 3333.5 is not.
-    expect(states(reconcileShareClass(third, [request], [entry({ units: n(1), percentBps: "3333.4" })]).checks).entry_percentages).toBe("pass");
-    const off = reconcileShareClass(third, [request], [entry({ units: n(1), percentBps: "3333.5" })]);
+  it("a percentage off units × the share of one unit warns; its rounding at the precision written passes", () => {
+    // 1,000,000 units of 0.0001 % each: 1,234 units are 0.1234 % = 12.34 bps.
+    const fine = chain({ maxSupply: n(1_000_000), lifetimeMinted: n(1_000_000), circulatingSupply: n(998_766), mintSupply: n(998_766), holders: null, custodyVaults: [] });
+    const figures: UnitShareFigures = { classIndex: 0, tokens: n(1_000_000), tokenE4: n(1) };
+    const request = converted({ units: n(1_234), burned: n(1_234) });
+    const at = (percentBps: string) => reconcileShareClass(fine, [request], [entry({ units: n(1_234), percentBps })], figures);
+    for (const ok of ["12.34", "12.3", "12.4", "12"]) expect(states(at(ok).checks).entry_percentages, ok).toBe("pass");
+    const off = at("12.5");
     expect(states(off.checks).entry_percentages).toBe("warn");
-    expect(detail(off.checks, "entry_percentages")).toMatch(/33.335 % recorded, 1 unit is 33.333333 %/);
-    expect(states(reconcileShareClass(chain(), [converted()], [entry({ percentBps: "2500" })]).checks).entry_percentages).toBe("warn");
+    expect(detail(off.checks, "entry_percentages")).toMatch(/0\.125 % recorded, 1,234 units are 0\.1234 %/);
+    expect(states(reconcileShareClass(chain(), [converted()], [entry({ percentBps: "2500" })], WHOLE).checks).entry_percentages).toBe("warn");
   });
 
   it("units in conversion: the escrows of open requests whose vaults are still live", () => {
@@ -340,19 +481,20 @@ describe("reconciliation checks", () => {
     const open = converted({ id: "c0000000-0000-4000-8000-000000000002", status: "deposited", units: n(100), burned: null, realizeTx: null, vaultPda: VAULT_2 });
     const returned = converted({ id: "c0000000-0000-4000-8000-000000000003", status: "vault_opened", units: n(5), burned: null, realizeTx: null, vaultPda: "Vau1tGoneVau1tGoneVau1tGoneVau1tGoneVau1t" });
     const holders = [...chain().holders!.map((h) => (h.owner === ALICE ? { ...h, units: n(400) } : h)), { owner: VAULT_2, units: n(100), kind: "custody" as const }];
-    const r = reconcileShareClass(chain({ custodyVaults: vaults, holders }), [converted(), open, returned], [entry()]);
+    const r = reconcileShareClass(chain({ custodyVaults: vaults, holders }), [converted(), open, returned], [entry()], WHOLE);
     expect(r.chain).toMatchObject({ in_conversion: "100", custody_escrow: "100", program_escrows: "0", other_wallets: "650" });
     expect(r.conversions.map((c) => [c.status, c.escrow_units])).toEqual([["converted", null], ["deposited", "100"], ["vault_opened", null]]);
     expect(r.state).toBe("pass");
   });
 
-  it("an asset reconciles each class with its own rows only", () => {
+  it("an asset reconciles each class with its own rows only, and its figures fit only the class they describe", () => {
     const other = { ...chain({ shareClassPda: "C2assC2assC2assC2assC2assC2assC2assC2ass2", classIndex: 2, circulatingSupply: n(10_000), mintSupply: n(10_000), holders: null, custodyVaults: [] }) };
     const asset = reconcileAsset(
       { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer11" },
-      "devnet", [chain(), other], [converted()], [entry()], new Date("2026-11-08T10:00:00Z"),
+      "devnet", [chain(), other], [converted()], [entry()], WHOLE, new Date("2026-11-08T10:00:00Z"),
     );
     expect(asset.classes.map((c) => [c.class_index, c.register.entries, c.conversions.length, c.state])).toEqual([[0, 1, 1, "pass"], [2, 0, 0, "pass"]]);
+    expect(asset.classes.map((c) => c.chain.unit_percent)).toEqual(["0.01", null]);
     expect(asset).toMatchObject({ network: "devnet", generated_at: "2026-11-08T10:00:00.000Z", state: "pass" });
   });
 });
@@ -362,7 +504,7 @@ describe("projections", () => {
     { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer11" },
     "devnet", [chain()], [converted()],
     [entry({ id: "e0000000-0000-4000-8000-0000000000aa", status: "voided", voidReason: "Typo: Jane Example", voidedBy: "Admin1", voidedAt: "2026-10-10T12:30:00Z" }), entry()],
-    new Date("2026-11-08T10:00:00Z"),
+    WHOLE, new Date("2026-11-08T10:00:00Z"),
   );
 
   it("the issuer view keeps wallets, units and decision references, nothing personal or internal", () => {
@@ -383,7 +525,7 @@ describe("projections", () => {
     const vaults = [{ pda: VAULT_2, vaultId: "2", kind: "delivery_escrow" as const, state: "triggered" as const, escrow: "Escrow2", escrowUnits: n(100) }];
     const later = { ...entry({ id: "e2", decisionDate: "2026-11-01", units: n(100), percentBps: "100", realizeTx: TX_2 }) };
     const p = publicSupplyClass(chain({ custodyVaults: vaults }), [{ status: "deposited", vaultPda: VAULT_2 }],
-      [later, entry(), entry({ status: "voided", units: n(999) })]);
+      [later, entry(), entry({ status: "voided", units: n(999) })], WHOLE);
     expect(p).toEqual({
       share_class_pda: CLASS, class_index: 0, mint: MINT, max_supply: "10000", unit_percent: "0.01",
       issued: "10000", outstanding: "9750", in_conversion: "100",
@@ -402,7 +544,7 @@ describe("CSV export", () => {
     { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio, d.o.o.", symbol: "MANCI", issuer_pda: "Issuer11" },
     "devnet", [chain()], [converted()],
     [entry({ id: "e0000000-0000-4000-8000-0000000000aa", status: "voided", voidReason: "Typo for Jane Example", voidedBy: "Admin1", voidedAt: "2026-10-10T12:30:00Z" }), entry()],
-    new Date("2026-11-08T10:00:00Z"),
+    WHOLE, new Date("2026-11-08T10:00:00Z"),
   );
 
   it("escapes cells and never lets a spreadsheet evaluate exported text", () => {
@@ -429,6 +571,18 @@ describe("CSV export", () => {
     expect(csv).toContain('asset,,,,name,,,,,,"Mancipatio, d.o.o."');
     expect(csv).toContain(`check,${CLASS},0,${MINT},units_balance,,,,,pass,`);
     expect(csv.endsWith("\r\n")).toBe(true);
+  });
+
+  it("percentages are units × the share of one unit: MANCI-2026's cap is 17.5 % of the company", () => {
+    const manci = capTableCsv(reconcileAsset(
+      { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer11" },
+      "mainnet", [manciChain()], [manciConversion()], [manciEntry()], MANCI, new Date("2026-11-08T10:00:00Z"),
+    ));
+    expect(manci).toContain(`chain,${MANCI_CLASS},0,${MINT},max_supply,1750,17.5,`);
+    expect(manci).toContain(`chain,${MANCI_CLASS},0,${MINT},lifetime_minted,500,5,`);
+    expect(manci).toContain(`chain,${MANCI_CLASS},0,${MINT},circulating,250,2.5,`);
+    expect(manci).toContain(`chain,${MANCI_CLASS},0,${MINT},unit_percent,,0.01,`);
+    expect(manci).toContain(`conversion,${MANCI_CLASS},0,${MINT},,250,2.5,`);
   });
 
   it("the personal-data variant adds the holders' client ids, names and staff notes", () => {

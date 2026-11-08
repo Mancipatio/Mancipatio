@@ -1,17 +1,21 @@
 "use client";
 
 // "Supply and conversions" on the public asset page
-// (/marketplace/assets/[id]): per share class, what 100 % of the company is,
-// how many units were issued, how many are outstanding and how many sit in
+// (/marketplace/assets/[id]): per share class, the class cap in units, how
+// many units were issued, how many are outstanding and how many sit in
 // conversion custody, and the conversions recorded in the company register
-// with the decision document's SHA-256 and the realize transaction. Read from
-// /api/cap-table/public (open, cached, no personal data, no case number), so
-// it renders in KYC-only mode like the rest of the page. Facts only: it
-// offers no action and says nothing about which services are available.
+// with the decision document's SHA-256 and the realize transaction. A
+// share of the company shows only where the class has a share of one unit
+// (unit_percent: from the published profile's tokenize figures, when they
+// match the class on chain); otherwise units only, never units ÷ max
+// supply. Read from /api/cap-table/public (open, cached, no personal data,
+// no case number), so it renders in KYC-only mode like the rest of the
+// page. Facts only: it offers no action and says nothing about which
+// services are available.
 
 import { useEffect, useState } from "react";
 import { SkeletonCard } from "@/components/skeleton";
-import { formatUnits, percentOfSupply, type PublicSupply, type PublicSupplyClass } from "@/lib/cap-table";
+import { formatUnits, percentForUnits, type PublicSupply, type PublicSupplyClass } from "@/lib/cap-table";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 
 type State = { asset: string; supply: PublicSupply | null; failed: boolean };
@@ -65,36 +69,46 @@ export function SupplyConversionsFigures({ supply }: { supply: PublicSupply }) {
       ))}
       <p className="text-xs leading-relaxed text-mx-ink-faint">
         Figures are read from the Solana {supply.network} programs and the register entries Manci records
-        after each registry decision. The SHA-256 lets anyone holding a copy of the decision document check that it
-        is the document a record refers to. Case numbers and the identities of holders are not published.
+        after each registry decision. A share of the company is shown only where the asset&apos;s published figures
+        give the share of one unit and match the class cap on chain. The SHA-256 lets anyone holding a copy of the
+        decision document check that it is the document a record refers to. Case numbers and the identities of
+        holders are not published.
       </p>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, note }: { label: string; value: string; note?: string | null }) {
   return (
     <div>
       <dt className="text-xs font-medium uppercase tracking-wide text-mx-ink-faint">{label}</dt>
-      <dd className="mt-0.5 text-sm text-mx-ink">{value}</dd>
+      <dd className="mt-0.5 text-sm text-mx-ink">
+        {value}
+        {note && <span className="mt-0.5 block text-xs text-mx-ink-soft">{note}</span>}
+      </dd>
     </div>
   );
 }
 
 function ClassSupply({ cls, labelled }: { cls: PublicSupplyClass; labelled: boolean }) {
-  const max = cls.max_supply === null ? null : BigInt(cls.max_supply);
+  // Units × the share of one unit, only when the class has one: no percentage otherwise.
+  const pctOf = (units: string) => percentForUnits(units, cls.unit_percent);
   const withPercent = (units: string) => {
-    const pct = percentOfSupply(BigInt(units), max);
+    const pct = pctOf(units);
     return `${formatUnits(units)} units${pct === null ? "" : ` (${pct} %)`}`;
   };
+  const capPercent = cls.max_supply === null ? null : pctOf(cls.max_supply);
   const count = cls.converted.count;
   return (
     <div className="rounded-[3px] border border-mx-rule bg-white p-6">
       {labelled && <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-mx-ink-soft">Share class #{cls.class_index}</p>}
       <dl className="grid gap-3 sm:grid-cols-2">
         <Row
-          label="100 % of the company"
-          value={max === null ? "No maximum supply set" : `${formatUnits(cls.max_supply!)} units${cls.unit_percent ? ` · 1 unit = ${cls.unit_percent} %` : ""}`}
+          label="Class cap"
+          value={cls.max_supply === null
+            ? "No maximum supply set"
+            : `${formatUnits(cls.max_supply)} units${capPercent === null ? "" : ` (${capPercent} % of the company)`}`}
+          note={cls.unit_percent ? `1 unit = ${cls.unit_percent} % of the company` : null}
         />
         <Row label="Issued" value={withPercent(cls.issued)} />
         <Row label="Outstanding" value={withPercent(cls.outstanding)} />

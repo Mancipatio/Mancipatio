@@ -5,6 +5,9 @@
 // network scoping, the columns each audience reads, the register writes and
 // the audit-before-export rule run for real. Personal data (dossier links,
 // names, staff notes, void reasons) never reaches the issuer or the public.
+// The share of one unit comes from the asset profile's tokenize figures: a
+// draft's for the admin and the issuer, only a published one's for the
+// public, and never any other part of `fields`.
 import { getAddressDecoder } from "@solana/kit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { memorySupabase, type MemorySupabase } from "./helpers/memory-supabase";
@@ -117,6 +120,25 @@ const registerRow = (extra: Record<string, unknown>) => ({
   voided_by: null, voided_at: null, created_by: ADMIN, created_at: "2026-10-10T13:00:00Z", ...extra,
 });
 
+/** fields.tokenize as the tokenize flow writes it: 10,000 tokens of 0.01 % (assetChain's class). */
+const TOKENIZE = { v: 1, percent: "100", percent_e4: "1000000", granularity_percent: "0.01", tokens: "10000", company_name: "Mancipatio d.o.o." };
+/** MANCI-2026's: 1,750 tokens of 0.01 % = 17.5 %. */
+const MANCI_TOKENIZE = { v: 1, percent: "17.5", percent_e4: "175000", granularity_percent: "0.01", tokens: "1750", company_name: "Mancipatio d.o.o." };
+
+/**
+ * The asset's profile row. The in-memory client answers with whole rows and
+ * no select aliases, so the row also carries `tokenize` the way PostgREST
+ * answers `tokenize:fields->tokenize`; `fields` holds more than the figures
+ * to prove nothing else of it is returned.
+ */
+function seedProfile(published: boolean, tokenize: Record<string, unknown> = TOKENIZE) {
+  h.db!.rows("asset_profiles").push({
+    network: "devnet", asset_pda: ASSET, issuer_pda: "IssuerPda",
+    status: published ? "published" : "draft", is_published: published,
+    fields: { tokenize, internal_bookkeeping: "staff-only-figure" }, tokenize,
+  });
+}
+
 function seedConversions() {
   h.db!.rows("conversion_requests").push(
     conversion({ id: R_CONVERTED, status: "converted", amount: 250, vault_pda: VAULT_1, outcome_tx: TX_1, outcome_evidence: { amountAtomic: "250", signature: TX_1 } }),
@@ -224,6 +246,7 @@ describe("admin reconciliation", () => {
   it("reads this network's rows of the asset's classes, with the dossier links, and reconciles them", async () => {
     seedConversions();
     seedEntries();
+    seedProfile(false);
     const { response, body } = await call(adminRead, ADMIN, { asset_pda: ASSET }, "session");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -242,18 +265,41 @@ describe("admin reconciliation", () => {
     expect(c.entries.map((e) => e.id)).toEqual([E_VOIDED, E_RECORDED]);
     expect(c.entries[1]).toMatchObject({ holder_client_id: CLIENT, note: "staff note about Jane" });
     expect(c.entries[0].void_reason).toBe("Typo for Jane");
-    expect(c.chain).toMatchObject({ in_conversion: "100", burned_by_conversions: "250", treasury: "9000" });
+    // A draft profile's figures serve the signed reads: 1 unit = 0.01 % of the 10,000-unit class.
+    expect(c.chain).toMatchObject({ in_conversion: "100", burned_by_conversions: "250", treasury: "9000", unit_percent: "0.01" });
     expect(c.checks.every((k) => k.state === "pass"), JSON.stringify(c.checks)).toBe(true);
     expect(JSON.stringify(table)).not.toContain("MAINNET-ONLY");
     expect(JSON.stringify(table)).not.toContain(R_MAINNET);
     expect(JSON.stringify(table)).not.toContain(R_OTHER_CLASS);
+    expect(JSON.stringify(table)).not.toContain("staff-only-figure");
+    const profileRead = h.selects.filter((s) => s.table === "asset_profiles");
+    expect(profileRead).toEqual([{ table: "asset_profiles", columns: "is_published,status,tokenize:fields->tokenize" }]);
+  });
+
+  it("without tokenize figures, or with figures for another cap: units only, and the checks say so", async () => {
+    type ClassOut = { chain: { unit_percent: string | null }; checks: Array<{ id: string; state: string }> };
+    const firstClass = (data: Record<string, unknown> | undefined) => (data!.table as { classes: ClassOut[] }).classes[0];
+    const stateOf = (c: ClassOut, id: string) => c.checks.find((k) => k.id === id)!.state;
+    seedConversions();
+    seedEntries();
+    const bare = firstClass((await call(adminRead, ADMIN, { asset_pda: ASSET })).body.data);
+    expect(bare.chain.unit_percent).toBeNull();
+    expect([stateOf(bare, "unit_share"), stateOf(bare, "entry_percentages")]).toEqual(["pass", "warn"]);
+    // MANCI-2026's figures (1,750 tokens) do not fit this 10,000-unit class.
+    seedProfile(false, MANCI_TOKENIZE);
+    const mismatched = firstClass((await call(adminRead, ADMIN, { asset_pda: ASSET })).body.data);
+    expect(mismatched.chain.unit_percent).toBeNull();
+    expect([stateOf(mismatched, "unit_share"), stateOf(mismatched, "entry_percentages")]).toEqual(["warn", "warn"]);
   });
 
   it("fails closed when the records cannot be read", async () => {
-    h.db!.failReads.add("register_entries");
-    const { response, body } = await call(adminRead, ADMIN, { asset_pda: ASSET });
-    expect(response.status).toBe(503);
-    expect(body.data).toBeUndefined();
+    for (const table of ["register_entries", "asset_profiles"]) {
+      h.db!.failReads.clear();
+      h.db!.failReads.add(table);
+      const { response, body } = await call(adminRead, ADMIN, { asset_pda: ASSET });
+      expect(response.status, table).toBe(503);
+      expect(body.data).toBeUndefined();
+    }
   });
 
   it("passes the chain's 404 and 503 through", async () => {
@@ -267,13 +313,16 @@ describe("issuer view", () => {
   it("wallets, units and decision references only: no dossier link, name, note, void reason or voided entry", async () => {
     seedConversions();
     seedEntries();
+    seedProfile(false);
     const { response, body } = await call(issuerRead, ISSUER, { asset_pda: ASSET }, "session");
     expect(response.status).toBe(200);
     const text = JSON.stringify(body.data);
-    for (const secret of PERSONAL) expect(text, secret).not.toContain(secret);
-    const c = (body.data!.table as { classes: Array<{ entries: Array<{ id: string; decision_ref: string }>; holders: Array<{ owner: string }> }> }).classes[0];
+    for (const secret of [...PERSONAL, "staff-only-figure"]) expect(text, secret).not.toContain(secret);
+    const c = (body.data!.table as { classes: Array<{ entries: Array<{ id: string; decision_ref: string }>; holders: Array<{ owner: string }>; chain: { unit_percent: string | null } }> }).classes[0];
     expect(c.entries.map((e) => [e.id, e.decision_ref])).toEqual([[E_RECORDED, "BD 12345/2026"]]);
     expect(c.holders.map((x) => x.owner)).toEqual([ISSUER, HOLDER, VAULT_2]);
+    // The issuer's own draft profile gives its percentages.
+    expect(c.chain.unit_percent).toBe("0.01");
     // The personal columns are not even read for the issuer.
     const read = h.selects.filter((s) => s.table === "conversion_requests" || s.table === "register_entries");
     expect(read.length).toBe(2);
@@ -286,6 +335,7 @@ describe("public supply", () => {
   it("open and cached: aggregates and the non-personal register columns of this network", async () => {
     seedConversions();
     seedEntries();
+    seedProfile(true);
     const { response, body } = await get(`?asset=${ASSET}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("public, max-age=0, s-maxage=60, stale-while-revalidate=300");
@@ -300,11 +350,63 @@ describe("public supply", () => {
       }],
     });
     const text = JSON.stringify(body.data);
-    for (const secret of [...PERSONAL, "BD 12345", "MAINNET-ONLY", HOLDER, R_CONVERTED, E_RECORDED, ADMIN]) expect(text, secret).not.toContain(secret);
+    for (const secret of [...PERSONAL, "BD 12345", "MAINNET-ONLY", HOLDER, R_CONVERTED, E_RECORDED, ADMIN, "staff-only-figure", "Mancipatio d.o.o.", "percent_e4"]) {
+      expect(text, secret).not.toContain(secret);
+    }
     for (const { table, columns } of h.selects) {
       expect(columns, table).not.toMatch(/client_id|decision_ref|note|void|holder_wallet|contact|created_by|\bid\b|\*/);
     }
-    expect(tablesSelected().sort()).toEqual(["conversion_requests", "register_entries"]);
+    expect(h.selects.find((s) => s.table === "asset_profiles")!.columns).toBe("is_published,status,tokenize:fields->tokenize");
+    // A published profile with figures: the issuer's archive state is read like /api/profiles/public does.
+    expect(tablesSelected().sort()).toEqual(["asset_profiles", "conversion_requests", "issuer_profiles", "register_entries"]);
+  });
+
+  it("MANCI-2026 today: a draft profile gives the public units only; a published one 1 unit = 0.01 %", async () => {
+    h.chain.mockImplementation(async () => ({
+      ...assetChain(),
+      classes: [{
+        ...assetChain().classes[0], maxSupply: BigInt(1_750), lifetimeMinted: BigInt(500), circulatingSupply: BigInt(250), mintSupply: BigInt(250),
+        custodyVaults: [{ pda: VAULT_1, vaultId: "1", kind: "delivery_escrow" as const, state: "realized" as const, escrow: "Escrow1", escrowUnits: BigInt(0) }],
+        holders: null,
+      }],
+    }));
+    h.db!.rows("conversion_requests").push(
+      conversion({ id: R_CONVERTED, status: "converted", amount: 250, vault_pda: VAULT_1, outcome_tx: TX_1, outcome_evidence: { amountAtomic: "250", signature: TX_1 } }),
+    );
+    seedProfile(false, MANCI_TOKENIZE);
+    const draft = await get(`?asset=${ASSET}`);
+    expect(draft.response.status).toBe(200);
+    const cls = (draft.body.data as { classes: Array<Record<string, unknown>> }).classes[0];
+    expect(cls).toMatchObject({
+      max_supply: "1750", unit_percent: null, issued: "500", outstanding: "250", in_conversion: "0",
+      converted: { count: 0, units: "0", percent: "0" }, records: [],
+    });
+    expect(JSON.stringify(draft.body.data)).not.toMatch(/client_id|jane@example|d0000000|c0000000/);
+    // Nothing of a draft is read beyond the published filter, and no archive lookup is needed.
+    expect(tablesSelected()).not.toContain("issuer_profiles");
+    // Published: 1 unit = 0.01 % (the cap 1,750 units = 17.5 %).
+    h.db!.rows("asset_profiles").length = 0;
+    seedProfile(true, MANCI_TOKENIZE);
+    const published = await get(`?asset=${ASSET}`);
+    expect((published.body.data as { classes: Array<Record<string, unknown>> }).classes[0]).toMatchObject({ max_supply: "1750", unit_percent: "0.01" });
+  });
+
+  it("an archived issuer's published figures are withheld, like its profile", async () => {
+    seedProfile(true);
+    h.db!.rows("issuer_profiles").push({ network: "devnet", issuer_pda: "IssuerPda", archive: { reason: "Test issuer", archived_by: ADMIN, archived_at: "2026-11-01T00:00:00Z" } });
+    const { response, body } = await get(`?asset=${ASSET}`);
+    expect(response.status).toBe(200);
+    const cls = (body.data as { classes: Array<Record<string, unknown>> }).classes[0];
+    expect(cls.unit_percent).toBeNull();
+    expect(JSON.stringify(body.data)).not.toContain("Test issuer");
+  });
+
+  it("fails closed (503, not cached) when the profile cannot be read", async () => {
+    h.db!.failReads.add("asset_profiles");
+    const { response, body } = await get(`?asset=${ASSET}`);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(body.data).toBeUndefined();
   });
 
   it("refuses a missing or malformed address and extra parameters without caching the refusal", async () => {

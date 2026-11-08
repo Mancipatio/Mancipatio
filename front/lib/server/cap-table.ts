@@ -11,7 +11,11 @@
 //           note, void reason, staff wallet or voided entry
 //   public  aggregates and the non-personal columns of recorded entries: no
 //           case number, request, wallet or person
-// Every row read is scoped to detectNetwork(). Every read fails closed (503).
+// The share of the company one unit is comes from the asset profile's
+// tokenize figures (readUnitShareFigures): a draft's for the admin and the
+// issuer, a published profile's only for the public; only the derived share
+// of one unit leaves the server, never `fields`. Every row read is scoped to
+// detectNetwork(). Every read fails closed (503).
 
 import "server-only";
 
@@ -20,7 +24,11 @@ import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
 import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
+import { readArchivedIssuers } from "@/lib/server/archive";
 import { readAssetChain, readEntryShareClass } from "@/lib/server/cap-table-chain";
+import { companyFiguresFrom } from "@/lib/distribution-rows";
+import { isPublishedProfileRow, PUBLIC_TOKENIZE_SELECT } from "@/lib/profile-public";
+import { CLASS_INDEX } from "@/lib/tokenize-shares";
 import {
   capTableCsv,
   capTableCsvFilename,
@@ -28,12 +36,14 @@ import {
   publicSupplyClass,
   reconcileAsset,
   registerEntryView,
+  type AssetIdentity,
   type AssetReconciliation,
   type ConversionFacts,
   type ConversionStatusRead,
   type PublicSupply,
   type RegisterEntryFacts,
   type RegisterEntryView,
+  type UnitShareFigures,
 } from "@/lib/cap-table";
 import {
   parseRegisterEntryInput,
@@ -55,6 +65,8 @@ const CONVERSION_COLUMNS: Record<CapTableAudience, string> = {
   issuer: "id,status,share_class_pda,holder_wallet,amount::text,vault_pda,outcome_tx,outcome_evidence,decided_at",
 };
 const PUBLIC_CONVERSION_COLUMNS = "status,share_class_pda,vault_pda";
+/** What the share of one unit is derived from: the tokenize object only, never the rest of `fields`. */
+const PROFILE_FIGURES_COLUMNS = `is_published,status,${PUBLIC_TOKENIZE_SELECT}`;
 const ENTRY_COLUMNS: Record<CapTableAudience | "public", string> = {
   admin: "id,share_class_pda,units::text,percent_bps::text,registry,decision_ref,decision_date,decision_doc_sha256," +
     "conversion_request_id,realize_tx,holder_client_id,note,status,void_reason,voided_by,voided_at,created_by,created_at",
@@ -179,29 +191,74 @@ async function readEntries(network: string, classPdas: string[], audience: CapTa
   return rows.map((row) => entryFacts(row, audience));
 }
 
+/**
+ * The asset's tokenize figures (asset_profiles.fields->tokenize, through
+ * lib/distribution-rows companyFiguresFrom: consistent with each other, or
+ * none), for the class the tokenize flow creates (lib/tokenize-shares
+ * CLASS_INDEX). Read only to derive the share of the company one unit is;
+ * nothing else of the profile leaves this function. The public read takes
+ * them only the way the public profile reader does (/api/profiles/public): a
+ * published profile, re-checked after the SELECT (isPublishedProfileRow), of
+ * an issuer that is not archived. The admin and issuer reads (signed) take a
+ * draft profile's figures too. Either way lib/cap-table.ts unitShareOf
+ * applies them only to a class they match. A failed read is a 503.
+ */
+async function readUnitShareFigures(
+  network: string,
+  identity: AssetIdentity,
+  audience: CapTableAudience | "public",
+): Promise<UnitShareFigures | null> {
+  const sb = getSupabaseAdmin();
+  let query = sb.from("asset_profiles").select(PROFILE_FIGURES_COLUMNS)
+    .eq("network", network).eq("asset_pda", identity.asset_pda);
+  if (audience === "public") query = query.eq("is_published", true).eq("status", "published");
+  let result;
+  try {
+    result = await query.maybeSingle();
+  } catch {
+    return recordsUnavailable();
+  }
+  if (result.error) {
+    console.error("[cap-table] profile read failed:", (result.error as { code?: string }).code ?? "unexpected answer");
+    return recordsUnavailable();
+  }
+  const row = result.data as Row | null;
+  if (!row || (audience === "public" && !isPublishedProfileRow(row))) return null;
+  const figures = companyFiguresFrom(row.tokenize);
+  if (!figures) return null;
+  // An archived issuer's assets leave the public lists (lib/archive.ts), and their figures with them.
+  if (audience === "public" && (await readArchivedIssuers(sb)).has(identity.issuer_pda)) return null;
+  return { classIndex: CLASS_INDEX, tokens: figures.tokens, tokenE4: figures.tokenE4 };
+}
+
 /** The reconciliation of one asset, for the admin or (stripped) for its issuer. */
 export async function readAssetReconciliation(assetPda: string, audience: CapTableAudience): Promise<AssetReconciliation> {
   const network = detectNetwork();
   const chain = await readAssetChain(assetPda, { holders: true });
   const classPdas = chain.classes.map((c) => c.shareClassPda);
-  const [conversions, entries] = classPdas.length
-    ? await Promise.all([readConversions(network, classPdas, audience), readEntries(network, classPdas, audience)])
-    : [[], []];
-  const table = reconcileAsset(chain.identity, network, chain.classes, conversions, entries);
+  const [conversions, entries, figures] = classPdas.length
+    ? await Promise.all([
+        readConversions(network, classPdas, audience),
+        readEntries(network, classPdas, audience),
+        readUnitShareFigures(network, chain.identity, audience),
+      ])
+    : [[], [], null];
+  const table = reconcileAsset(chain.identity, network, chain.classes, conversions, entries, figures);
   return audience === "issuer" ? issuerReconciliation(table) : table;
 }
 
 /**
  * The public "Supply and conversions" figures of one asset: chain supply,
- * the units in open conversion escrows (their vaults only) and the
- * non-personal columns of recorded register entries.
+ * the units in open conversion escrows (their vaults only), the
+ * non-personal columns of recorded register entries, and the share of one
+ * unit from a published profile's tokenize figures (else units only).
  */
 export async function readPublicSupply(assetPda: string): Promise<PublicSupply> {
   const network = detectNetwork();
   const chain = await readAssetChain(assetPda, { holders: false });
   const classPdas = chain.classes.map((c) => c.shareClassPda);
   const sb = getSupabaseAdmin();
-  const [open, recorded] = classPdas.length
+  const [open, recorded, figures] = classPdas.length
     ? await Promise.all([
         allRows(() => sb.from("conversion_requests").select(PUBLIC_CONVERSION_COLUMNS)
           .eq("network", network).in("share_class_pda", classPdas).in("status", OPEN_STATUSES)
@@ -209,8 +266,9 @@ export async function readPublicSupply(assetPda: string): Promise<PublicSupply> 
         allRows(() => sb.from("register_entries").select(ENTRY_COLUMNS.public)
           .eq("network", network).in("share_class_pda", classPdas).eq("status", "recorded")
           .order("decision_date", { ascending: true }).order("id", { ascending: true }) as unknown as Paged),
+        readUnitShareFigures(network, chain.identity, "public"),
       ])
-    : [[], []];
+    : [[], [], null];
   return {
     network,
     asset_pda: chain.identity.asset_pda,
@@ -230,6 +288,7 @@ export async function readPublicSupply(assetPda: string): Promise<PublicSupply> 
         realizeTx: strOrNull(r.realize_tx),
         status: "recorded" as const,
       })),
+      figures,
     )),
   };
 }
@@ -281,7 +340,7 @@ export async function recordRegisterEntry(
   const network = detectNetwork();
   const shareClass = await readEntryShareClass(input.share_class_pda);
   if (shareClass.maxSupply !== null && BigInt(input.units) > shareClass.maxSupply) {
-    throw new SiwsError(400, "units exceed the class's max supply (100 % of the company)");
+    throw new SiwsError(400, "units exceed the class's max supply (the class cap in units)");
   }
   const sb = getSupabaseAdmin();
   let realizeTx = input.realize_tx;
