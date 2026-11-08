@@ -72,6 +72,7 @@ export const ADMIN_MENU: AdminNavGroup[] = withRoles([
       { href: "/admin/cap-table", label: "Cap table", icon: <IconChart /> },
       { href: "/admin/launchpad", label: "Launchpad", icon: <IconRocket /> },
       { href: "/admin/custody", label: "Custody", icon: <IconLock /> },
+      { href: "/admin/migrations", label: "Migrations", icon: <IconRepeat /> },
       { href: "/admin/otc", label: "OTC", icon: <IconRepeat /> },
       { href: "/admin/resell", label: "Resell board", icon: <IconRepeat /> },
       { href: "/admin/governance", label: "Governance", icon: <IconScale /> },

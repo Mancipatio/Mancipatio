@@ -65,6 +65,8 @@ const ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "conversion.reclaim",
   "delivery.deposited",
   "delivery.reclaim",
+  // A token migration deposit that already landed (the holder's own receipt).
+  "tokenMigration.recordDeposit",
 ]);
 // A read by shape, but it is the pre-send policy check of every wallet
 // transaction (lib/transaction-wallet-policy.ts), so it stops UI sends.

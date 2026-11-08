@@ -365,6 +365,7 @@ describe("source matrix", () => {
       // Investor relations: reading, the issuer's take-downs and recording an anchor already on chain.
       "issuer-updates/public", "issuer-updates/document", "issuer-updates/holder", "issuer-updates/document-url",
       "issuer-updates/mine", "issuer-updates/discard", "issuer-updates/withdraw", "issuer-updates/anchor",
+      "token-migrations/record", "token-migrations/public", "token-migrations/report",
     ]) {
       const text = source(route);
       expect(text, route).not.toContain("requireArea(");
@@ -451,6 +452,10 @@ describe("every API route is classified", () => {
     "sale-approvals/settle": "platform",
     // Finishes an upload that storage/upload (gated for issuers) authorized.
     "storage/finalize": "recording",
+    // Token migration: the public campaigns and their final reports (facts public on chain), and the
+    // holder's record of a deposit that already landed (its entry, the precheck, is module-gated).
+    "token-migrations/public": "read", "token-migrations/report": "read",
+    "token-migrations/record": "recording",
     "tos/accept": "terms", "tos/status": "terms",
     "vesting-series/creation-state": "read", "vesting-series/list-mine": "read",
     "vesting-series/mark-cancelled": "exit",

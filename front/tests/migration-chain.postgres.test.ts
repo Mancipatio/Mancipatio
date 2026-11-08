@@ -105,6 +105,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "spv_issuances",
         "indexer_heartbeat_state",
         "indexer_heartbeat_watermarks",
+        "token_migrations",
+        "token_migration_deposits",
         "notification_log",
         // 0089: drafts and billing records; the public reads published rows through the server only.
         "fee_schedule",

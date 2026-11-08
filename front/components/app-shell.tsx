@@ -31,11 +31,12 @@ const portfolio = [
   { href: "/portfolio/rights", label: "Income & claims", icon: IconCoins },
   { href: "/portfolio/governance", label: "Governance", icon: IconGavel },
   { href: "/portfolio/delivery", label: "Delivery", icon: IconBox },
+  { href: "/portfolio/migration", label: "Migrate a token", icon: IconRepeat },
 ];
 const portfolioTabs = [
   ["/portfolio", "Holdings"], ["/portfolio/offers", "My offers"], ["/portfolio/deals", "Deals"],
   ["/portfolio/listings", "Sell listings"], ["/portfolio/vesting", "Vesting"], ["/portfolio/rights", "Rights & claims"],
-  ["/portfolio/governance", "Votes"], ["/portfolio/delivery", "Delivery"], ["/portfolio/conversion", "Conversion"], ["/portfolio/history", "Activity"],
+  ["/portfolio/governance", "Votes"], ["/portfolio/delivery", "Delivery"], ["/portfolio/conversion", "Conversion"], ["/portfolio/migration", "Migration"], ["/portfolio/history", "Activity"],
 ];
 const issuerTabs = ISSUER_WORKFLOW_TABS;
 const marketTabs = [
