@@ -105,6 +105,8 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "blocklist_authority_proposals", "blocklist_recoveries",
   // 0080 automatic EUR rate
   "fx_auto_rates", "fx_rate_observations", "fx_auto_runs",
+  // 0085 token migrations (V1)
+  "token_migrations", "token_migration_deposits",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

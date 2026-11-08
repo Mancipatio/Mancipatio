@@ -103,6 +103,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "spv_issuances",
         "indexer_heartbeat_state",
         "indexer_heartbeat_watermarks",
+        "token_migrations",
+        "token_migration_deposits",
       ]) {
         for (const role of ["anon", "authenticated"]) {
           const privileges = db.query(
