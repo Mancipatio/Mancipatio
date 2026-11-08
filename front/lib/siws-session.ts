@@ -87,6 +87,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "distribution-plans.adminRead",
   "distribution-plans.proof",
   "fees.list",
+  // The fee schedule (drafts included) and charges; every fee write signs afresh.
+  "fees.scheduleList",
   "inquiries.list",
   "issuer-profiles.read",
   "otc.adminScreen",

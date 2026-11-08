@@ -385,6 +385,8 @@ describe("every API route is classified", () => {
     "csp-report": "platform", "health": "platform", "health/alarms": "platform", "maintenance": "platform", "priority-fee": "platform",
     "internal/alarms": "platform", "internal/fx": "platform", "internal/retry": "platform", "internal/sanctions": "platform",
     "distribution-plans/proof": "read", "payout-snapshots/proof": "read",
+    // The published price list (0089), like /pricing: readable before sign-in and in the mode.
+    "fees/public": "read",
     "inquiries/create": "support",
     "profiles/public": "read",
     "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
