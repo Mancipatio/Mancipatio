@@ -11,15 +11,15 @@
 
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
-import { readCertificateFile, verifyCertificate } from "@/lib/certificates-client";
+import { readCertificateFile, verifyCertificate } from "@/lib/certificates/public-check";
 import {
   CERTIFICATE_MESSAGE_HEADER,
+  formatUnits,
   normalizeCertificateNumber,
+  normalizeCertificateSha256,
   type PublicCertificateView,
 } from "@/lib/certificates/payload";
-import { normalizeSha256Input } from "@/lib/document-anchor";
 import { explorerAddressUrl, explorerTxUrl, networkLabel, type Network } from "@/lib/network";
-import { formatTokens } from "@/lib/tokenize-shares";
 
 const INPUT_CLASS =
   "mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400";
@@ -33,7 +33,7 @@ function utc(iso: string | null): string {
   return Number.isNaN(date.getTime()) ? iso : `${date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")} UTC`;
 }
 
-const units = (value: string) => `${formatTokens(BigInt(value))} ${value === "1" ? "unit" : "units"}`;
+const units = (value: string) => `${formatUnits(BigInt(value))} ${value === "1" ? "unit" : "units"}`;
 
 export function CertificateVerifier() {
   const initial = useSearchParams().get("number") ?? "";
@@ -57,7 +57,7 @@ export function CertificateVerifier() {
     }
     let pasted: string | null = null;
     if (typedHash.trim()) {
-      pasted = normalizeSha256Input(typedHash);
+      pasted = normalizeCertificateSha256(typedHash);
       if (!pasted) {
         setResult(null);
         setError("The SHA-256 is 64 hex characters, as printed on the certificate.");

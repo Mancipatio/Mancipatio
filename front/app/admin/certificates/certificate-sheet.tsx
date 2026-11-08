@@ -11,9 +11,8 @@
 // bytes, whose SHA-256 is the certificate's).
 
 import type { ReactNode } from "react";
-import { CERTIFICATE_MESSAGE_HEADER, type CertificateDetail } from "@/lib/certificates/payload";
+import { CERTIFICATE_MESSAGE_HEADER, formatUnits, type CertificateDetail } from "@/lib/certificates/payload";
 import { explorerTxUrl, isTestNetwork, networkLabel } from "@/lib/network";
-import { formatTokens } from "@/lib/tokenize-shares";
 
 /** Screen and print rules of the sheet; print shows the sheet alone (nothing else the layout draws). */
 export const CERTIFICATE_PRINT_CSS = `
@@ -67,7 +66,7 @@ function Row({ label, children, mono = false }: { label: string; children: React
   );
 }
 
-const units = (value: string) => `${formatTokens(BigInt(value))} ${value === "1" ? "unit" : "units"}`;
+const units = (value: string) => `${formatUnits(BigInt(value))} ${value === "1" ? "unit" : "units"}`;
 const percent = (value: string, rounded: boolean) => `${value} %${rounded ? " (rounded to 8 decimal places)" : ""}`;
 
 export function CertificateSheet({ detail, verifyUrl }: { detail: CertificateDetail; verifyUrl: string }) {

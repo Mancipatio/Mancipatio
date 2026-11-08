@@ -17,7 +17,9 @@ import {
   certificateMessage,
   certificateText,
   certificateVerifyPath,
+  certificateTokenSymbol,
   normalizeCertificateNumber,
+  normalizeCertificateSha256,
   parseCertificatePayload,
   parseCertificateRequest,
   parseUnitsFor100Percent,
@@ -28,6 +30,7 @@ import {
   type CertificateRow,
 } from "@/lib/certificates/payload";
 import { certificateSignatureFormat, signatureFromBase58 } from "@/lib/certificates/signature";
+import { readCertificateFile } from "@/lib/certificates/public-check";
 import {
   COMPANY,
   EVIDENCE_TX,
@@ -210,6 +213,17 @@ describe("the admin's input", () => {
     }
   });
 
+  it("reads a typed SHA-256 (either case, a sha256: prefix, a shasum line) and derives the mint's symbol as the program does", () => {
+    const sha = "ab".repeat(32);
+    expect(normalizeCertificateSha256(`  SHA256:${sha.toUpperCase()} `)).toBe(sha);
+    expect(normalizeCertificateSha256(`${sha}  MC-2026-0001.json`)).toBe(sha);
+    for (const bad of ["", sha.slice(1), `${sha}0`, `0x${sha}`, `${sha}\n${sha}`]) expect(normalizeCertificateSha256(bad), bad).toBeNull();
+    expect(certificateTokenSymbol("MANCI", 0)).toBe("MANCI0");
+    // 10 UTF-8 bytes at most, never half a character ("Đ" is two bytes).
+    expect(certificateTokenSymbol("ĐĐĐĐĐ", 7)).toBe("ĐĐĐĐĐ");
+    expect(certificateTokenSymbol("ABCDEFGHI", 12)).toBe("ABCDEFGHI1");
+  });
+
   it("reads a typed number the way it is stored", () => {
     expect(normalizeCertificateNumber(" mc-2026-1 ")).toBe("MC-2026-0001");
     expect(normalizeCertificateNumber("MC-2026-0042")).toBe("MC-2026-0042");
@@ -332,6 +346,21 @@ describe("the public projection", () => {
     expect(item).toMatchObject({ number: "MC-2026-0001", asset_label: "MANCI 17.5% · MANCI0 · class 0", issued_at: "2026-11-08T10:15:30.123Z" });
     expect(item && "payload_canonical" in item).toBe(false);
     expect(JSON.stringify(item)).not.toContain("Petar");
+  });
+});
+
+describe("the holder's JSON file on the verification page", () => {
+  it("hashes the exact bytes and the canonical content, so a reformatted copy still matches", async () => {
+    const { canonical, sha256 } = await fixturePayload();
+    const exact = await readCertificateFile(new File([canonical], "MC-2026-0001.json", { type: "application/json" }));
+    expect(exact).toMatchObject({ rawSha256: sha256, canonicalSha256: sha256, number: "MC-2026-0001" });
+    const pretty = await readCertificateFile(new File([JSON.stringify(JSON.parse(canonical), null, 2)], "copy.json"));
+    expect(pretty.rawSha256).not.toBe(sha256);
+    expect(pretty.canonicalSha256).toBe(sha256);
+    const edited = await readCertificateFile(new File([canonical.replace('"units":"250"', '"units":"2500"')], "edited.json"));
+    expect(edited.canonicalSha256).not.toBe(sha256);
+    await expect(readCertificateFile(new File(["not json"], "x.json"))).rejects.toThrow(/does not parse/);
+    await expect(readCertificateFile(new File(["x".repeat(70_000)], "big.json"))).rejects.toThrow(/64 KB/);
   });
 });
 

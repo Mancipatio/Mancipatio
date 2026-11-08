@@ -24,9 +24,8 @@ import {
   revokeCertificate,
   signCertificate,
 } from "@/lib/certificates-client";
-import { certificateVerifyPath, type CertificateDetail } from "@/lib/certificates/payload";
+import { certificateVerifyPath, formatUnits, type CertificateDetail } from "@/lib/certificates/payload";
 import { explorerTxUrl, networkLabel } from "@/lib/network";
-import { formatTokens } from "@/lib/tokenize-shares";
 import { useToast } from "@/lib/toast";
 import { DocumentAnchorPanel } from "../platform/document-anchor-panel";
 
@@ -129,13 +128,13 @@ export function CertificateDetailPanel({
                 <Fact label="Holder (personal data)">{[holder.name, holder.id_number].filter(Boolean).join(" · ")}</Fact>
               )}
               <Fact label="Units held">
-                {formatTokens(BigInt(p.holding.units))} = {p.holding.percent_of_company} % of the company (slot {p.holding.slot})
+                {formatUnits(BigInt(p.holding.units))} = {p.holding.percent_of_company} % of the company (slot {p.holding.slot})
               </Fact>
             </>
           )}
           {p.supply && (
             <Fact label="Supply">
-              {formatTokens(BigInt(p.supply.circulating))} in circulation = {p.supply.circulating_percent} %, {formatTokens(BigInt(p.supply.lifetime_minted))}{" "}
+              {formatUnits(BigInt(p.supply.circulating))} in circulation = {p.supply.circulating_percent} %, {formatUnits(BigInt(p.supply.lifetime_minted))}{" "}
               issued to date (slot {p.supply.slot})
             </Fact>
           )}

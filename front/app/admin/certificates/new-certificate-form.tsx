@@ -19,8 +19,7 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findShareClassPda } from "@/lib/pdas";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { createCertificate, previewCertificate } from "@/lib/certificates-client";
-import { certificateTokenSymbol, type CertificateDetail, type CertificatePreview } from "@/lib/certificates/payload";
-import { formatTokens } from "@/lib/tokenize-shares";
+import { certificateTokenSymbol, formatUnits, type CertificateDetail, type CertificatePreview } from "@/lib/certificates/payload";
 import {
   EMPTY_CERTIFICATE_FORM,
   certificateFormParams,
@@ -299,12 +298,12 @@ function PreviewCard({ preview }: { preview: CertificatePreview }) {
         <dt className="text-slate-500">Token mint</dt>
         <dd className="break-all font-mono text-xs text-slate-900">{facts.mint}</dd>
         <dt className="text-slate-500">Maximum supply</dt>
-        <dd className="text-slate-900">{facts.max_supply === null ? "No maximum" : formatTokens(BigInt(facts.max_supply))}</dd>
+        <dd className="text-slate-900">{facts.max_supply === null ? "No maximum" : formatUnits(BigInt(facts.max_supply))}</dd>
         {facts.holding && (
           <>
             <dt className="text-slate-500">Units held</dt>
             <dd className="text-slate-900">
-              {formatTokens(BigInt(facts.holding.units))}
+              {formatUnits(BigInt(facts.holding.units))}
               {payload?.holding ? ` = ${payload.holding.percent_of_company} % of the company` : ""} (slot {facts.holding.slot})
             </dd>
           </>
@@ -313,8 +312,8 @@ function PreviewCard({ preview }: { preview: CertificatePreview }) {
           <>
             <dt className="text-slate-500">In circulation</dt>
             <dd className="text-slate-900">
-              {formatTokens(BigInt(facts.supply.circulating))}
-              {payload?.supply ? ` = ${payload.supply.circulating_percent} % of the company` : ""}, {formatTokens(BigInt(facts.lifetime_minted))} issued to date (slot{" "}
+              {formatUnits(BigInt(facts.supply.circulating))}
+              {payload?.supply ? ` = ${payload.supply.circulating_percent} % of the company` : ""}, {formatUnits(BigInt(facts.lifetime_minted))} issued to date (slot{" "}
               {facts.supply.slot})
             </dd>
           </>

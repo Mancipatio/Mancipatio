@@ -37,7 +37,6 @@ import { canonicalStringProblem, isCanonicalJson } from "@/lib/certificates/cano
 import { operatorFor } from "@/lib/legal/operator";
 import { isTestNetwork, networkLabel, type Network } from "@/lib/network";
 import { isSiwsSignatureFormat, type SiwsSignatureFormat } from "@/lib/siws-offchain";
-import { formatTokens, MINT_SYMBOL_MAX_BYTES, truncateUtf8 } from "@/lib/tokenize-shares";
 
 export const CERTIFICATE_SCHEMA = "manci.certificate.v1";
 export const CERTIFICATE_KINDS = ["holding", "issuance"] as const;
@@ -206,9 +205,31 @@ export function percentOf(units: bigint, whole: bigint): { percent: string; roun
   return { percent: fraction ? `${integer}.${fraction}` : integer, rounded: remainder !== BigInt(0) };
 }
 
-/** The token symbol the program wrote at mint creation: "<symbol prefix><class index>", at most 10 bytes. */
+/** 10000n → "10,000" (display only). */
+export function formatUnits(n: bigint): string {
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** The program's cap on a mint's metadata symbol, in UTF-8 bytes (initialize_share_class_mint). */
+const MINT_SYMBOL_MAX_BYTES = 10;
+
+/**
+ * The token symbol the program wrote at mint creation: "<symbol prefix><class
+ * index>", cut to 10 UTF-8 bytes without splitting a character (the
+ * program's truncate_utf8; lib/tokenize-shares.ts has the same cut for the
+ * issuer's preview, kept out of this module so the public page stays small).
+ */
 export function certificateTokenSymbol(symbolPrefix: string, classIndex: number): string {
-  return truncateUtf8(`${symbolPrefix}${classIndex}`, MINT_SYMBOL_MAX_BYTES);
+  const encoder = new TextEncoder();
+  let out = "";
+  let used = 0;
+  for (const ch of `${symbolPrefix}${classIndex}`) {
+    const bytes = encoder.encode(ch).length;
+    if (used + bytes > MINT_SYMBOL_MAX_BYTES) break;
+    out += ch;
+    used += bytes;
+  }
+  return out;
 }
 
 /** The operator's name as a certificate states it. */
@@ -221,7 +242,7 @@ const TEST_NETWORK_PREFIX =
   "TEST NETWORK: this certificate has no legal effect, and the tokens it names have no economic value. ";
 
 function unitsText(units: bigint): string {
-  return `${formatTokens(units)} ${units === BigInt(1) ? "unit" : "units"}`;
+  return `${formatUnits(units)} ${units === BigInt(1) ? "unit" : "units"}`;
 }
 
 function percentText(value: { percent: string; rounded: boolean }): string {
@@ -263,7 +284,7 @@ export function certificateStatement(payload: Omit<CertificatePayload, "statemen
     return (
       `${prefix}${operator} certifies that, ${readAt(payload.network, BigInt(holding.slot), payload.issued_at)}, ` +
       `the wallet ${holder.wallet}${named} held ${unitsText(units)} of ${payload.asset.symbol} (token mint ${payload.share_class.mint}), ${asset}. ` +
-      `The asset concerns ${companyText(payload.company)}; ${formatTokens(scale)} units stand for 100 % of that company, ` +
+      `The asset concerns ${companyText(payload.company)}; ${formatUnits(scale)} units stand for 100 % of that company, ` +
       `so the units held stand for ${percentText({ percent: holding.percent_of_company, rounded: holding.percent_of_company_rounded })} of it. ` +
       `${rights} ${notRegister} and does not by itself transfer or register any interest.`
     );
@@ -278,7 +299,7 @@ export function certificateStatement(payload: Omit<CertificatePayload, "statemen
     `${prefix}${operator} certifies that, ${readAt(payload.network, BigInt(supply.slot), payload.issued_at)}, ` +
     `${asset} has the token mint ${payload.share_class.mint} (${payload.asset.symbol}), ${maxText}, ` +
     `${unitsText(BigInt(supply.lifetime_minted))} issued to date and ${unitsText(BigInt(supply.circulating))} in circulation. ` +
-    `The asset concerns ${companyText(payload.company)}; ${formatTokens(scale)} units stand for 100 % of that company, ` +
+    `The asset concerns ${companyText(payload.company)}; ${formatUnits(scale)} units stand for 100 % of that company, ` +
     `so the units in circulation stand for ${percentText({ percent: supply.circulating_percent, rounded: supply.circulating_percent_rounded })} of it. ` +
     `${rights} ${notRegister}.`
   );
@@ -299,7 +320,7 @@ export function buildCertificatePayload(input: BuildCertificateInput): Certifica
   if (scale <= BigInt(0) || scale > U64_MAX) throw new CertificateInputError("The scale (units for 100 %) must be a whole number from 1 to 2^64 − 1.");
   if (chain.shareClass.maxSupply !== null && chain.shareClass.maxSupply > scale) {
     throw new CertificateInputError(
-      `The class's maximum supply (${formatTokens(chain.shareClass.maxSupply)}) is more than the scale (${formatTokens(scale)} units for 100 %): check the scale.`,
+      `The class's maximum supply (${formatUnits(chain.shareClass.maxSupply)}) is more than the scale (${formatUnits(scale)} units for 100 %): check the scale.`,
     );
   }
   if (input.evidence.length > CERTIFICATE_MAX_EVIDENCE) throw new CertificateInputError(`At most ${CERTIFICATE_MAX_EVIDENCE} evidence transactions.`);
@@ -399,6 +420,19 @@ export function normalizeCertificateNumber(raw: string): string | null {
   if (!Number.isSafeInteger(sequence) || sequence < 1) return null;
   const number = `MC-${match[1]}-${sequence < 10_000 ? String(sequence).padStart(4, "0") : String(sequence)}`;
   return CERTIFICATE_NUMBER_PATTERN.test(number) ? number : null;
+}
+
+/**
+ * A typed SHA-256 as 64 lowercase hex, or null: either case, an optional
+ * "sha256:" before it, and a `shasum -a 256` line ("<hash>  <file>") read as
+ * its hash. The public route then reads it with the stricter
+ * lib/document-anchor.ts normalizeSha256Input.
+ */
+export function normalizeCertificateSha256(raw: string): string | null {
+  const text = raw.trim();
+  if (/[\r\n]/.test(text)) return null; // one hash only
+  const match = /^(?:sha256:)?([0-9a-f]{64})(?:[ \t]+\S.*)?$/i.exec(text);
+  return match ? match[1].toLowerCase() : null;
 }
 
 // ── The admin's input ───────────────────────────────────────────────────────
