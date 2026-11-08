@@ -4402,6 +4402,77 @@ read-back results.
   same, which is why the realize must never be late.
 - Realized: nothing on chain undoes a burn; a correction is off chain.
 
+## 22. Investor relations: issuer updates (0090)
+
+An issuer's authority wallet publishes updates for the holders of its
+tokens on `/issuer/updates`: company updates, quarterly and annual
+reports, financial statements and notices, for one asset or for every
+asset of the issuer, each with up to ten documents. A **public** update
+shows on the asset page; a **holders only** update is served only to a
+wallet whose Token-2022 balance of one of the asset's classes the server
+reads above zero at that moment (for an issuer-wide update, of one of the
+issuer's assets), and is also listed on that holder's `/portfolio`.
+Drafts are private to the issuer. A published update cannot be edited:
+it can be anchored on chain once (a Memo v2 transaction its issuer key
+signs, `manci-update:<id> sha256:<digest of the published record>`) and
+withdrawn with a reason. A withdrawn update stays on record and is served
+to nobody but its issuer and the admins. No email is sent.
+
+Gating: composing (save, documents, publish) is issuance activity and
+pauses with it in KYC-only mode (`ops/env-vars.md`, "KYC-only mode");
+it also needs the issuer's KYB Verified on chain. Reading, discarding a
+draft, withdrawing and recording an anchor already on chain stay open.
+Attachments go to the private bucket `documents-confidential` under
+`issuer-updates/<issuer>/<network>/<sha256>/` (only that issuer's
+authority may upload there; the finalize route hashes the stored bytes),
+and every reader gets a short-lived signed URL (120 s) after the route
+checked the update's status, visibility and the reader's holding.
+
+**Apply 0090** (expand-only, before the front that uses it; without it
+the issuer page and the asset page's updates answer 503 and nothing else
+changes): devnet `bash scripts/ops/backup.sh devnet pre-0090`, then
+`MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0090_issuer_updates.sql`;
+check with `select relrowsecurity from pg_class where relname in
+('issuer_updates','issuer_update_documents');` (two `t`) and `select
+count(*) from pg_trigger where tgname in ('issuer_updates_guard',
+'issuer_update_documents_guard','manci_network_guard') and tgrelid in
+('public.issuer_updates'::regclass,'public.issuer_update_documents'::regclass);`
+(4). The mainnet project gets it with the rest of the chain, the same way
+after its own backup.
+
+**Moderation: withdrawing an update.** Any Admin, on `/admin/updates`
+(*On-chain → Issuer updates*): find the update (filter *Published*; open
+its documents from the card if needed), *Withdraw (moderation)*, give the
+reason (10–500 characters; the issuer sees it next to the update) and
+confirm with the wallet. What happens:
+
+- the row becomes `withdrawn` with `withdrawn_by` = the admin wallet,
+  `withdrawn_by_role` = `admin`, the reason and the time (0090 makes it
+  final: there is no "unwithdraw"; a corrected update is a new one);
+- an audit row `issuer_update_withdraw` (category *issuers*, target
+  `issuer-update:<id>`) is written; if the audit log is down the
+  withdrawal still stands (the row itself is the record);
+- the asset page, the holder read and every document link stop serving it
+  at once; a signed file URL handed out just before expires within 120 s.
+
+Withdraw when a published update must not stay in front of holders:
+statements that read as investment advice or promised returns, personal
+data, content for the wrong issuer or asset, or on a legal or authority
+request. Anything else (a typo, a late correction) is the issuer's to
+withdraw and republish. The files stay in the private bucket (document
+versions are immutable). When the bytes themselves must go (unlawful
+content, personal data), delete the object from `documents-confidential`
+in the Supabase dashboard after the withdrawal; the routes then answer
+"The document file is missing" for it, and the version row keeps its
+SHA-256 as the record. An update can also be checked for an anchor: the
+card links the transaction; the anchor proves only who published what and
+when, not that the content is accurate.
+
+**Rollback**: the front can roll back alone (the tables stay, unused). To
+remove the feature's data, export both tables first, then drop
+`issuer_update_documents` and `issuer_updates` and their guard functions,
+only with a front that no longer calls `/api/issuer-updates`.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):
