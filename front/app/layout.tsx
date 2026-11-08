@@ -9,6 +9,8 @@ import { Providers } from "./providers";
 import { MaintenanceBanner } from "@/components/maintenance-banner";
 import { ManciAssistant } from "@/components/manci-assistant";
 import { indexingAllowed } from "@/lib/indexing";
+import { SITE_OPEN_GRAPH, siteUrl } from "@/lib/site-url";
+import { MANCI_X_HANDLE } from "@/lib/social";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -21,12 +23,23 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL || "https://www.manci.io",
-  ),
-  title: "Manci — on-chain tokenization",
+  // Canonical links, og:url and the og:image URL resolve against the
+  // configured site origin (lib/site-url.ts: NEXT_PUBLIC_SITE_URL when it is
+  // an https origin, else https://www.manci.io; never a request's Host).
+  metadataBase: new URL(siteUrl()),
+  // The defaults for a page without its own title or description.
+  title: "Manci — company shares on Solana",
   description:
-    "Manci issues, custodies, trades and vests tokenized real-world assets and investments on Solana.",
+    "Manci tokenizes shares of private companies on Solana, with a documented path from token to registered ownership.",
+  // Every page names itself as canonical ("./" resolves against the page's
+  // own path; a query string never makes a second URL) unless it sets its own.
+  alternates: { canonical: "./" },
+  // Shallow defaults every page inherits: Next.js fills og:title and
+  // og:description, and the Twitter card's title, description and image,
+  // from the page's own title, description and app/opengraph-image.tsx. A
+  // page that sets its own openGraph or twitter replaces these whole.
+  openGraph: { ...SITE_OPEN_GRAPH, url: "./" },
+  twitter: { card: "summary_large_image", site: MANCI_X_HANDLE },
   // No indexing unless this is a mainnet build that opted in with
   // NEXT_PUBLIC_ALLOW_INDEXING=true (lib/indexing.ts; app/robots.ts agrees).
   robots: indexingAllowed()
