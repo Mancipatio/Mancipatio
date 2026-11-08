@@ -415,3 +415,34 @@ return 503 rather than old seed answers. Quota-store failure uses published
 prepared answers without making paid requests. The existing server
 Supabase credential and canonical site origin are reused; feature flags,
 network selection and on-chain pause masks are unchanged by this feature.
+
+## Fee schedule (pricing)
+
+No variable: the price list is data in the database (migration 0089,
+runbook §22), not configuration, so publishing or retiring a price needs no
+redeploy. `/pricing`, `GET /api/fees/public` and the fee shown on the
+conversion request form and the `/apply` review step
+(`components/fee-quote.tsx`) read the published rows on every request.
+While none is published, `/pricing` keeps the launch-phase text word for
+word, the quote surfaces show nothing, and no charge can be booked.
+
+Where the owner publishes: `/admin/fees` → *Fee schedule*. Any Admin
+prepares drafts (*Load suggested defaults* creates the owner's suggested
+prices as drafts only) and books charges; only the Super Admin publishes
+or retires a price. **Publication is a business and legal decision**, not
+a deployment step. Before publishing:
+
+- a fee paid by a holder, buyer or seller: the Terms in force (clause 11)
+  say the Operator charges buyers and holders no fee and will publish a new
+  Terms version before introducing one, so publish it only with Terms that
+  provide for it;
+- a fee paid by an issuer: the launch-phase pricing page promises that
+  existing issuers are told before platform fees are introduced, and the
+  Terms say issuers pay what their engagement agreement provides;
+- a fee whose service the build does not offer (KYC-only mode, a module
+  switched off, token migration) is listed "where offered", never as an
+  available service.
+
+Collection is by invoice, off-chain; `Platform.protocol_fee_bps` stays
+unused. The feature flags, the network selection and the on-chain pause
+masks are unchanged by this feature.

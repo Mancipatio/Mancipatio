@@ -4402,6 +4402,81 @@ read-back results.
   same, which is why the realize must never be late.
 - Realized: nothing on chain undoes a burn; a correction is off chain.
 
+## 22. Fee schedule and charges (0089)
+
+`0089_fee_schedule.sql` adds the public price list and the ledger of what
+is billed against it. Collection is by invoice, off-chain; no program
+changes, and `Platform.protocol_fee_bps` stays unused (0 on chain).
+
+- `fee_schedule`: one row per fee kind (`tokenization_setup`,
+  `primary_sale`, `conversion`, `migration_setup`, `migration_per_holder`,
+  `otc`): who pays, a fixed EUR part, a rate in bps of a EUR base, an
+  optional minimum and maximum, the public label and note, and a status.
+  Every row starts as a **draft** (private). Only `publish_fee_schedule`
+  publishes, and it retires the price in force for that kind in the same
+  transaction: one published row per kind and network. A published row is
+  never edited, only retired; a retired row never changes; only drafts are
+  deleted. A publication never takes effect in the past.
+- `fee_charges`: one charge per fee owed for a reference (a conversion
+  request, an application, an asset, a migration or another reference),
+  priced by the server (`front/lib/fees/quote.ts` `quoteFee`: max(min,
+  fixed x quantity + base x rate), capped by max, rounded to cents) from the
+  published row of its kind, accepted only while that row is in effect.
+  Status: due, invoiced (with the invoice number), paid, or waived (with a
+  reason). The amount and the reference never change; a charge is never
+  deleted; one open charge per kind and reference.
+- 0004's `fee_config` / `fee_waivers` are unchanged: the internal register
+  of per-engagement terms and per-client waivers on the same page.
+
+Both tables are default-deny (no browser grant); the service role reads
+and writes through the signed routes under `/api/fees/` (drafts, defaults
+and charges: Admin; publish and retire: Super Admin; every write audited,
+category `platform`). The public reads only the published projection, via
+`/pricing` and `GET /api/fees/public` (open in KYC-only mode).
+
+**Order.** Either way round is safe: without 0089, `/pricing` and the public
+route read the missing table as "nothing published" (the launch-phase
+page), and `/admin/fees` says the schedule is not installed. Apply it to
+devnet, then mainnet, before anyone uses the new sections (sha256 of the
+file first: `shasum -a 256 supabase/migrations/0089_fee_schedule.sql`).
+Devnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0089
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0089_fee_schedule.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0089','fee_schedule') on conflict (version) do nothing"
+MANCI_TARGET=devnet bash scripts/db.sh -c "select to_regclass('public.fee_schedule') is not null as schedule, to_regclass('public.fee_charges') is not null as charges, to_regprocedure('public.publish_fee_schedule(uuid,text,text,timestamptz)') is not null as publish, has_table_privilege('anon','public.fee_schedule','SELECT') as anon_reads, has_table_privilege('service_role','public.fee_charges','DELETE') as service_deletes_charges, (select count(*) from public.fee_schedule) as prices, (select version from supabase_migrations.schema_migrations where version='0089') as recorded"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Mainnet: the same with `MANCI_ALLOW_MAINNET=1` (`export` it for the block,
+`unset` it after; the mainnet dump is schema-only, PITR is the restore
+point). Pass: `t | t | t | f | f | 0 | 0089`, and the identity preflight
+still shows `tables_without_guard` `[]` and `defaults_not_dynamic` `{}`.
+The migration seeds nothing: no price exists until an admin creates one.
+
+**Publishing prices (owner).** Prices are data, not configuration: no
+environment variable and no redeploy (`ops/env-vars.md`, "Fee schedule").
+On `/admin/fees` → *Fee schedule*, an Admin prepares drafts (by hand, or
+*Load suggested defaults*: the owner's suggested prices of 2026-11-08 as
+drafts, never published), and the Super Admin publishes. **Publication is a
+business and legal decision**: the publish dialog states what goes public
+and asks for confirmation that the Terms and the pricing page's commitments
+are met. Today's Terms (clause 11) say buyers and holders pay no fee and
+that a new Terms version comes first, so a fee paid by a holder, buyer or
+seller is published only with Terms that provide for it; for an issuer fee,
+existing issuers are told first (the launch-phase pricing page promises
+it). A published fee whose service the build does not offer reads "where
+offered" on `/pricing`. Day-to-day charges: `ops/sop-admin.md`, "Fees".
+
+**Rollback.** Before anything is published or charged:
+`drop table public.fee_charges; drop table public.fee_schedule; drop
+function public.publish_fee_schedule(uuid,text,text,timestamptz); drop
+function public.fee_schedule_guard(); drop function
+public.fee_charges_guard();` (the front then reads "nothing published").
+After a publication or a charge, keep the tables (they are the price and
+billing history): retire prices and waive charges instead.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):

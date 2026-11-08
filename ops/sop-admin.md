@@ -265,6 +265,33 @@ explorer.solana.com, and check that the transaction succeeded, is signed by
 the super admin key, and that its Memo instruction reads exactly
 `<reference> sha256:<that hash>`; the block time is the time of the anchor.
 
+## Fees: price list and charges
+
+Page: `/admin/fees` (migration 0089, runbook §22). Nothing here moves
+tokens or money: fees are invoiced off-chain.
+
+1. **Prices.** *Fee schedule* shows drafts (private), the price in force
+   per kind and, on request, retired prices. Any Admin edits drafts; *New
+   version* on a published price starts a draft from it. Only the Super
+   Admin publishes or retires, and **only after the decision is recorded**
+   (business and legal: the Terms and the pricing page's commitments,
+   `ops/env-vars.md` "Fee schedule"). Publishing replaces the price in force
+   for that kind; retiring one leaves the service without a published fee.
+2. **Book a charge** when the fee becomes due (the "When it is invoiced"
+   column of `/pricing`): *Charges* → *New charge*, choose the fee and the
+   conversion request or application (or another reference), and enter the
+   EUR base the rate applies to (e.g. the conversion value) or, for a
+   per-holder fee, the number of delivered wallets. The server prices it
+   from the published fee; the amount is fixed from then on. A conversion
+   charge is billed to the requesting holder's client automatically.
+3. **Invoice** off-platform (third-party costs such as notary and business
+   register at cost, on the same or a separate invoice), then *Mark
+   invoiced* with the invoice number; *Mark paid* when the payment arrives.
+4. **Waive** a charge booked by mistake or not to be collected (design
+   partner, agreed discount recorded in *Per-client waivers*), with the
+   reason. A waived charge stays in the ledger; the reference can then be
+   charged again. Charges are never deleted.
+
 ## Weekly and monthly
 
 - Weekly: the manual FX fallback (the automatic rate shows as current); alarm backlog zero; `chain:inventory` (read-only) shows no
