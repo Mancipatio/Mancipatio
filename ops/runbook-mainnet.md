@@ -4440,13 +4440,24 @@ What the program does:
     exactly as the APR decision states them, and choose the decision
     document (hashed in the browser, never uploaded) or paste its SHA-256;
     the realize transaction and the holder's dossier come from the request.
+    The percent is the stake of the company the decision moved (MANCI-2026:
+    250 units = 2.5 %, entered as 2.5), never units ÷ max supply: the class
+    cap is not 100 % of the company (MANCI-2026's 1,750 units are 17.5 %).
+    The form prefills units × the share of one unit when the asset
+    profile's tokenize figures match the class cap, and nothing otherwise.
     An entry cannot be edited: a wrong one is voided with a reason and
     recorded again. Read back: every check of the class shows *Pass*
     (converted units equal registered units, issued minus burned equals
-    outstanding, within 100 %), and the asset page's *Supply and
+    outstanding, outstanding plus converted within the class cap, the
+    tokenize figures match the class cap, the recorded percent matches
+    units × the share of one unit), and the asset page's *Supply and
     conversions* lists the conversion with its date, units, percent,
     registry, document SHA-256 and realize transaction, never the case
-    number or the holder.
+    number or the holder. Until the entry is recorded the panel shows the
+    realized conversion (units and realize transaction) as *register entry
+    pending*. The public panel shows percentages of the company only while
+    the asset profile is published and its tokenize figures match the class
+    cap; otherwise it shows units only.
 
 **Timeline and emails.** `/portfolio/conversion` shows the holder each
 request's step (requested, escrow open, units in escrow, notary and

@@ -44,9 +44,18 @@ const DOCUMENT_FIELDS = ["whitepaper_path", "whitepaper_url", "whitepaper_sha256
   "whitepaper_published_at", "ssc_decision_ref", "ssc_decision_doc_path",
   "ssc_decision_doc_sha256"] as const;
 
+/**
+ * Whether the public reader may show a profile row at all: published and
+ * marked so, both re-checked after the SELECT. The public cap table read
+ * (lib/server/cap-table.ts) takes the tokenize figures only from such a row.
+ */
+export function isPublishedProfileRow(row: Record<string, unknown>): boolean {
+  return row.is_published === true && row.status === "published";
+}
+
 /** Re-project even after the DB SELECT so a later query change cannot leak keys. */
 export function projectPublicAssetProfile(row: Record<string, unknown>): PublicAssetProfile | null {
-  if (row.is_published !== true || row.status !== "published") return null;
+  if (!isPublishedProfileRow(row)) return null;
   const out = Object.fromEntries(PUBLIC_ASSET_PROFILE_FIELDS.map((key) => [key, row[key] ?? null]));
   const publishedDocument = row.whitepaper_status === "published" || row.whitepaper_status === "ssc_approved";
   if (!publishedDocument) {

@@ -1,17 +1,22 @@
 "use client";
 
 // "Supply and conversions" on the public asset page
-// (/marketplace/assets/[id]): per share class, what 100 % of the company is,
-// how many units were issued, how many are outstanding and how many sit in
-// conversion custody, and the conversions recorded in the company register
-// with the decision document's SHA-256 and the realize transaction. Read from
-// /api/cap-table/public (open, cached, no personal data, no case number), so
-// it renders in KYC-only mode like the rest of the page. Facts only: it
-// offers no action and says nothing about which services are available.
+// (/marketplace/assets/[id]): per share class, the class cap in units, how
+// many units were issued, how many are outstanding and how many sit in
+// conversion custody, the conversions recorded in the company register
+// with the decision document's SHA-256 and the realize transaction, and the
+// conversions realized on chain whose register entry is still pending. A
+// share of the company shows only where the class has a share of one unit
+// (unit_percent: from the published profile's tokenize figures, when they
+// match the class on chain); otherwise units only, never units ÷ max
+// supply. Read from /api/cap-table/public (open, cached, no personal data,
+// no case number), so it renders in KYC-only mode like the rest of the
+// page. Facts only: it offers no action and says nothing about which
+// services are available.
 
 import { useEffect, useState } from "react";
 import { SkeletonCard } from "@/components/skeleton";
-import { formatUnits, percentOfSupply, type PublicSupply, type PublicSupplyClass } from "@/lib/cap-table";
+import { formatUnits, percentForUnits, type PublicSupply, type PublicSupplyClass } from "@/lib/cap-table";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 
 type State = { asset: string; supply: PublicSupply | null; failed: boolean };
@@ -65,46 +70,66 @@ export function SupplyConversionsFigures({ supply }: { supply: PublicSupply }) {
       ))}
       <p className="text-xs leading-relaxed text-mx-ink-faint">
         Figures are read from the Solana {supply.network} programs and the register entries Manci records
-        after each registry decision. The SHA-256 lets anyone holding a copy of the decision document check that it
-        is the document a record refers to. Case numbers and the identities of holders are not published.
+        after each registry decision. A share of the company is shown only where the asset&apos;s published figures
+        give the share of one unit and match the class cap on chain. The SHA-256 lets anyone holding a copy of the
+        decision document check that it is the document a record refers to. Case numbers and the identities of
+        holders are not published.
       </p>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, note }: { label: string; value: string; note?: string | null }) {
   return (
     <div>
       <dt className="text-xs font-medium uppercase tracking-wide text-mx-ink-faint">{label}</dt>
-      <dd className="mt-0.5 text-sm text-mx-ink">{value}</dd>
+      <dd className="mt-0.5 text-sm text-mx-ink">
+        {value}
+        {note && <span className="mt-0.5 block text-xs text-mx-ink-soft">{note}</span>}
+      </dd>
     </div>
   );
 }
 
+const conversionsText = (count: number) => `${count} ${count === 1 ? "conversion" : "conversions"}`;
+
 function ClassSupply({ cls, labelled }: { cls: PublicSupplyClass; labelled: boolean }) {
-  const max = cls.max_supply === null ? null : BigInt(cls.max_supply);
+  // Units × the share of one unit, only when the class has one: no percentage otherwise.
+  const pctOf = (units: string) => percentForUnits(units, cls.unit_percent);
   const withPercent = (units: string) => {
-    const pct = percentOfSupply(BigInt(units), max);
+    const pct = pctOf(units);
     return `${formatUnits(units)} units${pct === null ? "" : ` (${pct} %)`}`;
   };
-  const count = cls.converted.count;
+  const capPercent = cls.max_supply === null ? null : pctOf(cls.max_supply);
+  const registered = cls.converted.count === 0
+    ? null
+    : `${conversionsText(cls.converted.count)} · ${formatUnits(cls.converted.units)} units · ${cls.converted.percent} % of the company`;
+  // Realized on chain (units burned) before the register entry is recorded: never "None yet".
+  const pending = cls.pending.count === 0
+    ? null
+    : `${conversionsText(cls.pending.count)} realized on chain · ${withPercent(cls.pending.units)} · register entry pending`;
+  const showRecord = cls.records.length > 0 || cls.pending.conversions.length > 0;
   return (
     <div className="rounded-[3px] border border-mx-rule bg-white p-6">
       {labelled && <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-mx-ink-soft">Share class #{cls.class_index}</p>}
       <dl className="grid gap-3 sm:grid-cols-2">
         <Row
-          label="100 % of the company"
-          value={max === null ? "No maximum supply set" : `${formatUnits(cls.max_supply!)} units${cls.unit_percent ? ` · 1 unit = ${cls.unit_percent} %` : ""}`}
+          label="Class cap"
+          value={cls.max_supply === null
+            ? "No maximum supply set"
+            : `${formatUnits(cls.max_supply)} units${capPercent === null ? "" : ` (${capPercent} % of the company)`}`}
+          note={cls.unit_percent ? `1 unit = ${cls.unit_percent} % of the company` : null}
         />
         <Row label="Issued" value={withPercent(cls.issued)} />
         <Row label="Outstanding" value={withPercent(cls.outstanding)} />
         <Row label="In conversion" value={withPercent(cls.in_conversion)} />
         <Row
           label="Converted into registered ownership"
-          value={count === 0 ? "None yet" : `${count} ${count === 1 ? "conversion" : "conversions"} · ${formatUnits(cls.converted.units)} units · ${cls.converted.percent} % of the company`}
+          value={registered ?? pending ?? "None yet"}
+          note={registered ? pending : null}
         />
       </dl>
-      {cls.records.length > 0 && (
+      {showRecord && (
         <div className="mt-5 overflow-x-auto border-t border-mx-rule pt-4">
           <table className="w-full text-left text-xs">
             <caption className="mb-2 text-left text-xs font-medium uppercase tracking-wide text-mx-ink-faint">Conversion record</caption>
@@ -126,20 +151,36 @@ function ClassSupply({ cls, labelled }: { cls: PublicSupplyClass; labelled: bool
                   <td className="py-2 pr-3 text-right font-mono">{r.percent} %</td>
                   <td className="py-2 pr-3">{r.registry}</td>
                   <td className="py-2 pr-3"><code className="block max-w-[22rem] break-all font-mono text-[11px]">{r.decision_doc_sha256}</code></td>
-                  <td className="py-2">
-                    {r.realize_tx ? (
-                      <a href={explorerTxUrl(r.realize_tx, detectNetwork())} target="_blank" rel="noopener noreferrer"
-                        className="font-mono text-[11px] text-mx-ink underline-offset-2 hover:underline" title={r.realize_tx}>
-                        {r.realize_tx.slice(0, 8)}…{r.realize_tx.slice(-4)} ↗
-                      </a>
-                    ) : "—"}
-                  </td>
+                  <td className="py-2"><RealizeLink signature={r.realize_tx} /></td>
                 </tr>
               ))}
+              {cls.pending.conversions.map((p, i) => {
+                const pct = pctOf(p.units);
+                return (
+                  <tr key={`pending:${i}:${p.realize_tx ?? ""}`} className="align-top">
+                    <td className="py-2 pr-3 whitespace-nowrap">—</td>
+                    <td className="py-2 pr-3 text-right font-mono">{formatUnits(p.units)}</td>
+                    <td className="py-2 pr-3 text-right font-mono">{pct === null ? "—" : `${pct} %`}</td>
+                    <td className="py-2 pr-3">Register entry pending</td>
+                    <td className="py-2 pr-3">—</td>
+                    <td className="py-2"><RealizeLink signature={p.realize_tx} /></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
     </div>
+  );
+}
+
+function RealizeLink({ signature }: { signature: string | null }) {
+  if (!signature) return <>—</>;
+  return (
+    <a href={explorerTxUrl(signature, detectNetwork())} target="_blank" rel="noopener noreferrer"
+      className="font-mono text-[11px] text-mx-ink underline-offset-2 hover:underline" title={signature}>
+      {signature.slice(0, 8)}…{signature.slice(-4)} ↗
+    </a>
   );
 }

@@ -7,14 +7,16 @@
 // renders only what the table carries: the issuer's table (from
 // /api/cap-table/issuer-read) has no dossier link, note or void reason, so
 // none can show here. The admin page adds its actions through the render
-// props.
+// props. max_supply is the class cap in units; a percentage of the company
+// shows only where the class has a share of one unit (unit_percent, from
+// tokenize figures that match the class), never units ÷ max_supply.
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 import {
   formatUnits,
   HOLDER_KIND_LABEL,
-  percentOfSupply,
+  percentForUnits,
   type AssetReconciliation,
   type CheckState,
   type ClassReconciliation,
@@ -80,10 +82,18 @@ function Figure({ label, value, hint }: { label: string; value: ReactNode; hint?
   );
 }
 
-function withPercent(value: string | null, max: string | null): ReactNode {
+/** Units, with their share of the company when the class has a share of one unit. */
+function withPercent(value: string | null, unitPercent: string | null): ReactNode {
   if (value === null) return "—";
-  const pct = max === null ? null : percentOfSupply(BigInt(value), BigInt(max));
+  const pct = percentForUnits(value, unitPercent);
   return <>{formatUnits(value)}{pct !== null && <span className="ml-1.5 text-slate-500">({pct} %)</span>}</>;
+}
+
+/** The class cap: units, and the share of the company they stand for when known. */
+function classCap(maxSupply: string | null, unitPercent: string | null): string {
+  if (maxSupply === null) return "No cap";
+  const pct = percentForUnits(maxSupply, unitPercent);
+  return `${formatUnits(maxSupply)} units${pct === null ? "" : ` (${pct} % of the company)`}`;
 }
 
 export function CapTableView({
@@ -158,20 +168,21 @@ function ClassSection({
         <div className="bg-white px-5 py-4">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">On chain</h3>
           <dl className="mt-2 divide-y divide-slate-100">
-            <Figure label="100 % of the company" value={c.max_supply === null ? "No cap" : `${formatUnits(c.max_supply)} units`}
-              hint="The class's max supply" />
-            <Figure label="One unit" value={c.unit_percent === null ? "—" : `${c.unit_percent} %`} />
-            <Figure label="Issued (lifetime minted)" value={withPercent(c.lifetime_minted, c.max_supply)} />
-            <Figure label="Outstanding (circulating)" value={withPercent(c.circulating, c.max_supply)} />
+            <Figure label="Class cap" value={classCap(c.max_supply, c.unit_percent)}
+              hint="The class's max supply, in units" />
+            <Figure label="One unit" value={c.unit_percent === null ? "—" : `${c.unit_percent} % of the company`}
+              hint="From the tokenize figures, shown only while they match the class cap" />
+            <Figure label="Issued (lifetime minted)" value={withPercent(c.lifetime_minted, c.unit_percent)} />
+            <Figure label="Outstanding (circulating)" value={withPercent(c.circulating, c.unit_percent)} />
             <Figure label="Locked" value={units(c.locked)} />
             <Figure label="Burned on chain" value={units(c.burned)} hint="Lifetime minted minus circulating" />
             <Figure label="Burned through conversions" value={units(c.burned_by_conversions)} />
             <Figure label="Mint supply" value={units(c.mint_supply)} />
-            <Figure label="In conversion (open escrows)" value={withPercent(c.in_conversion, c.max_supply)} />
+            <Figure label="In conversion (open escrows)" value={withPercent(c.in_conversion, c.unit_percent)} />
             <Figure label="In custody escrows (all vaults)" value={units(c.custody_escrow)} />
-            <Figure label="Issuer treasury" value={withPercent(c.treasury, c.max_supply)} />
-            <Figure label="Other wallets" value={withPercent(c.other_wallets, c.max_supply)} />
-            <Figure label="Program escrows" value={withPercent(c.program_escrows, c.max_supply)} />
+            <Figure label="Issuer treasury" value={withPercent(c.treasury, c.unit_percent)} />
+            <Figure label="Other wallets" value={withPercent(c.other_wallets, c.unit_percent)} />
+            <Figure label="Program escrows" value={withPercent(c.program_escrows, c.unit_percent)} />
           </dl>
         </div>
         <div className="bg-white px-5 py-4">

@@ -7,7 +7,10 @@
 // panel: tests/cap-table.test.ts.
 //
 // What the program does (program/programs/asset_registry/src, read only):
-//   - mint_to_treasury and buy raise circulating_supply AND lifetime_minted;
+//   - mint_to_treasury and buy raise circulating_supply AND lifetime_minted,
+//     and refuse to pass max_supply (util.rs next_issuance_supply): a class
+//     with cumulative_cap counts lifetime_minted against it, any other class
+//     circulating_supply only;
 //   - realize_custody_vault and revert_custody_vault burn the whole escrow and
 //     lower circulating_supply only: lifetime_minted never goes down;
 //   - locked_supply is set to 0 when the class is created and nothing changes it.
@@ -15,12 +18,30 @@
 // the conversions (a DeliveryEscrow realize), plus any clawback quarantine
 // realize or revert. A holder can also burn units with the token program
 // directly; the mint's supply then drops while the registry counters do not.
-// Units are integers (mint decimals 0) and max_supply is 100 % of the company.
+// Units are integers (mint decimals 0).
+//
+// max_supply is the class cap in UNITS, not the whole company: a class may
+// stand for part of it (MANCI-2026: 1,750 units = 17.5 % of Mancipatio
+// d.o.o.). The share of the company one unit is comes only from the tokenize
+// flow's figures (asset_profiles.fields->tokenize, read and cross-checked by
+// lib/distribution-rows companyFiguresFrom: tokenE4, in 1/10,000 of a
+// percent), and they count for a class only while they agree with it on
+// chain: the class they describe, a cap, and max_supply === their tokens.
+// Then N units are exactly N × tokenE4 of the company; otherwise no
+// percentage is shown at all. A percentage is never units ÷ max_supply.
+//
+// Units converted into registered ownership leave the class (the realize
+// burns them) but stay part of what it stands for, so outstanding plus
+// converted units must stay within max_supply (within_cap). The program
+// guarantees that only for a class with cumulative_cap; any other class lets
+// it mint the burned units again, and this check is what catches that.
 //
 // Percentages: the register records the stake as written in the decision, in
 // basis points with up to four decimals (percent_bps: 250 = 2.5 %). A figure
-// is consistent with units ÷ max_supply when it equals that ratio rounded up
-// or down at the precision written.
+// is consistent with units × the share of one unit when it equals that
+// product rounded up or down at the precision written.
+
+import type { CompanyFigures } from "@/lib/distribution-rows";
 
 export type CheckState = "pass" | "warn" | "fail";
 
@@ -32,6 +53,7 @@ export const CHECK_IDS = [
   "supply_identity",
   "mint_supply",
   "within_cap",
+  "unit_share",
   "entry_percentages",
 ] as const;
 export type CheckId = (typeof CHECK_IDS)[number];
@@ -42,8 +64,9 @@ export const CHECK_TITLES: Record<CheckId, string> = {
   entries_match_chain: "Every register entry matches a conversion on chain",
   supply_identity: "Issued minus burned equals outstanding",
   mint_supply: "Mint supply matches the counters and the holder accounts",
-  within_cap: "Outstanding plus registered stays within 100 %",
-  entry_percentages: "Recorded percentages match units ÷ max supply",
+  within_cap: "Outstanding plus converted units stay within the class cap",
+  unit_share: "The tokenize figures match the class cap",
+  entry_percentages: "Recorded percentages match units × the share of one unit",
 };
 
 export type CapTableCheck = { id: CheckId; state: CheckState; title: string; detail: string };
@@ -143,6 +166,16 @@ export type RegisterEntryFacts = {
   createdBy?: string;
 };
 
+/**
+ * The tokenize flow's figures of an asset, as lib/server/cap-table.ts reads
+ * them (lib/distribution-rows CompanyFigures, from `fields.tokenize`): the
+ * share class they describe (the flow's class, lib/tokenize-shares
+ * CLASS_INDEX), the units they were written for (the cap the flow set) and
+ * the share of the company ONE unit is, in 1/10,000 of a percent (100 =
+ * 0.01 %). They give a class percentages only through unitShareOf.
+ */
+export type UnitShareFigures = Pick<CompanyFigures, "tokens" | "tokenE4"> & { classIndex: number };
+
 const ZERO = BigInt(0);
 const ONE = BigInt(1);
 const TEN = BigInt(10);
@@ -150,6 +183,10 @@ const HUNDRED = BigInt(100);
 const BPS = BigInt(10_000);
 /** Basis points are kept with four decimals (numeric(10, 4)). */
 const BPS_SCALE = 4;
+/** A share in 1/10,000 of a percent (tokenE4) has four decimals of a percent. */
+const PERCENT_E4_SCALE = 4;
+/** 100 % in 1/10,000 of a percent (lib/tokenize-shares HUNDRED_PERCENT_E4). */
+const HUNDRED_PERCENT_E4 = BigInt(1_000_000);
 
 // ── Numbers ────────────────────────────────────────────────────────────────
 
@@ -165,18 +202,40 @@ export function formatScaled(value: bigint, scale: number): string {
   return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
 }
 
-/** numerator / denominator, rounded half up to `decimals` places, as a trimmed decimal string. */
-export function ratioText(numerator: bigint, denominator: bigint, decimals: number): string {
-  if (denominator <= ZERO) throw new Error("ratioText needs a positive denominator");
-  const scaled = numerator * pow10(decimals);
-  const rounded = (scaled * BigInt(2) + denominator) / (denominator * BigInt(2));
-  return formatScaled(rounded, decimals);
+/**
+ * The share of the company `units` are, from the share of one unit in
+ * 1/10,000 of a percent: exact, four decimals at most ("2.5", "0.0037");
+ * null without that share. Never units ÷ max_supply: the cap is not 100 %.
+ */
+function unitsPercent(units: bigint, unitE4: bigint | null): string | null {
+  if (unitE4 === null || unitE4 <= ZERO || units < ZERO) return null;
+  return formatScaled(units * unitE4, PERCENT_E4_SCALE);
 }
 
-/** Percent of the company `units` are (max_supply = 100 %), up to six decimals; null when uncapped. */
-export function percentOfSupply(units: bigint, maxSupply: bigint | null): string | null {
-  if (maxSupply === null || maxSupply <= ZERO) return null;
-  return ratioText(units * HUNDRED, maxSupply, 6);
+const UNIT_PERCENT_RE = /^(0|[1-9]\d{0,2})(?:\.(\d{1,4}))?$/;
+
+/**
+ * A `unit_percent` of this module ("0.01") back to 1/10,000 of a percent
+ * (100n); null when absent or not one it writes (above 0, at most 100 %,
+ * four decimals at most).
+ */
+export function unitPercentE4(unitPercent: string | null | undefined): bigint | null {
+  const match = typeof unitPercent === "string" ? UNIT_PERCENT_RE.exec(unitPercent) : null;
+  if (!match) return null;
+  const e4 = BigInt(match[1]) * pow10(PERCENT_E4_SCALE) + BigInt((match[2] ?? "").padEnd(PERCENT_E4_SCALE, "0"));
+  return e4 > ZERO && e4 <= HUNDRED_PERCENT_E4 ? e4 : null;
+}
+
+/**
+ * The share of the company `units` are, given the share of one unit
+ * (`unit_percent`, "0.01"): "2.5" for 250 units. null when either is
+ * unknown, so the view shows units only. The views and the CSV derive every
+ * percentage of the company through this.
+ */
+export function percentForUnits(units: bigint | string | null, unitPercent: string | null): string | null {
+  if (units === null) return null;
+  const value = typeof units === "bigint" ? units : /^\d{1,20}$/.test(units) ? BigInt(units) : null;
+  return value === null ? null : unitsPercent(value, unitPercentE4(unitPercent));
 }
 
 /** Integer units with thousands separators ("10,000"). */
@@ -232,23 +291,74 @@ export function bpsToPercent(bps: string): string {
   return parsed ? formatScaled(parsed.scaled, 6) : "";
 }
 
-/** The exact share `units / maxSupply` in basis points, up to four decimals, rounded half up. */
-export function unitsToBps(units: bigint, maxSupply: bigint): string {
-  return ratioText(units * BPS, maxSupply, BPS_SCALE);
+/**
+ * Whether `bps` (as written) equals units × the share of one unit (`unitE4`,
+ * in 1/10,000 of a percent) rounded up or down at the precision written: 250
+ * for 250 units of 0.01 %; 12, 13, 12.3, 12.4 or 12.34 for 1,234 units of
+ * 0.0001 % (12.34 bps). 1/10,000 of a percent is 1/100 of a basis point, so
+ * the exact figure never has more than two decimals of a basis point.
+ */
+export function bpsConsistent(bps: string, units: bigint, unitE4: bigint): boolean {
+  const parsed = parseBps(bps);
+  if (!parsed || unitE4 <= ZERO || units < ZERO) return false;
+  const written = parsed.scaled / pow10(BPS_SCALE - parsed.decimals);
+  // The exact basis points × 10^decimals, as a fraction over 100.
+  const exact = units * unitE4 * pow10(parsed.decimals);
+  const low = exact / HUNDRED;
+  const high = exact % HUNDRED === ZERO ? low : low + ONE;
+  return written >= low && written <= high;
 }
 
+/** What the tokenize figures give one class: the share of one unit, or none and why. */
+export type UnitShare = {
+  /** The share of the company one unit is, in 1/10,000 of a percent; null = units only. */
+  e4: bigint | null;
+  /** The unit_share check: warn when figures exist but do not fit the class. */
+  state: CheckState;
+  detail: string;
+};
+
 /**
- * Whether `bps` (as written) equals units ÷ max_supply rounded up or down at
- * the precision written: 250 for 250 of 10,000; 3333.33 or 3333.34 for 1 of 3.
+ * The share of one unit of `chain`'s class, from the tokenize figures: only
+ * for the class they describe, when it is capped and its max_supply is the
+ * number of units they were written for (the flow caps its class at exactly
+ * that). Anything else gives no share at all, so no view shows a percentage
+ * the chain does not back: no figures, or figures for another class, leave
+ * this class at units only (pass); figures that should fit this class and do
+ * not are a warn. Never a fail: a missing or mismatched figure makes neither
+ * the chain nor the register wrong.
  */
-export function bpsConsistent(bps: string, units: bigint, maxSupply: bigint): boolean {
-  const parsed = parseBps(bps);
-  if (!parsed || maxSupply <= ZERO) return false;
-  const written = parsed.scaled / pow10(BPS_SCALE - parsed.decimals);
-  const exact = units * BPS * pow10(parsed.decimals);
-  const low = exact / maxSupply;
-  const high = exact % maxSupply === ZERO ? low : low + ONE;
-  return written >= low && written <= high;
+export function unitShareOf(
+  chain: Pick<ClassChainFacts, "classIndex" | "maxSupply">,
+  figures: UnitShareFigures | null,
+): UnitShare {
+  if (!figures || figures.tokens <= ZERO || figures.tokenE4 <= ZERO) {
+    return { e4: null, state: "pass", detail: "No tokenize figures for this asset: units are shown without a share of the company." };
+  }
+  if (figures.classIndex !== chain.classIndex) {
+    return { e4: null, state: "pass", detail: `The tokenize figures describe share class #${figures.classIndex}: this class shows units only.` };
+  }
+  const unit = formatScaled(figures.tokenE4, PERCENT_E4_SCALE);
+  const whole = figures.tokens * figures.tokenE4;
+  const written = `${formatUnits(figures.tokens)} units of ${unit} % each`;
+  if (whole > HUNDRED_PERCENT_E4) {
+    return { e4: null, state: "warn", detail: `The tokenize figures (${written}) add up to more than 100 % of the company: no percentages are shown.` };
+  }
+  if (chain.maxSupply === null) {
+    return { e4: null, state: "warn", detail: `The tokenize figures are for ${written}, but the class has no max supply to match them: no percentages are shown.` };
+  }
+  if (chain.maxSupply !== figures.tokens) {
+    return {
+      e4: null,
+      state: "warn",
+      detail: `The tokenize figures are for ${written}, but the class cap is ${formatUnits(chain.maxSupply)} units: no percentages are shown until they agree.`,
+    };
+  }
+  return {
+    e4: figures.tokenE4,
+    state: "pass",
+    detail: `1 unit = ${unit} % of the company: the tokenize figures (${formatUnits(figures.tokens)} units = ${formatScaled(whole, PERCENT_E4_SCALE)} %) match the class cap.`,
+  };
 }
 
 function sum(values: Iterable<bigint>): bigint {
@@ -316,8 +426,12 @@ export type ClassReconciliation = {
   class_index: number;
   mint: string;
   chain: {
+    /** The class cap in units (null = uncapped); never 100 % of the company by itself. */
     max_supply: string | null;
-    /** Percent of the company one unit is; null when uncapped. */
+    /**
+     * Percent of the company one unit is ("0.01"), from tokenize figures that
+     * match the class (unitShareOf); null = units only, no percentage at all.
+     */
     unit_percent: string | null;
     cumulative_cap: boolean;
     lifetime_minted: string;
@@ -386,13 +500,18 @@ function coverage(converted: ConversionFacts[], recorded: RegisterEntryFacts[]):
 /**
  * The reconciliation of one share class: chain facts, conversion requests and
  * register entries of THAT class (the caller filters), with every check.
+ * `figures` (the asset's tokenize figures, or null) give the percentages of
+ * the company, only when they match the class (unitShareOf).
  */
 export function reconcileShareClass(
   chain: ClassChainFacts,
   conversions: ConversionFacts[],
   entries: RegisterEntryFacts[],
+  figures: UnitShareFigures | null = null,
 ): ClassReconciliation {
   const max = chain.maxSupply;
+  const share = unitShareOf(chain, figures);
+  const unitE4 = share.e4;
   const converted = conversions.filter((c) => c.status === "converted");
   const open = conversions.filter((c) => c.status !== "converted");
   const recorded = entries.filter((e) => e.status === "recorded");
@@ -530,28 +649,42 @@ export function reconcileShareClass(
     checks.push(check("mint_supply", worstState(parts), details.join(" ")));
   }
 
-  // 6. circulating + registered ≤ max_supply.
+  // 6. Outstanding + converted ≤ max_supply, in units. Converted units left
+  // the class but stay part of what it stands for. They count by the larger
+  // of the converted requests and the register entries, so an entry still to
+  // record never hides them (check 1 compares the two).
   if (max === null) {
-    checks.push(check("within_cap", "warn", "The class has no max supply, so 100 % is not defined on chain."));
+    checks.push(check("within_cap", "warn", "The class has no max supply, so there is no cap to hold the outstanding and converted units against."));
   } else {
-    const represented = chain.circulatingSupply + registeredUnits;
-    const text = `${formatUnits(chain.circulatingSupply)} outstanding + ${formatUnits(registeredUnits)} registered = ${formatUnits(represented)} of ${formatUnits(max)} units`;
-    checks.push(represented <= max
-      ? check("within_cap", "pass", `${text} (${percentOfSupply(represented, max)} %).`)
-      : check("within_cap", "fail", `${text}: more than 100 % of the company is represented.`));
+    const convertedOut = convertedUnits > registeredUnits ? convertedUnits : registeredUnits;
+    const represented = chain.circulatingSupply + convertedOut;
+    const text = `${formatUnits(chain.circulatingSupply)} outstanding + ${formatUnits(convertedOut)} converted into registered ownership = ${formatUnits(represented)} of the ${formatUnits(max)}-unit class cap`;
+    const pct = unitsPercent(represented, unitE4);
+    if (represented <= max) {
+      checks.push(check("within_cap", "pass", `${text}${pct === null ? "" : ` (${pct} % of the company)`}.`));
+    } else {
+      const over = `${text}: ${formatUnits(represented - max)} over the cap.`;
+      checks.push(check("within_cap", "fail", chain.cumulativeCap
+        ? `${over} Check the register entries against the conversions.`
+        : `${over} Without a cumulative cap the program lets burned units be minted again: check for a mint into the room a conversion left.`));
+    }
   }
 
-  // 7. Each entry's percent matches units ÷ max_supply.
+  // 7. The tokenize figures fit the class: the share of one unit comes from them.
+  checks.push(check("unit_share", share.state, share.detail));
+
+  // 8. Each entry's percent matches units × the share of one unit.
   if (recorded.length === 0) {
     checks.push(check("entry_percentages", "pass", "No register entries yet."));
-  } else if (max === null || max <= ZERO) {
-    checks.push(check("entry_percentages", "warn", "The class has no max supply, so the recorded percentages cannot be checked."));
+  } else if (unitE4 === null) {
+    checks.push(check("entry_percentages", "warn",
+      "No share of the company per unit is known for this class (see the tokenize figures check), so the recorded percentages cannot be checked."));
   } else {
-    const off = recorded.filter((e) => !bpsConsistent(e.percentBps, e.units, max));
+    const off = recorded.filter((e) => !bpsConsistent(e.percentBps, e.units, unitE4));
     checks.push(off.length === 0
-      ? check("entry_percentages", "pass", `Every recorded percentage matches units ÷ ${formatUnits(max)}.`)
+      ? check("entry_percentages", "pass", `Every recorded percentage matches units × ${formatScaled(unitE4, PERCENT_E4_SCALE)} %.`)
       : check("entry_percentages", "warn", off.map((e) =>
-          `Entry ${short(e.id)}: ${bpsToPercent(e.percentBps)} % recorded, ${formatUnits(e.units)} ${e.units === ONE ? "unit is" : "units are"} ${percentOfSupply(e.units, max)} %.`).join(" ")));
+          `Entry ${short(e.id)}: ${bpsToPercent(e.percentBps)} % recorded, ${formatUnits(e.units)} ${e.units === ONE ? "unit is" : "units are"} ${unitsPercent(e.units, unitE4)} %.`).join(" ")));
   }
 
   const coveringEntry = new Map<string, string>();
@@ -563,7 +696,7 @@ export function reconcileShareClass(
     mint: chain.mint,
     chain: {
       max_supply: max === null ? null : max.toString(),
-      unit_percent: percentOfSupply(ONE, max),
+      unit_percent: unitE4 === null ? null : formatScaled(unitE4, PERCENT_E4_SCALE),
       cumulative_cap: chain.cumulativeCap,
       lifetime_minted: chain.lifetimeMinted.toString(),
       circulating: chain.circulatingSupply.toString(),
@@ -591,7 +724,7 @@ export function reconcileShareClass(
     holders: holders
       ? [...holders]
           .sort((a, b) => (a.units === b.units ? (a.owner < b.owner ? -1 : 1) : a.units > b.units ? -1 : 1))
-          .map((h) => ({ owner: h.owner, units: h.units.toString(), percent: percentOfSupply(h.units, max), kind: h.kind }))
+          .map((h) => ({ owner: h.owner, units: h.units.toString(), percent: unitsPercent(h.units, unitE4), kind: h.kind }))
       : null,
     conversions: conversions.map((c) => {
       const escrow = c.status === "converted" ? null : escrowOf(c.vaultPda);
@@ -640,19 +773,25 @@ export function registerEntryView(e: RegisterEntryFacts): RegisterEntryView {
   return view;
 }
 
-/** One asset's reconciliation: each class with ITS conversions and entries. */
+/**
+ * One asset's reconciliation: each class with ITS conversions and entries,
+ * and the asset's tokenize figures (null without them), which give
+ * percentages only to the class they match.
+ */
 export function reconcileAsset(
   identity: AssetIdentity,
   network: string,
   classes: ClassChainFacts[],
   conversions: ConversionFacts[],
   entries: RegisterEntryFacts[],
+  figures: UnitShareFigures | null,
   generatedAt: Date = new Date(),
 ): AssetReconciliation {
   const rows = classes.map((chain) => reconcileShareClass(
     chain,
     conversions.filter((c) => c.shareClassPda === chain.shareClassPda),
     entries.filter((e) => e.shareClassPda === chain.shareClassPda),
+    figures,
   ));
   return {
     ...identity,
@@ -675,17 +814,34 @@ export type PublicConversionRecord = {
   realize_tx: string | null;
 };
 
+/**
+ * A conversion realized on chain (its units burned, the outcome evidence
+ * verified) whose register entry is not recorded yet: its units and its
+ * realize transaction, nothing else.
+ */
+export type PublicPendingConversion = { units: string; realize_tx: string | null };
+
 export type PublicSupplyClass = {
   share_class_pda: string;
   class_index: number;
   mint: string;
+  /** The class cap in units (null = uncapped): never 100 % of the company by itself. */
   max_supply: string | null;
+  /**
+   * The share of the company one unit is ("0.01"): only from the tokenize
+   * figures of a PUBLISHED asset profile that match this class on chain
+   * (unitShareOf), and the only figure of the profile this view carries;
+   * null = units only, no percentage at all.
+   */
   unit_percent: string | null;
   issued: string;
   outstanding: string;
   in_conversion: string;
+  /** Conversions with a recorded register entry; the percent as their decisions record it. */
   converted: { count: number; units: string; percent: string };
   records: PublicConversionRecord[];
+  /** Conversions realized on chain whose register entry is still to be recorded. */
+  pending: { count: number; units: string; conversions: PublicPendingConversion[] };
 };
 
 export type PublicSupply = {
@@ -697,16 +853,25 @@ export type PublicSupply = {
 
 /**
  * The public "Supply and conversions" figures of one class: built only from
- * public chain data and the non-personal columns of recorded entries. The
- * open conversions are used for their vaults only (the units in conversion).
+ * public chain data, the non-personal columns of recorded entries, and the
+ * status, vault, units and realize signature of the class's conversion
+ * requests. An open request counts for its live vault's escrow (the units in
+ * conversion). A converted request whose realize signature no recorded entry
+ * names is a conversion realized on chain with its register entry pending:
+ * matched by signature because the public read never selects a request id,
+ * and an entry recorded from its request carries the request's realize
+ * signature (lib/server/cap-table.ts recordRegisterEntry). `figures` are the
+ * published profile's tokenize figures or null; they give the share of one
+ * unit only when they match the class.
  */
 export function publicSupplyClass(
   chain: Omit<ClassChainFacts, "holders">,
-  openConversions: Pick<ConversionFacts, "status" | "vaultPda">[],
+  conversions: Pick<ConversionFacts, "status" | "vaultPda" | "units" | "realizeTx">[],
   recorded: Pick<RegisterEntryFacts, "units" | "percentBps" | "registry" | "decisionDate" | "decisionDocSha256" | "realizeTx" | "status">[],
+  figures: UnitShareFigures | null = null,
 ): PublicSupplyClass {
   const vaultByPda = new Map(chain.custodyVaults.map((v) => [v.pda, v]));
-  const openVaults = new Set(openConversions
+  const openVaults = new Set(conversions
     .filter((c) => c.status === "vault_opened" || c.status === "deposited")
     .map((c) => c.vaultPda)
     .filter((p): p is string => Boolean(p)));
@@ -718,12 +883,15 @@ export function publicSupplyClass(
     .filter((e) => e.status === "recorded")
     .sort((a, b) => (a.decisionDate === b.decisionDate ? 0 : a.decisionDate < b.decisionDate ? -1 : 1));
   const bps = sum(entries.map((e) => parseBps(e.percentBps)?.scaled ?? ZERO));
+  const registeredTxs = new Set(entries.map((e) => e.realizeTx).filter((tx): tx is string => Boolean(tx)));
+  const pending = conversions.filter((c) => c.status === "converted" && !(c.realizeTx && registeredTxs.has(c.realizeTx)));
+  const unitE4 = unitShareOf(chain, figures).e4;
   return {
     share_class_pda: chain.shareClassPda,
     class_index: chain.classIndex,
     mint: chain.mint,
     max_supply: chain.maxSupply === null ? null : chain.maxSupply.toString(),
-    unit_percent: percentOfSupply(ONE, chain.maxSupply),
+    unit_percent: unitE4 === null ? null : formatScaled(unitE4, PERCENT_E4_SCALE),
     issued: chain.lifetimeMinted.toString(),
     outstanding: chain.circulatingSupply.toString(),
     in_conversion: inConversion.toString(),
@@ -740,6 +908,11 @@ export function publicSupplyClass(
       decision_doc_sha256: e.decisionDocSha256,
       realize_tx: e.realizeTx,
     })),
+    pending: {
+      count: pending.length,
+      units: sum(pending.map((c) => c.units)).toString(),
+      conversions: pending.map((c) => ({ units: c.units.toString(), realize_tx: c.realizeTx })),
+    },
   };
 }
 
@@ -818,8 +991,8 @@ export function capTableCsv(table: AssetReconciliation, pii: CsvPersonalData | n
   const nameOf = (id: string | null | undefined) => (pii && id ? pii.names.get(id) ?? "" : "");
   for (const c of table.classes) {
     const base = { share_class: c.share_class_pda, class_index: c.class_index, mint: c.mint };
-    const max = c.chain.max_supply === null ? null : BigInt(c.chain.max_supply);
-    const pct = (units: string | null) => (units === null ? "" : percentOfSupply(BigInt(units), max) ?? "");
+    // Units × the share of one unit; empty while the class has none (never units ÷ max_supply).
+    const pct = (units: string | null) => percentForUnits(units, c.chain.unit_percent) ?? "";
     const figures: Array<[string, string | null]> = [
       ["max_supply", c.chain.max_supply], ["lifetime_minted", c.chain.lifetime_minted], ["circulating", c.chain.circulating],
       ["locked", c.chain.locked], ["burned", c.chain.burned], ["burned_by_conversions", c.chain.burned_by_conversions],

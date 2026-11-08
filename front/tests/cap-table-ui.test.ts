@@ -2,7 +2,9 @@
 // the shared reconciliation view shows what the table carries (an issuer's
 // table has no dossier link, note or void reason to show), the public
 // figures render with KYC-only mode on and carry no case number, no holder
-// and no call to action, and the menus offer the new pages.
+// and no call to action, and the menus offer the new pages. The class cap is
+// never "100 % of the company": MANCI-2026's 1,750 units are 17.5 %, and a
+// percentage shows only with the share of one unit (else units only).
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +16,7 @@ vi.mock("next/link", () => ({
 
 import { CapTableView } from "@/components/cap-table-view";
 import { SupplyConversionsFigures } from "@/components/supply-conversions-panel";
-import { issuerReconciliation, publicSupplyClass, reconcileAsset, type ClassChainFacts } from "@/lib/cap-table";
+import { issuerReconciliation, publicSupplyClass, reconcileAsset, type ClassChainFacts, type UnitShareFigures } from "@/lib/cap-table";
 import { ADMIN_MENU } from "@/app/admin/admin-menu";
 import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 import { adminRouteRequirement } from "@/lib/role-resolution";
@@ -27,11 +29,14 @@ const CLIENT = "d0000000-0000-4000-8000-000000000001";
 const TX = "1".repeat(87) + "A";
 const SHA = "ab".repeat(32);
 
+/** MANCI-2026: a 1,750-unit cap = 17.5 % of the company, 500 issued, 250 converted, 250 outstanding. */
 const chain: ClassChainFacts = {
-  shareClassPda: CLASS, classIndex: 0, mint: "MintMintMintMintMintMintMintMintMintMint1", maxSupply: n(10_000),
-  cumulativeCap: false, lifetimeMinted: n(10_000), circulatingSupply: n(9_750), lockedSupply: n(0), mintSupply: n(9_750),
-  custodyVaults: [], holders: [{ owner: "TreasuryTreasuryTreasuryTreasuryTreasury1", units: n(9_750), kind: "treasury" }],
+  shareClassPda: CLASS, classIndex: 0, mint: "MintMintMintMintMintMintMintMintMintMint1", maxSupply: n(1_750),
+  cumulativeCap: false, lifetimeMinted: n(500), circulatingSupply: n(250), lockedSupply: n(0), mintSupply: n(250),
+  custodyVaults: [], holders: [{ owner: "TreasuryTreasuryTreasuryTreasuryTreasury1", units: n(250), kind: "treasury" }],
 };
+/** Its tokenize figures: 1,750 units of 0.01 % each. */
+const FIGURES: UnitShareFigures = { classIndex: 0, tokens: n(1_750), tokenE4: n(100) };
 const table = reconcileAsset(
   { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer1" },
   "devnet", [chain],
@@ -44,6 +49,7 @@ const table = reconcileAsset(
       decisionDocSha256: SHA, conversionRequestId: "c1", realizeTx: TX, status: "voided", holderClientId: CLIENT, note: "",
       voidReason: "Typo for Jane", voidedBy: "Admin1", voidedAt: "2026-10-10T12:30:00Z", createdBy: "Admin1" },
   ],
+  FIGURES,
   new Date("2026-11-08T10:00:00Z"),
 );
 
@@ -59,6 +65,25 @@ describe("the reconciliation view", () => {
     expect(markup).toContain("Typo for Jane");
     expect(markup).toContain("BD 12345/2026");
     expect(markup).toContain(`https://explorer.solana.com/tx/${TX}?cluster=devnet`);
+    expect(markup).toContain("Class cap");
+    expect(markup).toContain("1,750 units (17.5 % of the company)");
+    expect(markup).toContain("0.01 % of the company");
+    expect(markup).toContain(`500<span class="ml-1.5 text-slate-500">(5 %)</span>`);
+    expect(markup).toContain("The tokenize figures match the class cap");
+    expect(markup).not.toContain("100 % of the company");
+  });
+
+  it("without figures that match the class: units only, and the check says why", () => {
+    const off = reconcileAsset(
+      { asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1", asset_id: "MANCI-2026", name: "Mancipatio", symbol: "MANCI", issuer_pda: "Issuer1" },
+      "devnet", [chain], [], [], { ...FIGURES, tokens: n(10_000) }, new Date("2026-11-08T10:00:00Z"),
+    );
+    const markup = html(createElement(CapTableView, { table: off, audience: "admin" }));
+    expect(markup).toContain("1,750 units</dd>");
+    // No figure carries a share of the company: no "(5 %)", no "% of the company".
+    expect(markup).not.toMatch(/\(\d[\d.,]* %\)/);
+    expect(markup).not.toContain("% of the company");
+    expect(markup).toContain("the class cap is 1,750 units: no percentages are shown until they agree");
   });
 
   it("the issuer view has wallets, units and decision references, nothing personal", () => {
@@ -70,28 +95,54 @@ describe("the reconciliation view", () => {
 });
 
 describe("the public supply figures", () => {
-  const supply = {
+  const realized = [{ status: "converted" as const, vaultPda: null, units: n(250), realizeTx: TX }];
+  const recorded = [
+    { units: n(250), percentBps: "250", registry: "APR", decisionDate: "2026-10-09", decisionDocSha256: SHA, realizeTx: TX, status: "recorded" as const },
+  ];
+  const supplyOf = (cls: ReturnType<typeof publicSupplyClass>) => ({
     network: "mainnet",
     asset_pda: "AssetAssetAssetAssetAssetAssetAssetAsset1",
     generated_at: "2026-11-08T10:00:00.000Z",
-    classes: [publicSupplyClass(chain, [], [
-      { units: n(250), percentBps: "250", registry: "APR", decisionDate: "2026-10-09", decisionDocSha256: SHA, realizeTx: TX, status: "recorded" },
-    ])],
-  };
+    classes: [cls],
+  });
 
-  it("render with KYC-only mode on: what 100 % is, issued, outstanding, in conversion, converted and the record", () => {
+  it("render with KYC-only mode on: the class cap, issued, outstanding, in conversion, converted and the record", () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "");
-    const markup = html(createElement(SupplyConversionsFigures, { supply }));
-    expect(markup).toContain("10,000 units · 1 unit = 0.01 %");
+    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, realized, recorded, FIGURES)) }));
+    expect(markup).toContain("Class cap");
+    expect(markup).toContain("1,750 units (17.5 % of the company)");
+    expect(markup).toContain("1 unit = 0.01 % of the company");
     expect(markup).toContain("Issued");
-    expect(markup).toContain("9,750 units (97.5 %)");
+    expect(markup).toContain("500 units (5 %)");
+    expect(markup).toContain("250 units (2.5 %)");
     expect(markup).toContain("In conversion");
     expect(markup).toContain("1 conversion · 250 units · 2.5 % of the company");
+    expect(markup).not.toContain("100 % of the company");
+    expect(markup).not.toContain("pending");
     expect(markup).toContain(SHA);
     expect(markup).toContain(`https://explorer.solana.com/tx/${TX}"`);
     expect(markup).not.toMatch(/BD 12345|<button|href="\/portfolio|request/i);
     expect(markup).not.toMatch(/\baudit(ed)?\b/i);
+  });
+
+  it("a draft profile (no published figures): units only, and the realized conversion with its register entry pending", () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, realized, [], null)) }));
+    expect(markup).toContain("1,750 units");
+    expect(markup).toContain("500 units");
+    expect(markup).not.toMatch(/\d %/);
+    expect(markup).not.toContain("None yet");
+    expect(markup).toContain("1 conversion realized on chain · 250 units · register entry pending");
+    expect(markup).toContain("Register entry pending");
+    expect(markup).toContain(`https://explorer.solana.com/tx/${TX}"`);
+    expect(markup).not.toMatch(/BD 12345|Jane|Ho1der|<button/);
+  });
+
+  it("nothing converted yet: none yet, and no record table", () => {
+    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, [], [], FIGURES)) }));
+    expect(markup).toContain("None yet");
+    expect(markup).not.toContain("Conversion record");
   });
 });
 

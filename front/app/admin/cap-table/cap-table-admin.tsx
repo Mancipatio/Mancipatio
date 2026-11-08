@@ -20,8 +20,9 @@ import { sha256HexOfFile } from "@/lib/storage-client";
 import {
   bpsConsistent,
   formatUnits,
-  percentOfSupply,
+  percentForUnits,
   percentToBps,
+  unitPercentE4,
   type AssetReconciliation,
   type ClassReconciliation,
   type ConversionView,
@@ -266,9 +267,12 @@ function RegisterEntryModal({
   onSaved: () => Promise<void>;
 }) {
   const { cls, conversion } = target;
-  const max = cls.chain.max_supply === null ? null : BigInt(cls.chain.max_supply);
+  // The share of one unit, from tokenize figures that match the class; null =
+  // nothing to prefill or compare (never units ÷ max supply: the cap is not 100 %).
+  const unitPercent = cls.chain.unit_percent;
+  const unitE4 = unitPercentE4(unitPercent);
   const [units, setUnits] = useState(conversion?.units ?? "");
-  const [percent, setPercent] = useState(() => (conversion && max !== null ? percentOfSupply(BigInt(conversion.units), max) ?? "" : ""));
+  const [percent, setPercent] = useState(() => (conversion ? percentForUnits(conversion.units, unitPercent) ?? "" : ""));
   const [registry, setRegistry] = useState(DEFAULT_REGISTRY);
   const [decisionRef, setDecisionRef] = useState("");
   const [decisionDate, setDecisionDate] = useState("");
@@ -282,9 +286,9 @@ function RegisterEntryModal({
 
   const validUnits = /^[1-9]\d{0,19}$/.test(units) ? BigInt(units) : null;
   const bps = percentToBps(percent);
-  const computed = validUnits !== null && max !== null ? percentOfSupply(validUnits, max) : null;
+  const computed = validUnits !== null ? percentForUnits(validUnits, unitPercent) : null;
   const unitsDiffer = conversion !== null && validUnits !== null && validUnits !== BigInt(conversion.units);
-  const percentOff = bps !== null && validUnits !== null && max !== null && !bpsConsistent(bps, validUnits, max);
+  const percentOff = bps !== null && validUnits !== null && unitE4 !== null && !bpsConsistent(bps, validUnits, unitE4);
 
   async function hashFile(file: File | undefined) {
     if (!file) return;
@@ -365,9 +369,12 @@ function RegisterEntryModal({
               <span className={label}>Percent of the company *</span>
               <input value={percent} onChange={(e) => setPercent(e.target.value)} inputMode="decimal" placeholder="e.g. 2.5" className={field} />
               <span className="mt-1 block text-xs text-slate-500">
-                As written in the decision.{computed !== null && <> Units ÷ max supply: {computed} %.</>}
+                As written in the decision.
+                {unitPercent === null
+                  ? <> No share of one unit is known for this class (see its checks), so nothing is prefilled or compared.</>
+                  : computed !== null && <> Units × {unitPercent} % (one unit): {computed} %.</>}
               </span>
-              {percentOff && <span className="mt-1 block text-xs text-amber-700">This differs from units ÷ max supply; the reconciliation will flag it.</span>}
+              {percentOff && <span className="mt-1 block text-xs text-amber-700">This differs from units × the share of one unit; the reconciliation will flag it.</span>}
             </label>
             <label className="block">
               <span className={label}>Registry *</span>
