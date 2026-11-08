@@ -107,6 +107,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0090 issuer updat
     expect(() => service(`update public.issuer_updates set status='published' where id='${UPDATE}'`)).toThrow(/check constraint/);
     expect(() => service(`update public.issuer_updates set status='published',published_by='${WALLET}',title='Changed while publishing' where id='${UPDATE}'`))
       .toThrow(/saved draft as it is/);
+    // An anchor fingerprints the published record, so it never arrives with the publication.
+    expect(() => service(`update public.issuer_updates set status='published',published_by='${WALLET}',anchor_tx='${SIGNATURE}' where id='${UPDATE}'`))
+      .toThrow(/anchored after its publication/);
     service(`update public.issuer_updates set status='published',published_by='${WALLET}',published_at='2000-01-01' where id='${UPDATE}'`);
     expect(sql(`select published_at > now() - interval '1 minute' from public.issuer_updates`)).toBe("t");
     expect(() => service(`update public.issuer_updates set network='testnet' where id='${UPDATE}'`)).toThrow(/identity|immutable/);

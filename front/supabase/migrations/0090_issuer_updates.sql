@@ -84,8 +84,8 @@ grant select, insert, update, delete on public.issuer_updates to service_role;
 --
 --   insert              -> draft only
 --   draft -> draft      content edits (scope, kind, title, body, period, visibility)
---   draft -> published  the saved draft exactly as it is; published_at is
---                       the database's clock, never the caller's
+--   draft -> published  the saved draft exactly as it is, not anchored yet;
+--                       published_at is the database's clock, never the caller's
 --   published           frozen: only anchor_tx, once (null -> signature), and
 --   published -> withdrawn  with withdrawn_by / _role / _reason (withdrawn_at
 --                       is the database's clock); nothing else in that statement
@@ -126,6 +126,10 @@ begin
       if (new.asset_pda, new.kind, new.title, new.body, new.period_label, new.visibility)
          is distinct from (old.asset_pda, old.kind, old.title, old.body, old.period_label, old.visibility) then
         raise exception 'Publish the saved draft as it is' using errcode = '23514';
+      end if;
+      -- The anchor fingerprints the published record: it can only follow the publication.
+      if new.anchor_tx is not null then
+        raise exception 'An update is anchored after its publication' using errcode = '23514';
       end if;
       new.published_at := pg_catalog.clock_timestamp();
     elsif new.status <> 'draft' then
