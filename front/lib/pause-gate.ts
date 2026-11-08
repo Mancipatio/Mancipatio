@@ -182,6 +182,13 @@ export const PAUSE_BIT_FLOWS: readonly PauseFlow[] = [
     instructions: [Ix.CreateOffer, Ix.DepositToOfferEscrow, Ix.TakeOffer, Ix.CreateOtcDeal, Ix.DepositOtcAsset, Ix.DepositOtcPayment],
   },
   { bit: PAUSE_CUSTODY_ENTRY, instructions: [Ix.DepositToCustodyVault] },
+  // Token migration (program V2, pending an upgrade): every entry reads
+  // custody entry; its exits (cancel, refund, finalize, both claims, close)
+  // read no bit. No front page builds these yet.
+  {
+    bit: PAUSE_CUSTODY_ENTRY,
+    instructions: [Ix.CreateMigration, Ix.FundMigration, Ix.OpenMigration, Ix.DepositMigration, Ix.PublishMigrationRoot],
+  },
   // The program lets a burn-only quarantine vault (RedemptionQueue +
   // BurnAndAttest) through: clawback needs one as its destination.
   { bit: PAUSE_CUSTODY_ENTRY, instructions: [Ix.OpenCustodyVault], when: notQuarantineVault },
