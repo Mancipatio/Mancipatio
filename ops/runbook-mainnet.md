@@ -4441,21 +4441,24 @@ What the server checks, every time (nothing from a browser is trusted):
   `max_supply` at least the units cap. A draft can change; from the opening
   on, what the campaign published is frozen by the database.
 - **Opening** (`admin/transition` to `open`, Admin, module on): the Swap
-  Terms hash and https link set, the window not ended, the old mint checked
-  again, and the deposit account existing as the deposit owner's ATA of the
-  old mint, not frozen, without delegate or close authority, and **empty**
-  (every token in it must be a recorded deposit). One live campaign per
-  deposit account.
+  Terms hash and https link set, the window not ended (and opened at most a
+  day ago), the old mint checked again, and the deposit account existing as
+  the deposit owner's ATA of the old mint, not frozen, without delegate or
+  close authority, and **empty** (every token in it must be a recorded
+  deposit). The opening stores the finalized slot it read: no transfer
+  before it is ever a deposit of the campaign. A deposit account belongs to
+  one campaign for good (a campaign that opened keeps it, even cancelled).
 - **Holder's precheck** (`precheck`, module on): campaign open, window
   started and not ended, not an excluded wallet, sanctions clear (403 on a
   hit, 503 on mainnet while the list cannot answer), units left under the
   cap, the balance in the wallet's own ATA, the Terms in force accepted.
   The wallet then signs [create the deposit account (idempotent), the memo
   `manci:migration:v1:<campaign id>:<lots>`, TransferChecked of lots × lot].
-- **Recording a deposit** (`record` by the holder, `admin/reconcile` by the
-  operator): the transaction read at **finalized**; the deposit account of
-  the old mint grew by exactly what the source owner's accounts sent, nothing
-  else of the old mint moved. Then: accepted (k lots → k units), or
+- **Recording a deposit** (`record` by the holder, rate-limited per wallet;
+  `admin/reconcile` by the operator): the transaction read at **finalized**,
+  at or after the opening slot; the deposit account of the old mint grew by
+  exactly what the source owner's accounts sent, nothing else of the old mint
+  moved, and no account's owner changed inside the transaction. Then: accepted (k lots → k units), or
   **irregular** with the first reason that applies (campaign not open,
   excluded wallet, block time outside the window, not signed by the source
   owner, not a whole number of lots, memo missing or wrong), the depositing
@@ -4466,8 +4469,12 @@ What the server checks, every time (nothing from a browser is trusted):
   mainnet refuses the record (retry later): nothing is accepted unscreened.
 - **Deliveries, refunds, the burn** (`admin/record`): proven from the
   finalized transaction's balances, signers not required (a Squads vault
-  signs inside its CPI). A delivery signature is never reused for other
-  deposits; a refund signature refunds one deposit.
+  signs inside its CPI), and later than the deposits they settle. A delivery
+  or refund signature is never reused for other deposits; one refund
+  transaction may return several irregular deposits of ONE holder. The burn
+  is recorded only once every deposit is delivered or refunded and its
+  block time is not before the close; a campaign whose tokens were burned is
+  never cancelled.
 
 **Prerequisites** (all before the opening):
 
@@ -4491,8 +4498,10 @@ What the server checks, every time (nothing from a browser is trusted):
    unclaimed unit is ever minted.
 4. The **deposit owner**: a Squads vault is recommended (no single key can
    move the deposits; refunds and the burn are then multisig proposals,
-   recorded on `/admin/migrations`). The page warns when the deposit owner
-   is the admin's own wallet. Decide who signs the deliveries (the treasury
+   recorded on `/admin/migrations`), and a fresh one per campaign (its own
+   vault index): the database gives a deposit account to one campaign for
+   good, so a re-run after a cancel needs a new deposit owner. The page warns
+   when the deposit owner is the admin's own wallet. Decide who signs the deliveries (the treasury
    wallet connected on `/admin/migrations`, or a Squads treasury whose
    transactions are recorded by signature).
 5. Migration 0085 applied (devnet first: `bash scripts/ops/backup.sh devnet
@@ -4531,10 +4540,15 @@ What the server checks, every time (nothing from a browser is trusted):
 
 - *Reconcile deposits* (at least once a day, and before every delivery
   batch): it records the deposits nobody recorded (a closed tab, a manual
-  transfer) and lists the transactions that are not deposits. Up to 20
-  deposits per run; run again while it says some remain. A transfer into
-  the deposit account that cannot be attributed to one wallet (several
-  source wallets, tokens also moved elsewhere, a fee on the way) is never
+  transfer) and lists the transactions that are not deposits. It sweeps the
+  deposit account's history backwards in bounded runs (at most 40 unknown
+  transactions or 40 seconds each) and stores where it stopped on the
+  campaign, so noise sent to the public deposit account can slow it but
+  never stall it; run it again until it says the history is read up to now.
+  A deposit seen on an explorer can also be recorded alone (*Record a
+  transaction made elsewhere* → Deposit). A transfer into the deposit
+  account that cannot be attributed to one wallet (several source wallets,
+  tokens also moved elsewhere, a fee on the way, an owner change) is never
   recorded: the deposit owner returns it by hand to its sender, and the
   case file records the transaction.
 - Read the deposits table: irregular deposits are refunded (below); a
@@ -4562,7 +4576,11 @@ What the server checks, every time (nothing from a browser is trusted):
   goes back to the wallet that made it, in full. With the deposit owner's
   wallet connected: *Refund* on the row. A Squads deposit owner: a proposal
   with the same transfer, then *Record a transaction made elsewhere* →
-  Refund → the signature and the deposit id. One refund per transaction.
+  Refund → the signature and the deposit ids. One refund transaction may
+  return several irregular deposits of ONE holder (their total, in one
+  transfer): many tiny deposits from one wallet cost one refund. Every
+  recorded irregular deposit must be refunded before the campaign completes,
+  however small (the Swap Terms may set a de minimis rule; counsel's call).
 - A compliance hold is refunded only on the compliance team's decision (the
   page asks for the confirmation; the server refuses without it).
 
@@ -4576,11 +4594,12 @@ What the server checks, every time (nothing from a browser is trusted):
 **Burn of the collected old tokens**
 
 - Only after the last refund (the deposit account must hold only exchanged
-  deposits): the deposit owner burns its balance (*Burn the collected
-  tokens* with that wallet connected, or a Squads proposal with BurnChecked
-  from the deposit account, then *Record a transaction made elsewhere* →
-  Burn). Recorded once; burn before completing so the final report names
-  the burn.
+  deposits; the server refuses to record a burn while any deposit is
+  accepted or irregular, or one made before the close): the deposit owner
+  burns its balance (*Burn the collected tokens* with that wallet connected,
+  or a Squads proposal with BurnChecked from the deposit account, then
+  *Record a transaction made elsewhere* → Burn). Recorded once; burn before
+  completing so the final report names the burn.
 
 **Final report**
 
@@ -4604,8 +4623,10 @@ What the server checks, every time (nothing from a browser is trusted):
   accepted and irregular deposit. Switching the module off stops new
   prechecks but not a manual transfer: cancel the campaign to stop deposits
   being accepted.
-- Once any unit was delivered the database refuses a cancel: close the
-  campaign after its window, settle every deposit, complete it.
+- Once any unit was delivered, or the collected tokens were burned, the
+  database refuses a cancel: close the campaign after its window, settle
+  every deposit, complete it. A re-run of a cancelled campaign needs a fresh
+  deposit owner.
 - A late deposit into a completed campaign's deposit account is not
   recorded (the report is final): the deposit owner refunds it by hand and
   the case file records it.
