@@ -10,6 +10,8 @@ import { KYC_ONLY_MESSAGE, kycOnly, scopeEnabled } from "@/lib/features";
 import { offeredAssetClasses } from "@/lib/pilot-scope";
 import { ASSET_TYPES } from "@/lib/asset-types";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
+import { siteUrl } from "@/lib/site-url";
+import { jsonLdScript, organizationJsonLd } from "@/lib/structured-data";
 import styles from "./landing.module.css";
 
 const brandFont = Montserrat({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-brand", display: "swap" });
@@ -56,10 +58,13 @@ export default function HomePage() {
   const offered = offeredAssetClasses(network);
   const assetTypes = ASSET_TYPES.filter((asset) => offered.includes(asset.slug as typeof offered[number]));
   const assetGuide = assetTypes.length === 1 ? `/markets/types/${assetTypes[0].slug}` : "/markets/types";
-  const operatorLine = operatorFooterLine(operatorFor(network), new Date().getFullYear());
+  const operator = operatorFor(network);
+  const operatorLine = operatorFooterLine(operator, new Date().getFullYear());
 
   return (
     <div className={`${styles.page} ${brandFont.variable}`}>
+      {/* Organization JSON-LD from the operator record (lib/structured-data.ts); "<" is escaped. */}
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdScript(organizationJsonLd(operator, siteUrl())) }} />
       <a className={styles.skip} href="#main-content">Skip to content</a>
       <div className={styles.intro}>
         <header className={`${styles.container} ${styles.header}`}>

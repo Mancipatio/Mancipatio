@@ -44,11 +44,17 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/kyc-provider-gate.test.ts",
   "tests/kyc-provider-routes.test.ts",
   "tests/route-guard-matrix.test.ts",
+  // The published price list (GET /api/fees/public, /pricing) and the fee admin.
+  "tests/fee-schedule-routes.test.ts",
+  "tests/pricing-page.test.ts",
   // Support.
   "tests/inquiries-create-route.test.ts",
   "tests/manci-assistant.test.ts",
   "tests/assistant-published-route.test.ts",
   "tests/assistant-knowledge-admin.test.ts",
+  // Read-only browsing (an asset's public supply figures), the admin
+  // console's cap table and an issuer's read of its own.
+  "tests/cap-table-routes.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",

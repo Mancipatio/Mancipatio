@@ -28,7 +28,9 @@ export async function generateMetadata({
     return { title: `${record.title} · Manci`, ...(indexingAllowed() ? { robots: { index: false, follow: true } } : {}) };
   }
   return {
-    title: `${record.title} · Live market · Manci`,
+    // "Asset market", as the page's own eyebrow: "Live" would promise sales
+    // that KYC-only mode pauses.
+    title: `${record.title} · Asset market · Manci`,
     description: `Published ${record.title.toLowerCase()} listings on Manci. ${record.oneLine}`,
   };
 }

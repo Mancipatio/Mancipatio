@@ -105,6 +105,7 @@ import {
 import { useChainRecordRecovery } from "@/lib/use-chain-record-recovery";
 import { ChainRecordRecoveryPanel } from "@/components/chain-record-recovery-panel";
 import { ConversionTimelineCompact, ConversionTimelineFull } from "@/components/conversion-timeline";
+import { FeeQuote } from "@/components/fee-quote";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -1586,6 +1587,7 @@ function RequestConversionModal({
             escrow. They are returned if the conversion is cancelled and burned
             once the off-chain conversion is executed.
           </p>
+          <FeeQuote kind="conversion" />
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
           {blocker && (

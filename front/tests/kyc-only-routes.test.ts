@@ -116,6 +116,11 @@ const PRE_SIGNATURE: Array<[string, Load]> = [
   // The issuer's resubmission of a vesting series request: an issuance entry,
   // a no-op while the mode is off (mainnet with vesting off included: today's).
   ["vesting-series/update", () => import("@/app/api/vesting-series/update/route")],
+  // Investor relations: composing and publishing an issuer update (0090).
+  ["issuer-updates/save", () => import("@/app/api/issuer-updates/save/route")],
+  ["issuer-updates/attach", () => import("@/app/api/issuer-updates/attach/route")],
+  ["issuer-updates/detach", () => import("@/app/api/issuer-updates/detach/route")],
+  ["issuer-updates/publish", () => import("@/app/api/issuer-updates/publish/route")],
 ];
 
 describe("entry routes answer 403 before the signature while the mode is on", () => {
@@ -198,6 +203,30 @@ describe("routes an admin also uses: the non-admin branch only", () => {
     modeOff();
     signed(at.issuer, params);
     expect(notKycRefusal(await post(load))).toBe(true);
+  });
+
+  it("storage/upload (issuer updates): composing is refused to everyone while the mode is on, the issuer goes on with it off", async () => {
+    const load = () => import("@/app/api/storage/upload/route");
+    const params = { bucket: "documents", path: `issuer-updates/${ASSET}/aaaaaaaa-report.pdf`, sha256: "a".repeat(64), contentType: "application/pdf", size: 100 };
+    modeOn();
+    // No admin branch here: an admin never uploads for an issuer.
+    for (const wallet of [at.issuer, at.admin]) {
+      signed(wallet, params);
+      expect(await post(load)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
+    }
+    expect(db.touched).toEqual([]);
+    modeOff();
+    signed(at.issuer, params);
+    expect(notKycRefusal(await post(load))).toBe(true);
+    expect(db.touched).toContain("document_uploads");
+  });
+
+  it("issuer-updates/withdraw: an issuer's take-down goes on while the mode is on", async () => {
+    const load = () => import("@/app/api/issuer-updates/withdraw/route");
+    modeOn();
+    signed(at.issuer, { id: "00000000-0000-4000-8000-000000000001", reason: "Posted by mistake" });
+    expect(notKycRefusal(await post(load))).toBe(true);
+    expect(db.touched).toContain("issuer_updates");
   });
 
   it("compliance/screen-recipients: a non-admin issuer is refused; an Admin issuer key and an admin go on", async () => {
@@ -299,6 +328,10 @@ describe("source matrix", () => {
       ["applications/submit", /requireArea\("issuance"\)/],
       ["applications/resubmit", /requireArea\("issuance"\)/],
       ["vesting-series/update", /requireArea\("issuance"\)/],
+      ["issuer-updates/save", /requireArea\("issuance"\)/],
+      ["issuer-updates/attach", /requireArea\("issuance"\)/],
+      ["issuer-updates/detach", /requireArea\("issuance"\)/],
+      ["issuer-updates/publish", /requireArea\("issuance"\)/],
     ];
     for (const [route, gate] of locked) {
       const text = source(route);
@@ -329,6 +362,9 @@ describe("source matrix", () => {
       "inquiries/create", "launchpad/record-purchase", "conversion/cancel", "conversion/reclaim", "conversion/deposited",
       "delivery/cancel", "delivery/reclaim", "resell/update", "sale-requests/decide",
       "distribution-plans/proof", "payout-snapshots/proof",
+      // Investor relations: reading, the issuer's take-downs and recording an anchor already on chain.
+      "issuer-updates/public", "issuer-updates/document", "issuer-updates/holder", "issuer-updates/document-url",
+      "issuer-updates/mine", "issuer-updates/discard", "issuer-updates/withdraw", "issuer-updates/anchor",
     ]) {
       const text = source(route);
       expect(text, route).not.toContain("requireArea(");
@@ -378,6 +414,9 @@ describe("every API route is classified", () => {
     "audit": "platform",
     "auth/email/start": "sign-in", "auth/email/verify": "sign-in", "auth/google/start": "sign-in",
     "auth/logout": "sign-in", "auth/me": "sign-in", "auth/session": "sign-in",
+    // The public "Supply and conversions" figures of an asset: aggregates and
+    // non-personal register columns, like the asset page that shows them.
+    "cap-table/public": "read",
     "clients/accept-tos": "verification", "clients/link-wallet": "verification", "clients/me": "verification",
     "clients/onboarding-requirements": "verification", "clients/onboarding-view": "verification",
     "conversion/cancel": "exit", "conversion/reclaim": "exit", "conversion/deposited": "recording", "conversion/list-mine": "read",
@@ -385,9 +424,19 @@ describe("every API route is classified", () => {
     "csp-report": "platform", "health": "platform", "health/alarms": "platform", "maintenance": "platform", "priority-fee": "platform",
     "internal/alarms": "platform", "internal/fx": "platform", "internal/retry": "platform", "internal/sanctions": "platform",
     "distribution-plans/proof": "read", "payout-snapshots/proof": "read",
+    // The published price list (0089), like /pricing: readable before sign-in and in the mode.
+    "fees/public": "read",
     "inquiries/create": "support",
     // The holder's own records for the portfolio CSV export (read-only).
     "portfolio/export": "read",
+    // Investor relations (0090): published updates and their documents, a
+    // holder's read (balances checked on chain), the issuer's own list.
+    "issuer-updates/public": "read", "issuer-updates/document": "read", "issuer-updates/holder": "read",
+    "issuer-updates/mine": "read",
+    // The issuer deletes its own unpublished draft.
+    "issuer-updates/discard": "exit",
+    // Records an anchor memo the issuer's key already put on chain (verified there).
+    "issuer-updates/anchor": "recording",
     "profiles/public": "read",
     "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
     // Purchase recovery: a buy that already landed on-chain ("Retry recording").
@@ -410,10 +459,16 @@ describe("every API route is classified", () => {
   const MIXED: Record<string, "gated" | "admin" | OpenReason> = {
     // Read: the caller's own rows — an issuer's profiles, a party's OTC requests, a seller's listings (an admin reads all).
     "issuer-profiles/read": "read", "profiles/read": "read", "otc/list": "read", "resell/list": "read", "sale-requests/list": "read", "spvs/capacity": "read",
+    // Read: the cap table of the caller's own asset (an admin reads any).
+    "cap-table/issuer-read": "read",
     // Purchase recovery: the sale's issuer records a buy that already landed.
     "launchpad/commitment-status": "recording",
     // The issuer withdraws its request, or records a sale its key opened (open_sale is refused before the wallet).
     "sale-requests/decide": "exit",
+    // A document link for a reader, the issuer (its drafts) or an admin (moderation).
+    "issuer-updates/document-url": "read",
+    // The issuer withdraws its own published update; an admin withdraws any (moderation).
+    "issuer-updates/withdraw": "exit",
     // Every branch is an admin's: a read (admin) or a write (super admin).
     "admin-config/fx-rates": "admin",
     // A super admin for a cap override or a backdated issuance, an admin otherwise.

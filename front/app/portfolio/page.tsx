@@ -32,6 +32,7 @@ import { countryName, COUNTRIES } from "@/lib/countries";
 import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { useToast } from "@/lib/toast";
 import { navHrefVisible } from "@/lib/pilot-scope";
+import { PortfolioUpdates } from "@/components/issuer-updates/portfolio-updates";
 
 // Only jurisdictions the server actually accepts (/api/passport/submit
 // validates against DEFAULT_APPROVED_JURISDICTIONS — offering the full ISO
@@ -286,6 +287,10 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
           </div>
         )}
       </section>
+
+      {conn.wallet && enriched && enriched.length > 0 && (
+        <PortfolioUpdates session={conn.wallet} holdings={enriched} />
+      )}
 
       <p className="mt-10 text-xs text-slate-400">
         Balances show the share units held in this wallet. Market value and returns are not estimated.

@@ -28,6 +28,7 @@ import {
 } from "@/lib/fees";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
+import { FeeSchedulePanel } from "./fee-schedule-panel";
 
 export default function FeesPage() {
   return (
@@ -37,12 +38,12 @@ export default function FeesPage() {
           Fees
         </p>
         <h1 className="mt-1 text-xl font-semibold text-slate-900">
-          Commercial terms register
+          Fee schedule and commercial terms
         </h1>
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-          Internal register of per-client commercial terms — pricing is agreed
-          per engagement; nothing is charged on-chain. Records here document
-          the agreed terms and per-client waivers.
+          The public fee schedule and the charges invoiced against it, then the
+          internal register of per-client terms and waivers. Nothing is charged
+          on-chain: fees are invoiced off-chain.
         </p>
       </div>
       <RequireRole role="admin">
@@ -165,6 +166,9 @@ function FeesOps() {
           below documents those agreed terms per client.
         </p>
       </section>
+
+      {/* Public fee schedule and charges (0089) */}
+      <FeeSchedulePanel clients={clients} />
 
       {/* Fee schedule */}
       <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-card">
@@ -390,9 +394,9 @@ function FeesOps() {
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
           Nothing is charged on-chain: the <code>protocol_fee_bps</code> value
           on the Platform account is a reserved field no instruction collects,
-          so there are no on-chain fee transfers to sum. Engagements are
-          priced by agreement and invoiced off-platform; this register only
-          documents the agreed terms per client.
+          so there are no on-chain fee transfers to sum. Fees are invoiced
+          off-chain: Charges above is the ledger of what is billed, and the
+          register documents the agreed terms per client.
         </p>
       </section>
 

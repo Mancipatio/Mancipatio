@@ -28,6 +28,7 @@ import {
   safeHttpUrl,
 } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
+import { AssetUpdatesBlock } from "@/components/issuer-updates/asset-updates";
 import { detectNetwork } from "@/lib/network";
 import {
   assetTypeBySlug,
@@ -44,6 +45,7 @@ import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useArchivedSet } from "@/lib/archive-client";
 import { isWithdrawn } from "@/lib/archive";
 import { WithdrawnNotice } from "@/components/withdrawn-notice";
+import { SupplyConversionsPanel } from "@/components/supply-conversions-panel";
 
 export default function AssetDetailPage({
   params,
@@ -225,7 +227,12 @@ export default function AssetDetailPage({
 
       <AssetProfileBlock profile={profile} />
 
+      {/* Investor relations (lib/issuer-updates.ts): published updates; holders-only ones after an on-chain balance check. */}
+      {lookup.kind === "found" && <AssetUpdatesBlock assetPda={lookup.address} issuerPda={asset.issuer.toString()} />}
+
       <ShareClassesBlock asset={asset} data={data} hidden={conversionTargets} />
+
+      {lookup.kind === "found" && <SupplyConversionsPanel assetPda={lookup.address} />}
 
       {/* Asset metadata */}
       <section className="mt-10">

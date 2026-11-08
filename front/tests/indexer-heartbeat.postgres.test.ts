@@ -9,6 +9,7 @@ import { getBase58Decoder } from "@solana/kit";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import { INDEXER_ENTITIES, type DecodedIndexerAccount } from "@/lib/server/indexer-accounts";
+import { isIndexerStateFresh } from "@/lib/indexer-freshness";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import { LocalPostgres } from "./helpers/local-postgres";
 import { applyMigrations, MIGRATIONS_DIR, SUPABASE_PLATFORM_SQL } from "./helpers/migrations";
@@ -442,6 +443,61 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
       const newer = syncRow().checked_at;
       expect(confirmWith(p.plan_id)).toMatchObject({ outcome: "bumped" });
       expect(syncRow().checked_at).toBe(newer);
+    });
+  });
+
+  describe("a quiet network after a reconcile (runbook §16: fresh only for 5 minutes)", () => {
+    // As mainnet looked on 2026-11-08 (read-only RPC): no program transaction
+    // above the floor; asset_registry's newest 20 signatures, all older than
+    // the reconcile, fill the first page; transfer_hook has 11 in all (a short
+    // page down to its deploy); finality is near-instant, so F is a slot
+    // behind the tip and its block time is about the plan's time (chainLag
+    // 0 or a few seconds ahead, inside T4's 5 s margin).
+    const quiet = () => ({
+      ar: Array.from({ length: 20 }, (_, i) => r(20_000 + i, FLOOR - 10 - i * 40)),
+      th: Array.from({ length: 11 }, (_, i) => r(21_000 + i, FLOOR - 30 - i * 60)),
+      finalized: tip + 299,
+    });
+    /** The freshness rule of the browser and of /api/health (lib/indexer-freshness.ts) on the sync row, at the database's now. */
+    const fresh = () => isIndexerStateFresh(syncRow(), Date.parse(JSON.parse(sql("select to_json(now())"))));
+    const reconciledAgo = (minutes: number) =>
+      sql(`update public.indexer_sync_state set completed_at = now() - make_interval(mins => ${minutes}), checked_at = now() - make_interval(mins => ${minutes})`);
+
+    it("mode on: every run proves from the first page and moves checked_at back inside the window", () => {
+      reconciledAgo(6);
+      expect(run({ ...quiet(), chainLag: 0 })).toMatchObject({ outcome: "declined", reason: "TIP_BASELINE" });
+      for (const chainLag of [0, -2, -4, 1]) {
+        tick();
+        // The window has run out since the last stamp (a reconcile or a job).
+        sql("update public.indexer_sync_state set checked_at = now() - interval '6 minutes'");
+        expect(fresh()).toBe(false);
+        expect(run({ ...quiet(), chainLag }), `chainLag ${chainLag}`).toMatchObject({ outcome: "bumped", reason: null });
+        expect(checkedIsCovered()).toBe("t");
+        expect(fresh(), `chainLag ${chainLag}`).toBe(true);
+      }
+      // Nothing above the floor: the watermarks stay where they were.
+      expect(watermark(AR)).toBeNull();
+      expect(watermark(TH)).toBeNull();
+    });
+
+    it("mode observe (seeded; switched on at launch step D12): the same proof passes but checked_at keeps the reconcile's stamp", () => {
+      sql("update public.indexer_heartbeat_state set mode = 'observe'");
+      reconciledAgo(6);
+      expect(run({ ...quiet(), chainLag: 0 })).toMatchObject({ reason: "TIP_BASELINE" });
+      tick();
+      const before = syncRow().checked_at;
+      expect(run({ ...quiet(), chainLag: 0 })).toMatchObject({ outcome: "would_bump", reason: null });
+      expect(syncRow().checked_at).toBe(before);
+      expect(fresh()).toBe(false);
+      // What the indexer-freshness alarm reads (the newer of checked_at and the
+      // proof) is current, so it stays quiet while the site reads the chain.
+      expect(sql(`select h.last_proven_at > s.checked_at from public.indexer_heartbeat_state h
+        join public.indexer_sync_state s using (network)`)).toBe("t");
+      // Switching the mode on is what keeps the mirror fresh.
+      sql("update public.indexer_heartbeat_state set mode = 'on'");
+      tick();
+      expect(run({ ...quiet(), chainLag: 0 })).toMatchObject({ outcome: "bumped" });
+      expect(fresh()).toBe(true);
     });
   });
 

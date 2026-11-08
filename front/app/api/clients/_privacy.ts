@@ -78,6 +78,7 @@ const OPERATOR_COLUMNS: ReadonlySet<string> = new Set([
   "updated_by",
   "created_by",
   "recorded_by",
+  "voided_by",
   "resolved_by",
   "moderated_by",
   "pending_email_requested_by",
