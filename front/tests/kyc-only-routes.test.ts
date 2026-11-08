@@ -414,6 +414,9 @@ describe("every API route is classified", () => {
     "audit": "platform",
     "auth/email/start": "sign-in", "auth/email/verify": "sign-in", "auth/google/start": "sign-in",
     "auth/logout": "sign-in", "auth/me": "sign-in", "auth/session": "sign-in",
+    // The public "Supply and conversions" figures of an asset: aggregates and
+    // non-personal register columns, like the asset page that shows them.
+    "cap-table/public": "read",
     "clients/accept-tos": "verification", "clients/link-wallet": "verification", "clients/me": "verification",
     "clients/onboarding-requirements": "verification", "clients/onboarding-view": "verification",
     "conversion/cancel": "exit", "conversion/reclaim": "exit", "conversion/deposited": "recording", "conversion/list-mine": "read",
@@ -452,6 +455,8 @@ describe("every API route is classified", () => {
   const MIXED: Record<string, "gated" | "admin" | OpenReason> = {
     // Read: the caller's own rows — an issuer's profiles, a party's OTC requests, a seller's listings (an admin reads all).
     "issuer-profiles/read": "read", "profiles/read": "read", "otc/list": "read", "resell/list": "read", "sale-requests/list": "read", "spvs/capacity": "read",
+    // Read: the cap table of the caller's own asset (an admin reads any).
+    "cap-table/issuer-read": "read",
     // Purchase recovery: the sale's issuer records a buy that already landed.
     "launchpad/commitment-status": "recording",
     // The issuer withdraws its request, or records a sale its key opened (open_sale is refused before the wallet).

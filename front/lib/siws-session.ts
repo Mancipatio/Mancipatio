@@ -65,6 +65,11 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // Admin-only knowledge list; publishing and deletion require fresh signatures.
   "assistantKnowledge.list",
   "audit.list",
+  // The cap table of one asset, read only: the admin's reconciliation, and an
+  // issuer's own asset (wallets, units and decision references). Recording,
+  // voiding and the CSV export require fresh signatures.
+  "capTable.adminRead",
+  "capTable.issuerRead",
   "clients.adminDetail",
   "clients.adminList",
   "clients.doc-url",
