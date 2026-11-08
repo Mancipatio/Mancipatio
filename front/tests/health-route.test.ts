@@ -107,6 +107,9 @@ beforeEach(async () => {
   m.rpcSend = () => Promise.resolve(BigInt(412_345_678));
   m.replies = {
     indexer_sync_state: { data: { status: "ready", last_slot: 412_345_000, checked_at: ago(30), completed_at: ago(3600) }, error: null },
+    indexer_heartbeat_state: {
+      data: { mode: "on", last_outcome: "bumped", last_reason: null, last_attempt_at: ago(25), last_proven_at: ago(30) }, error: null,
+    },
     indexer_jobs: { data: [], error: null, count: 0 },
     purchase_evidence_jobs: { data: [], error: null, count: 0 },
     fx_rates: { data: [{ kind: "rate", as_of: ago(3600), max_age: "7 days" }], error: null },
@@ -140,7 +143,10 @@ describe("GET /api/health", () => {
       checkedAt: new Date(NOW).toISOString(),
       commit: "0123456789ab",
       checks: {
-        indexer: { status: "ok", state: "ready", lastSlot: 412_345_000, checkedAgeSeconds: 30, completedAgeSeconds: 3600, fresh: true },
+        indexer: {
+          status: "ok", state: "ready", lastSlot: 412_345_000, checkedAgeSeconds: 30, completedAgeSeconds: 3600, fresh: true,
+          heartbeat: { mode: "on", lastOutcome: "bumped", lastReason: null, lastAttemptAgeSeconds: 25, lastProvenAgeSeconds: 30 },
+        },
         rpc: { status: "ok", slot: 412_345_678, latencyMs: expect.any(Number) },
         indexerQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         purchaseQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
@@ -508,6 +514,78 @@ describe("GET /api/health", () => {
     expect(body.checks.indexer).toMatchObject(expected);
   });
 
+  describe("the freshness heartbeat beside `fresh` (0075, runbook §16)", () => {
+    it("explains a quiet network that is fresh only after a job or reconcile: observe proves but never moves checked_at", async () => {
+      m.replies.indexer_sync_state = { data: { status: "ready", last_slot: 77, checked_at: ago(1800), completed_at: ago(1800) }, error: null };
+      m.replies.indexer_heartbeat_state = {
+        data: { mode: "observe", last_outcome: "would_bump", last_reason: null, last_attempt_at: ago(40), last_proven_at: ago(45) }, error: null,
+      };
+      const { status, body } = await get();
+      expect(status).toBe(200);
+      expect(body.checks.indexer).toEqual({
+        status: "ok", state: "ready", lastSlot: 77, checkedAgeSeconds: 1800, completedAgeSeconds: 1800, fresh: false,
+        heartbeat: { mode: "observe", lastOutcome: "would_bump", lastReason: null, lastAttemptAgeSeconds: 40, lastProvenAgeSeconds: 45 },
+      });
+      const byTable = Object.fromEntries(m.calls.map((call) => [call.table, call]));
+      expect(byTable.indexer_heartbeat_state.filters).toEqual([["network", "devnet"]]);
+      expect(String(byTable.indexer_heartbeat_state.select?.[0])).toBe("mode,last_outcome,last_reason,last_attempt_at,last_proven_at");
+    });
+
+    it("names the failing proof condition of a heartbeat that is on but declines", async () => {
+      m.replies.indexer_sync_state = { data: { status: "ready", last_slot: 77, checked_at: ago(900), completed_at: ago(3600) }, error: null };
+      m.replies.indexer_heartbeat_state = {
+        data: { mode: "on", last_outcome: "declined", last_reason: "PENDING_JOBS", last_attempt_at: ago(60), last_proven_at: ago(900) }, error: null,
+      };
+      const { body } = await get();
+      expect(body.checks.indexer).toMatchObject({ status: "ok", fresh: false,
+        heartbeat: { mode: "on", lastOutcome: "declined", lastReason: "PENDING_JOBS", lastAttemptAgeSeconds: 60, lastProvenAgeSeconds: 900 } });
+    });
+
+    it("echoes fixed codes only: anything else reads as null", async () => {
+      m.replies.indexer_heartbeat_state = {
+        data: { mode: "sometimes", last_outcome: "maybe", last_reason: "rpc error at https://rpc.example/?api-key=SECRET", last_attempt_at: "never", last_proven_at: null },
+        error: null,
+      };
+      const { body } = await get();
+      expect(body.checks.indexer.heartbeat).toEqual({
+        mode: null, lastOutcome: null, lastReason: null, lastAttemptAgeSeconds: null, lastProvenAgeSeconds: null,
+      });
+      expect(JSON.stringify(body)).not.toMatch(/SECRET|rpc\.example/);
+    });
+
+    it.each([
+      ["before 0075 (no table)", { data: null, error: { code: "42P01", message: "relation does not exist" } }],
+      ["no row", { data: null, error: null }],
+      ["a failed read", new Error("fetch failed: db.secret-host.supabase.co")],
+    ] as const)("is null %s, and never changes the indexer status", async (_label, reply) => {
+      m.replies.indexer_heartbeat_state = reply;
+      const { status, body } = await get();
+      expect(status).toBe(200);
+      expect(body.checks.indexer).toMatchObject({ status: "ok", state: "ready", fresh: true, heartbeat: null });
+      expect(JSON.stringify(body)).not.toMatch(/secret-host|does not exist/);
+    });
+
+    it("is bounded like every other read: a hanging heartbeat read is null, not a slow report", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      const health = await import("@/lib/server/health");
+      m.replies.indexer_heartbeat_state = "hang";
+      const pending = route.GET(new Request("https://www.manci.io/api/health", { headers: { authorization: `Bearer ${TOKEN}` } }));
+      await vi.advanceTimersByTimeAsync(health.HEALTH_DB_TIMEOUT_MS);
+      const body = await (await pending).json();
+      expect(body.checks.indexer).toMatchObject({ status: "ok", fresh: true, heartbeat: null });
+      expect(m.calls.find((call) => call.table === "indexer_heartbeat_state")?.signal?.aborted).toBe(true);
+    });
+
+    it("is read alongside a failing sync row, which still fails the check", async () => {
+      m.replies.indexer_sync_state = new Error("fetch failed");
+      const { status, body } = await get();
+      expect(status).toBe(503);
+      expect(body.checks.indexer).toMatchObject({ status: "fail", reason: "unavailable", state: null,
+        heartbeat: { mode: "on", lastOutcome: "bumped" } });
+    });
+  });
+
   it("reports maintenance as a warning, not an outage", async () => {
     m.maintenance.mockResolvedValue({ enabled: true, message: "Program upgrade", fresh: true });
     const { status, body } = await get();
@@ -521,8 +599,8 @@ describe("GET /api/health", () => {
     expect(a.body).toEqual(b.body);
     await get();
     expect(m.rpcCalls).toBe(1);
-    // indexer_sync_state, the two queues, fx_rates and fx_auto_rates.
-    expect(m.calls).toHaveLength(5);
+    // indexer_sync_state, indexer_heartbeat_state, the two queues, fx_rates and fx_auto_rates.
+    expect(m.calls).toHaveLength(6);
     expect(m.dbRpc).toHaveLength(1);
     vi.setSystemTime(NOW + 10_000);
     await get();
