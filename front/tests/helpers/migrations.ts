@@ -94,6 +94,8 @@ export const DYNAMIC_DEFAULT_TABLES = [
 export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   // 0084 admin-managed assistant knowledge
   "assistant_knowledge",
+  // 0086 company-register entries (cap table)
+  "register_entries",
   // 0072 on-chain alarms
   "onchain_event_jobs", "worker_leases", "worker_heartbeats", "alarm_incidents",
   // 0073 ledger jobs and holds
