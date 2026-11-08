@@ -170,7 +170,15 @@ export type CloseMigrationAsyncInput<
   migrationVault?: Address<TAccountMigrationVault>;
   /** Any share-class account owned by `migration.return_to`. */
   returnToAccount: Address<TAccountReturnToAccount>;
-  /** Mut: the escrow's old tokens are burned. */
+  /**
+   * Mut: the escrow's old tokens are burned. Deliberately NOT deserialized:
+   * with nothing left in the escrow (a Draft, no deposits, every deposit
+   * refunded) a Token-2022 old mint whose supply reached 0 may have been
+   * closed by its close authority, and the close must not depend on it
+   * then. With tokens in the escrow the mint has supply, cannot have been
+   * closed, and the token program checks it against the escrow in the burn.
+   * program reads it, in the burn.
+   */
   oldMint: Address<TAccountOldMint>;
   migrationEscrow?: Address<TAccountMigrationEscrow>;
   /**
@@ -347,7 +355,15 @@ export type CloseMigrationInput<
   migrationVault: Address<TAccountMigrationVault>;
   /** Any share-class account owned by `migration.return_to`. */
   returnToAccount: Address<TAccountReturnToAccount>;
-  /** Mut: the escrow's old tokens are burned. */
+  /**
+   * Mut: the escrow's old tokens are burned. Deliberately NOT deserialized:
+   * with nothing left in the escrow (a Draft, no deposits, every deposit
+   * refunded) a Token-2022 old mint whose supply reached 0 may have been
+   * closed by its close authority, and the close must not depend on it
+   * then. With tokens in the escrow the mint has supply, cannot have been
+   * closed, and the token program checks it against the escrow in the burn.
+   * program reads it, in the burn.
+   */
   oldMint: Address<TAccountOldMint>;
   migrationEscrow: Address<TAccountMigrationEscrow>;
   /**
@@ -494,7 +510,15 @@ export type ParsedCloseMigrationInstruction<
     migrationVault: TAccountMetas[5];
     /** Any share-class account owned by `migration.return_to`. */
     returnToAccount: TAccountMetas[6];
-    /** Mut: the escrow's old tokens are burned. */
+    /**
+     * Mut: the escrow's old tokens are burned. Deliberately NOT deserialized:
+     * with nothing left in the escrow (a Draft, no deposits, every deposit
+     * refunded) a Token-2022 old mint whose supply reached 0 may have been
+     * closed by its close authority, and the close must not depend on it
+     * then. With tokens in the escrow the mint has supply, cannot have been
+     * closed, and the token program checks it against the escrow in the burn.
+     * program reads it, in the burn.
+     */
     oldMint: TAccountMetas[7];
     migrationEscrow: TAccountMetas[8];
     /**

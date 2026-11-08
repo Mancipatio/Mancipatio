@@ -328,7 +328,7 @@ export const ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT = 0x180a; /
 export const ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING = 0x180b; // 6155
 /** MigrationTermsInvalid: Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint */
 export const ASSET_REGISTRY_ERROR__MIGRATION_TERMS_INVALID = 0x180c; // 6156
-/** MigrationWindowInvalid: Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days */
+/** MigrationWindowInvalid: Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at */
 export const ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID = 0x180d; // 6157
 /** MigrationStatusInvalid: Migration is not in the status this action requires */
 export const ASSET_REGISTRY_ERROR__MIGRATION_STATUS_INVALID = 0x180e; // 6158
@@ -623,7 +623,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__MIGRATION_STATUS_INVALID]: `Migration is not in the status this action requires`,
     [ASSET_REGISTRY_ERROR__MIGRATION_TERMS_INVALID]: `Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint`,
     [ASSET_REGISTRY_ERROR__MIGRATION_UNDERFUNDED]: `A migration opens only once units_funded equals units_cap`,
-    [ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID]: `Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID]: `Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at`,
     [ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_NOT_CLOSED]: `The migration's deposit window has not closed yet`,
     [ASSET_REGISTRY_ERROR__MILESTONE_LOCKED]: `Vesting milestone is still locked`,
     [ASSET_REGISTRY_ERROR__MILESTONE_POOL_EXCEEDED]: `Claim would exceed the milestone pool`,

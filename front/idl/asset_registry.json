@@ -5124,7 +5124,13 @@
         {
           "name": "old_mint",
           "docs": [
-            "Mut: the escrow's old tokens are burned."
+            "Mut: the escrow's old tokens are burned. Deliberately NOT deserialized:",
+            "with nothing left in the escrow (a Draft, no deposits, every deposit",
+            "refunded) a Token-2022 old mint whose supply reached 0 may have been",
+            "closed by its close authority, and the close must not depend on it",
+            "then. With tokens in the escrow the mint has supply, cannot have been",
+            "closed, and the token program checks it against the escrow in the burn.",
+            "program reads it, in the burn."
           ],
           "writable": true,
           "relations": [
@@ -18155,7 +18161,7 @@
     {
       "code": 6157,
       "name": "MigrationWindowInvalid",
-      "msg": "Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days"
+      "msg": "Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at"
     },
     {
       "code": 6158,
