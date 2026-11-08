@@ -205,6 +205,19 @@ describe("readAssetChain", () => {
     await expect(readAssetChain("not-an-address", { holders: true })).rejects.toMatchObject({ status: 400 });
   });
 
+  it("reads the supply of a mint with the share-class extensions (base layout only)", async () => {
+    rpc.accounts.set(MINT, { owner: TOKEN_2022, data: new Uint8Array(getMintEncoder().encode({
+      mintAuthority: CLASS_0, supply: BigInt(9_750), decimals: 0, isInitialized: true, freezeAuthority: null,
+      extensions: [
+        { __kind: "TransferHook", authority: CLASS_0, programId: key(31) },
+        { __kind: "PermanentDelegate", delegate: CLASS_0 },
+        { __kind: "MintCloseAuthority", closeAuthority: CLASS_0 },
+        { __kind: "MetadataPointer", authority: CLASS_0, metadataAddress: MINT },
+      ],
+    })) });
+    expect((await readAssetChain(ASSET, { holders: false })).classes[0].mintSupply).toBe(BigInt(9_750));
+  });
+
   it("refuses a share-class mint that is not a Token-2022 mint", async () => {
     rpc.accounts.set(MINT, { ...rpc.accounts.get(MINT)!, owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" });
     await expect(readAssetChain(ASSET, { holders: false })).rejects.toMatchObject({ status: 409 });

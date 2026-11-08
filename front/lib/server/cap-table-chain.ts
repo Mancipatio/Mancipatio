@@ -37,8 +37,8 @@ import {
   getIssuerDiscriminatorBytes,
   type CustodyVault,
 } from "@/lib/generated/asset_registry";
+import { getMintDecoder } from "@solana-program/token-2022";
 import { decodeShareClassV2 } from "@/lib/account-versions";
-import { classifyMintAccount } from "@/lib/payment-mints";
 import { findShareClassPda } from "@/lib/pdas";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
@@ -188,7 +188,11 @@ async function readShareClasses(assetPda: Address, count: number): Promise<Share
   return out.sort((a, b) => a.classIndex - b.classIndex);
 }
 
-/** Each mint's supply (Token-2022 mints only: every share-class mint is one). */
+/**
+ * Each mint's supply (Token-2022 mints only: every share-class mint is one).
+ * Only the 82-byte base layout is decoded, so no extension of the mint (hook,
+ * permanent delegate, close authority, metadata) can make the read fail.
+ */
 async function readMintSupplies(mints: string[]): Promise<Map<string, bigint>> {
   const rpc = getServerRpc();
   const out = new Map<string, bigint>();
@@ -196,8 +200,14 @@ async function readMintSupplies(mints: string[]): Promise<Map<string, bigint>> {
     const accounts = await fetchEncodedAccounts(rpc, group, accountConfig());
     for (const account of accounts) {
       if (!account.exists) throw new SiwsError(409, "A share-class mint is missing on chain");
-      const { owner, mint } = classifyMintAccount({ programAddress: account.programAddress, data: account.data }, { plainPayment: false });
-      if (owner !== TOKEN_2022) throw new SiwsError(409, "A share-class mint is not a Token-2022 mint");
+      if (account.programAddress !== TOKEN_2022) throw new SiwsError(409, "A share-class mint is not a Token-2022 mint");
+      const data = new Uint8Array(account.data);
+      // The base mint, or an extended mint (account type 1 at byte 165): never a token account.
+      if (data.length !== 82 && !(data.length >= 166 && data[165] === 1)) {
+        throw new SiwsError(409, "A share-class mint account is not a mint");
+      }
+      const mint = getMintDecoder().decode(data.subarray(0, 82));
+      if (!mint.isInitialized) throw new SiwsError(409, "A share-class mint is not initialized");
       out.set(account.address.toString(), BigInt(mint.supply));
     }
   }
