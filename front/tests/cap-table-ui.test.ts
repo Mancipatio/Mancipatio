@@ -95,6 +95,7 @@ describe("the reconciliation view", () => {
 });
 
 describe("the public supply figures", () => {
+  const realized = [{ status: "converted" as const, vaultPda: null, units: n(250), realizeTx: TX }];
   const recorded = [
     { units: n(250), percentBps: "250", registry: "APR", decisionDate: "2026-10-09", decisionDocSha256: SHA, realizeTx: TX, status: "recorded" as const },
   ];
@@ -108,7 +109,7 @@ describe("the public supply figures", () => {
   it("render with KYC-only mode on: the class cap, issued, outstanding, in conversion, converted and the record", () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", "");
-    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, [], recorded, FIGURES)) }));
+    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, realized, recorded, FIGURES)) }));
     expect(markup).toContain("Class cap");
     expect(markup).toContain("1,750 units (17.5 % of the company)");
     expect(markup).toContain("1 unit = 0.01 % of the company");
@@ -118,18 +119,23 @@ describe("the public supply figures", () => {
     expect(markup).toContain("In conversion");
     expect(markup).toContain("1 conversion · 250 units · 2.5 % of the company");
     expect(markup).not.toContain("100 % of the company");
+    expect(markup).not.toContain("pending");
     expect(markup).toContain(SHA);
     expect(markup).toContain(`https://explorer.solana.com/tx/${TX}"`);
     expect(markup).not.toMatch(/BD 12345|<button|href="\/portfolio|request/i);
     expect(markup).not.toMatch(/\baudit(ed)?\b/i);
   });
 
-  it("a draft profile (no published figures): units only, no percentage at all", () => {
+  it("a draft profile (no published figures): units only, and the realized conversion with its register entry pending", () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
-    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, [], [], null)) }));
+    const markup = html(createElement(SupplyConversionsFigures, { supply: supplyOf(publicSupplyClass(chain, realized, [], null)) }));
     expect(markup).toContain("1,750 units");
     expect(markup).toContain("500 units");
     expect(markup).not.toMatch(/\d %/);
+    expect(markup).not.toContain("None yet");
+    expect(markup).toContain("1 conversion realized on chain · 250 units · register entry pending");
+    expect(markup).toContain("Register entry pending");
+    expect(markup).toContain(`https://explorer.solana.com/tx/${TX}"`);
     expect(markup).not.toMatch(/BD 12345|Jane|Ho1der|<button/);
   });
 

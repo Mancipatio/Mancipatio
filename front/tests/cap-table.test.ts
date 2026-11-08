@@ -312,17 +312,25 @@ describe("MANCI-2026: a class that is 17.5 % of its company", () => {
     expect(detail(doubled.checks, "within_cap")).toMatch(/= 2,000 of the 1,750-unit class cap: 250 over the cap\. Check the register entries against the conversions\.$/);
   });
 
-  it("the public view: the published figures give the share of one unit; a draft profile gives units only", () => {
-    const published = publicSupplyClass(manciChain(), [], [manciEntry()], MANCI);
+  it("the public view: the published figures give percentages; the realized conversion shows with its register entry pending", () => {
+    const realized = [{ status: "converted" as const, vaultPda: VAULT_1, units: n(250), realizeTx: TX_1 }];
+    const published = publicSupplyClass(manciChain(), realized, [], MANCI);
     expect(published).toEqual({
       share_class_pda: MANCI_CLASS, class_index: 0, mint: MINT, max_supply: "1750", unit_percent: "0.01",
       issued: "500", outstanding: "250", in_conversion: "0",
-      converted: { count: 1, units: "250", percent: "2.5" },
-      records: [{ decision_date: "2026-10-09", units: "250", percent: "2.5", registry: "APR", decision_doc_sha256: SHA, realize_tx: TX_1 }],
+      converted: { count: 0, units: "0", percent: "0" },
+      records: [],
+      pending: { count: 1, units: "250", conversions: [{ units: "250", realize_tx: TX_1 }] },
     });
-    // A draft profile gives the public no figures: units only, no percentage derived at all.
-    expect(publicSupplyClass(manciChain(), [], [manciEntry()], null).unit_percent).toBeNull();
-    expect(JSON.stringify(published)).not.toMatch(/BD 12345|Jane|d0000000|c0000000|e0000000|A1ice/);
+    // A draft profile gives the public no figures: units only, no percentage at all.
+    const draft = publicSupplyClass(manciChain(), realized, [], null);
+    expect(draft.unit_percent).toBeNull();
+    expect(draft.pending.count).toBe(1);
+    // Once the entry is recorded (it carries the realize signature), the conversion is registered, no longer pending.
+    const recorded = publicSupplyClass(manciChain(), realized, [manciEntry()], MANCI);
+    expect(recorded.converted).toEqual({ count: 1, units: "250", percent: "2.5" });
+    expect(recorded.pending).toEqual({ count: 0, units: "0", conversions: [] });
+    expect(JSON.stringify([published, recorded])).not.toMatch(/BD 12345|Jane|d0000000|c0000000|e0000000|A1ice/);
   });
 });
 
@@ -524,8 +532,10 @@ describe("projections", () => {
   it("the public view: supply figures and conversion records, no case number, request or wallet", () => {
     const vaults = [{ pda: VAULT_2, vaultId: "2", kind: "delivery_escrow" as const, state: "triggered" as const, escrow: "Escrow2", escrowUnits: n(100) }];
     const later = { ...entry({ id: "e2", decisionDate: "2026-11-01", units: n(100), percentBps: "100", realizeTx: TX_2 }) };
-    const p = publicSupplyClass(chain({ custodyVaults: vaults }), [{ status: "deposited", vaultPda: VAULT_2 }],
-      [later, entry(), entry({ status: "voided", units: n(999) })], WHOLE);
+    const p = publicSupplyClass(chain({ custodyVaults: vaults }), [
+      { status: "deposited", vaultPda: VAULT_2, units: n(100), realizeTx: null },
+      { status: "converted", vaultPda: VAULT_1, units: n(250), realizeTx: TX_1 },
+    ], [later, entry(), entry({ status: "voided", units: n(999) })], WHOLE);
     expect(p).toEqual({
       share_class_pda: CLASS, class_index: 0, mint: MINT, max_supply: "10000", unit_percent: "0.01",
       issued: "10000", outstanding: "9750", in_conversion: "100",
@@ -534,6 +544,7 @@ describe("projections", () => {
         { decision_date: "2026-10-09", units: "250", percent: "2.5", registry: "APR", decision_doc_sha256: SHA, realize_tx: TX_1 },
         { decision_date: "2026-11-01", units: "100", percent: "1", registry: "APR", decision_doc_sha256: SHA, realize_tx: TX_2 },
       ],
+      pending: { count: 0, units: "0", conversions: [] },
     });
     expect(JSON.stringify(p)).not.toMatch(/BD 12345|Jane|d0000000|c0000000|e0000000/);
   });

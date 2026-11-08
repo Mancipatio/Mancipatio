@@ -9,8 +9,9 @@
 //           staff notes and void reasons
 //   issuer  wallets, units and decision references: no dossier link, staff
 //           note, void reason, staff wallet or voided entry
-//   public  aggregates and the non-personal columns of recorded entries: no
-//           case number, request, wallet or person
+//   public  aggregates, the non-personal columns of recorded entries and the
+//           status, vault, units and realize signature of conversion
+//           requests: no case number, request id, wallet or person
 // The share of the company one unit is comes from the asset profile's
 // tokenize figures (readUnitShareFigures): a draft's for the admin and the
 // issuer, a published profile's only for the public; only the derived share
@@ -64,7 +65,8 @@ const CONVERSION_COLUMNS: Record<CapTableAudience, string> = {
   admin: "id,status,share_class_pda,holder_wallet,client_id,amount::text,vault_pda,outcome_tx,outcome_evidence,decided_at",
   issuer: "id,status,share_class_pda,holder_wallet,amount::text,vault_pda,outcome_tx,outcome_evidence,decided_at",
 };
-const PUBLIC_CONVERSION_COLUMNS = "status,share_class_pda,vault_pda";
+/** Units and the realize signature are public on chain; no id, wallet, dossier or contact. */
+const PUBLIC_CONVERSION_COLUMNS = "status,share_class_pda,vault_pda,amount::text,outcome_tx";
 /** What the share of one unit is derived from: the tokenize object only, never the rest of `fields`. */
 const PROFILE_FIGURES_COLUMNS = `is_published,status,${PUBLIC_TOKENIZE_SELECT}`;
 const ENTRY_COLUMNS: Record<CapTableAudience | "public", string> = {
@@ -249,19 +251,20 @@ export async function readAssetReconciliation(assetPda: string, audience: CapTab
 
 /**
  * The public "Supply and conversions" figures of one asset: chain supply,
- * the units in open conversion escrows (their vaults only), the
- * non-personal columns of recorded register entries, and the share of one
- * unit from a published profile's tokenize figures (else units only).
+ * the units in open conversion escrows (their vaults only), the conversions
+ * realized on chain (units and realize signature only), the non-personal
+ * columns of recorded register entries, and the share of one unit from a
+ * published profile's tokenize figures (else units only).
  */
 export async function readPublicSupply(assetPda: string): Promise<PublicSupply> {
   const network = detectNetwork();
   const chain = await readAssetChain(assetPda, { holders: false });
   const classPdas = chain.classes.map((c) => c.shareClassPda);
   const sb = getSupabaseAdmin();
-  const [open, recorded, figures] = classPdas.length
+  const [conversions, recorded, figures] = classPdas.length
     ? await Promise.all([
         allRows(() => sb.from("conversion_requests").select(PUBLIC_CONVERSION_COLUMNS)
-          .eq("network", network).in("share_class_pda", classPdas).in("status", OPEN_STATUSES)
+          .eq("network", network).in("share_class_pda", classPdas).in("status", READ_STATUSES)
           .order("created_at", { ascending: true }).order("id", { ascending: true }) as unknown as Paged),
         allRows(() => sb.from("register_entries").select(ENTRY_COLUMNS.public)
           .eq("network", network).in("share_class_pda", classPdas).eq("status", "recorded")
@@ -275,10 +278,16 @@ export async function readPublicSupply(assetPda: string): Promise<PublicSupply> 
     generated_at: new Date().toISOString(),
     classes: chain.classes.map((c) => publicSupplyClass(
       c,
-      open.filter((r) => r.share_class_pda === c.shareClassPda).map((r) => ({
-        status: str(r.status) as ConversionStatusRead,
-        vaultPda: strOrNull(r.vault_pda),
-      })),
+      conversions.filter((r) => r.share_class_pda === c.shareClassPda).map((r) => {
+        const status = str(r.status) as ConversionStatusRead;
+        if (!READ_STATUSES.includes(status)) recordsUnavailable();
+        return {
+          status,
+          vaultPda: strOrNull(r.vault_pda),
+          units: units(r.amount),
+          realizeTx: status === "converted" ? strOrNull(r.outcome_tx) : null,
+        };
+      }),
       recorded.filter((r) => r.share_class_pda === c.shareClassPda && r.status === "recorded").map((r) => ({
         units: units(r.units),
         percentBps: typeof r.percent_bps === "number" ? String(r.percent_bps) : str(r.percent_bps),

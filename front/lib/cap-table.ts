@@ -814,6 +814,13 @@ export type PublicConversionRecord = {
   realize_tx: string | null;
 };
 
+/**
+ * A conversion realized on chain (its units burned, the outcome evidence
+ * verified) whose register entry is not recorded yet: its units and its
+ * realize transaction, nothing else.
+ */
+export type PublicPendingConversion = { units: string; realize_tx: string | null };
+
 export type PublicSupplyClass = {
   share_class_pda: string;
   class_index: number;
@@ -833,6 +840,8 @@ export type PublicSupplyClass = {
   /** Conversions with a recorded register entry; the percent as their decisions record it. */
   converted: { count: number; units: string; percent: string };
   records: PublicConversionRecord[];
+  /** Conversions realized on chain whose register entry is still to be recorded. */
+  pending: { count: number; units: string; conversions: PublicPendingConversion[] };
 };
 
 export type PublicSupply = {
@@ -844,19 +853,25 @@ export type PublicSupply = {
 
 /**
  * The public "Supply and conversions" figures of one class: built only from
- * public chain data and the non-personal columns of recorded entries. The
- * open conversions are used for their vaults only (the units in conversion).
- * `figures` are the published profile's tokenize figures or null; they give
- * the share of one unit only when they match the class.
+ * public chain data, the non-personal columns of recorded entries, and the
+ * status, vault, units and realize signature of the class's conversion
+ * requests. An open request counts for its live vault's escrow (the units in
+ * conversion). A converted request whose realize signature no recorded entry
+ * names is a conversion realized on chain with its register entry pending:
+ * matched by signature because the public read never selects a request id,
+ * and an entry recorded from its request carries the request's realize
+ * signature (lib/server/cap-table.ts recordRegisterEntry). `figures` are the
+ * published profile's tokenize figures or null; they give the share of one
+ * unit only when they match the class.
  */
 export function publicSupplyClass(
   chain: Omit<ClassChainFacts, "holders">,
-  openConversions: Pick<ConversionFacts, "status" | "vaultPda">[],
+  conversions: Pick<ConversionFacts, "status" | "vaultPda" | "units" | "realizeTx">[],
   recorded: Pick<RegisterEntryFacts, "units" | "percentBps" | "registry" | "decisionDate" | "decisionDocSha256" | "realizeTx" | "status">[],
   figures: UnitShareFigures | null = null,
 ): PublicSupplyClass {
   const vaultByPda = new Map(chain.custodyVaults.map((v) => [v.pda, v]));
-  const openVaults = new Set(openConversions
+  const openVaults = new Set(conversions
     .filter((c) => c.status === "vault_opened" || c.status === "deposited")
     .map((c) => c.vaultPda)
     .filter((p): p is string => Boolean(p)));
@@ -868,6 +883,8 @@ export function publicSupplyClass(
     .filter((e) => e.status === "recorded")
     .sort((a, b) => (a.decisionDate === b.decisionDate ? 0 : a.decisionDate < b.decisionDate ? -1 : 1));
   const bps = sum(entries.map((e) => parseBps(e.percentBps)?.scaled ?? ZERO));
+  const registeredTxs = new Set(entries.map((e) => e.realizeTx).filter((tx): tx is string => Boolean(tx)));
+  const pending = conversions.filter((c) => c.status === "converted" && !(c.realizeTx && registeredTxs.has(c.realizeTx)));
   const unitE4 = unitShareOf(chain, figures).e4;
   return {
     share_class_pda: chain.shareClassPda,
@@ -891,6 +908,11 @@ export function publicSupplyClass(
       decision_doc_sha256: e.decisionDocSha256,
       realize_tx: e.realizeTx,
     })),
+    pending: {
+      count: pending.length,
+      units: sum(pending.map((c) => c.units)).toString(),
+      conversions: pending.map((c) => ({ units: c.units.toString(), realize_tx: c.realizeTx })),
+    },
   };
 }
 

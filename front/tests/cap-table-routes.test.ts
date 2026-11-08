@@ -347,6 +347,8 @@ describe("public supply", () => {
         share_class_pda: CLASS, max_supply: "10000", unit_percent: "0.01", issued: "10000", outstanding: "9750", in_conversion: "100",
         converted: { count: 1, units: "250", percent: "2.5" },
         records: [{ decision_date: "2026-10-09", units: "250", percent: "2.5", registry: "APR", decision_doc_sha256: SHA, realize_tx: TX_1 }],
+        // The converted request is registered (its entry carries the realize signature): nothing pending.
+        pending: { count: 0, units: "0", conversions: [] },
       }],
     });
     const text = JSON.stringify(body.data);
@@ -361,7 +363,7 @@ describe("public supply", () => {
     expect(tablesSelected().sort()).toEqual(["asset_profiles", "conversion_requests", "issuer_profiles", "register_entries"]);
   });
 
-  it("MANCI-2026 today: a draft profile gives the public units only; a published one 1 unit = 0.01 %", async () => {
+  it("MANCI-2026 today: a draft profile gives the public units only, and the realized conversion shows as pending", async () => {
     h.chain.mockImplementation(async () => ({
       ...assetChain(),
       classes: [{
@@ -380,6 +382,7 @@ describe("public supply", () => {
     expect(cls).toMatchObject({
       max_supply: "1750", unit_percent: null, issued: "500", outstanding: "250", in_conversion: "0",
       converted: { count: 0, units: "0", percent: "0" }, records: [],
+      pending: { count: 1, units: "250", conversions: [{ units: "250", realize_tx: TX_1 }] },
     });
     expect(JSON.stringify(draft.body.data)).not.toMatch(/client_id|jane@example|d0000000|c0000000/);
     // Nothing of a draft is read beyond the published filter, and no archive lookup is needed.
