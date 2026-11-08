@@ -89,6 +89,24 @@ export async function listSpvs(): Promise<SpvRow[]> {
   return (data ?? []) as SpvRow[];
 }
 
+/**
+ * The SPVs linked to an on-chain issuer (spvs.issuer_pda) on this network,
+ * for the issuer journey's legal-structure step. Only the name and status
+ * are selected. THROWS when the read fails, so the caller can tell "no SPV"
+ * from "not read" (lib/issuer-journey.ts never reads a failure as progress).
+ */
+export async function listIssuerSpvs(issuerPda: string): Promise<Pick<SpvRow, "id" | "name" | "status">[]> {
+  const sb = getSupabase();
+  if (!sb) throw new Error("The SPV registry is not configured");
+  const { data, error } = await sb
+    .from("spvs")
+    .select("id, name, status")
+    .eq("network", detectNetwork())
+    .eq("issuer_pda", issuerPda);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Pick<SpvRow, "id" | "name" | "status">[];
+}
+
 export async function getSpv(id: string): Promise<SpvRow | null> {
   const sb = getSupabase();
   if (!sb) return null;

@@ -57,6 +57,7 @@ import { IssuerPermissionsPanel } from "./issuer-permissions-panel";
 import { IssuerRecoveryPanel } from "./issuer-recovery-panel";
 import { IssuerFreezePanel } from "./issuer-freeze-panel";
 import { IssuerRowGroup, reviewScrollOptions } from "./issuer-row";
+import { IssuerJourneyPanel } from "./issuer-journey-panel";
 import { recoveryPathFor } from "@/lib/issuer-recovery";
 import { ArchiveDialog } from "@/components/archive-dialog";
 import { useArchivedSet } from "@/lib/archive-client";
@@ -417,6 +418,7 @@ function IssuersOps() {
                   {isSelected && (
                     <IssuerDetail
                       issuer={i}
+                      network={data}
                       sync={overrides[legalId]?.phase ?? null}
                       otherAuthorities={issuers
                         .filter((other) => issuerLegalId(other) !== legalId)
@@ -452,6 +454,7 @@ function IssuersOps() {
 
 function IssuerDetail({
   issuer,
+  network,
   sync,
   otherAuthorities,
   decision,
@@ -460,6 +463,8 @@ function IssuerDetail({
   onClose,
 }: {
   issuer: Issuer;
+  /** The directory's on-chain snapshot, for the read-only issuance journey. */
+  network: NetworkData | null;
   /** Set while the row shows a chain status the indexer has not caught up to. */
   sync: KybOverride["phase"] | null;
   /** Authorities of every other issuer (a recovery key must not be one). */
@@ -859,6 +864,9 @@ function IssuerDetail({
         <Field label="Assets registered" value={String(issuer.assetsCount)} />
         <Field label="Version" value={String(issuer.version)} />
       </dl>
+
+      {/* Where this issuer stands in the engagement and who acts next (read-only). */}
+      <IssuerJourneyPanel issuer={issuer} data={network} companyName={profile?.company_name ?? null} />
 
       <div className="mt-5 border-t border-slate-100 pt-5">
         {profileError && (
