@@ -4358,14 +4358,28 @@ What the program does:
     `converted` with its outcome evidence; `/admin/audit` has the
     `open_custody_vault`, `conversion_deposit`, `realize_custody` and
     `document_anchor` rows.
+13. **Record the register entry** (any Admin; migration 0086), after the
+    registry decision and the realize: `/admin/cap-table` → the asset → the
+    converted request → *Record register entry*. Enter the units, the
+    percent, the registry, the decision reference (case number) and its date
+    exactly as the APR decision states them, and choose the decision
+    document (hashed in the browser, never uploaded) or paste its SHA-256;
+    the realize transaction and the holder's dossier come from the request.
+    An entry cannot be edited: a wrong one is voided with a reason and
+    recorded again. Read back: every check of the class shows *Pass*
+    (converted units equal registered units, issued minus burned equals
+    outstanding, within 100 %), and the asset page's *Supply and
+    conversions* lists the conversion with its date, units, percent,
+    registry, document SHA-256 and realize transaction, never the case
+    number or the holder.
 
 **Evidence** (in the case file; the personal data and the off-chain
 documents in the company's records, never in this repository): the KYC
 decision and its note; the signatures of the passport, of the 0x08 clear
 and re-set, of the open (with the vault PDA, the deadline and the
-attestation hash), the deposit, the realize and the anchor; the request ID;
-the transfer documents, the APR decision and the register extract; the
-read-back results.
+attestation hash), the deposit, the realize and the anchor; the request ID
+and the register entry ID; the transfer documents, the APR decision and the
+register extract; the read-back results.
 
 **While a conversion is open:**
 
