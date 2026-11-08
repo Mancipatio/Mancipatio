@@ -38,6 +38,8 @@ import { associatedTokenAccount } from "@/lib/token-migration/transactions";
 export const maxDuration = 60;
 
 const TARGETS: readonly MigrationStatus[] = ["open", "closed", "cancelled", "completed"];
+/** How long after its window opened a draft may still open (a few hours of preparation). */
+const OPEN_LATE_SLACK_MS = 86_400_000;
 
 export async function POST(request: Request) {
   try {
@@ -64,6 +66,10 @@ export async function POST(request: Request) {
         throw new SiwsError(409, "Add the Swap Terms document (its SHA-256 and its https link) to the draft before opening");
       }
       if (Date.parse(migration.window_closes_at) <= Date.now()) throw new SiwsError(409, "The window of this draft has already ended: change its dates first");
+      // The Swap Terms promise the holders the whole window: a campaign opened late would shorten it.
+      if (Date.now() - Date.parse(migration.window_opens_at) > OPEN_LATE_SLACK_MS) {
+        throw new SiwsError(409, "The window of this draft opened more than a day ago: move its dates (and the Swap Terms) so the holders get the whole window");
+      }
       const derived = await associatedTokenAccount(migration.deposit_owner, migration.old_mint, migration.old_token_program);
       if (derived !== migration.deposit_ata) throw new SiwsError(500, "The stored deposit account does not match its owner and mint");
       const verdict = await readOldMint(migration.old_mint);

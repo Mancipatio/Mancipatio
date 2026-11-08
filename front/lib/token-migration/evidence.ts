@@ -26,7 +26,9 @@
 //     exactly that amount.
 // A transaction that does more than its one job (moves the old mint
 // somewhere else as well, pays several holders from several sources) is not
-// proof of anything here: the operator records it by hand, if at all.
+// proof of anything here: it is never recorded, and a transfer into the
+// deposit account that cannot be attributed is returned by the deposit owner
+// by hand (ops/runbook-mainnet.md §22).
 
 import { getBase58Encoder } from "@solana/kit";
 import { ChainEvidenceError, type ChainTransaction, type CompiledChainInstruction } from "@/lib/chain-evidence";
@@ -183,12 +185,12 @@ export function depositEvidence(tx: ChainTransaction, signature: string, expecte
   const sources = new Set<string>();
   for (const ch of changes) {
     if (ch.account === expected.depositAta || ch.post === ch.pre) continue;
-    requireProof(ch.post < ch.pre, "This transaction also moved the token into another account; record it by hand");
+    requireProof(ch.post < ch.pre, "This transaction also moved the token into another account, so it is not a plain deposit (the deposit owner returns it by hand)");
     requireProof(ch.owner, "The network did not report who owns the source token account; try again later");
     sources.add(ch.owner);
     sent += ch.pre - ch.post;
   }
-  requireProof(sources.size === 1, sources.size === 0 ? "No source token account is shown for this deposit" : "The deposit came from several wallets; record it by hand");
+  requireProof(sources.size === 1, sources.size === 0 ? "No source token account is shown for this deposit" : "The deposit came from several wallets, so it cannot be attributed (the deposit owner returns it by hand)");
   requireProof(sent === amount, "The amount sent and the amount received do not match (a fee on the way?)");
   const holder = [...sources][0];
   if (expected.holder !== null) {
@@ -247,7 +249,7 @@ export function deliveryEvidence(tx: ChainTransaction, signature: string, expect
   requireProof(treasury && treasury.pre - treasury.post === total, "The treasury's units did not decrease by exactly the units delivered");
   for (const ch of changes.values()) {
     if (expectedAccounts.has(ch.account)) continue;
-    requireProof(ch.post === ch.pre, "This transaction also moved units of the class elsewhere; record it by hand");
+    requireProof(ch.post === ch.pre, "This transaction also moved units of the class elsewhere, so it is not a plain delivery");
   }
   return { total, slot: BigInt(tx.slot) };
 }

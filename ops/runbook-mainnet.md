@@ -4532,7 +4532,11 @@ What the server checks, every time (nothing from a browser is trusted):
 - *Reconcile deposits* (at least once a day, and before every delivery
   batch): it records the deposits nobody recorded (a closed tab, a manual
   transfer) and lists the transactions that are not deposits. Up to 20
-  deposits per run; run again while it says some remain.
+  deposits per run; run again while it says some remain. A transfer into
+  the deposit account that cannot be attributed to one wallet (several
+  source wallets, tokens also moved elsewhere, a fee on the way) is never
+  recorded: the deposit owner returns it by hand to its sender, and the
+  case file records the transaction.
 - Read the deposits table: irregular deposits are refunded (below); a
   compliance hold goes to the compliance team (`/admin/compliance` has the
   alert).

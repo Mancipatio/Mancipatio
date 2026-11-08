@@ -411,13 +411,16 @@ describe("POST /api/token-migrations/admin/transition", () => {
   const go = (to: string) => call(adminTransition, ADMIN, { id: MIGRATION_ID, to });
 
   it("opens a draft only with the module on, the Terms set and a clean deposit account", async () => {
-    migrations().push(campaign({ status: "draft", terms_doc_sha256: null, terms_doc_url: null, opened_at: null }));
+    migrations().push(campaign({ status: "draft", terms_doc_sha256: null, terms_doc_url: null, opened_at: null, window_opens_at: "2027-01-30T00:00:00.000Z", window_closes_at: "2027-04-15T00:00:00.000Z" }));
     chain.readOldMint.mockResolvedValue({ ok: true, tokenProgram: TOKEN_PROGRAM_CLASSIC, decimals: 0, supply: B(1_000_000_000), refusals: [], warnings: [], extensions: [], mintAuthority: null, freezeAuthority: null });
     vi.stubEnv(PILOT_MODULE_ENV.tokenMigration, "");
     expect(await go("open")).toMatchObject({ status: 403, body: { error: moduleDisabledMessage("tokenMigration", "mainnet") } });
     vi.stubEnv(PILOT_MODULE_ENV.tokenMigration, "true");
     expect(await go("open")).toMatchObject({ status: 409, body: { error: expect.stringMatching(/Swap Terms/) } });
     Object.assign(migrations()[0], { terms_doc_sha256: "cd".repeat(32), terms_doc_url: "https://example.com/t.pdf" });
+    // Opened two days after its window started, the holders would lose part of it.
+    expect(await go("open")).toMatchObject({ status: 409, body: { error: expect.stringMatching(/opened more than a day ago/) } });
+    migrations()[0].window_opens_at = "2027-02-01T06:00:00.000Z";
     chain.readDepositAccount.mockResolvedValueOnce({ ok: false, problem: "The deposit account already holds tokens" });
     expect(await go("open")).toMatchObject({ status: 409, body: { error: "The deposit account already holds tokens" } });
     chain.readDepositAccount.mockResolvedValueOnce({ ok: true, amount: B(0) });

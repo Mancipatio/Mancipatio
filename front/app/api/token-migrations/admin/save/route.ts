@@ -124,7 +124,7 @@ export async function POST(request: Request) {
     if (!validWindow(opensAt, closesAt)) {
       throw new SiwsError(400, `The opt-in window must last between ${WINDOW_MIN_DAYS} and ${WINDOW_MAX_DAYS} days`);
     }
-    if (Date.parse(closesAt) <= Date.now()) throw new SiwsError(400, "The opt-in window must end in the future");
+    if (Date.parse(opensAt) < Date.now() - 86_400_000) throw new SiwsError(400, "The opt-in window cannot open in the past");
     if (excludedWallets.includes(depositOwner)) throw new SiwsError(400, "The deposit owner cannot be an excluded wallet");
 
     // The chain, read again (never the calculator's numbers).
