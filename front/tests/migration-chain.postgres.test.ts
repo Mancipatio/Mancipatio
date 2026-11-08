@@ -59,6 +59,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0079_indexer_role_state.sql");
       expect(applied).toContain("0080_fx_auto_rates.sql");
       expect(applied).toContain("0081_issuer_profile_archive.sql");
+      expect(applied).toContain("0088_notification_log.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -103,6 +104,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "spv_issuances",
         "indexer_heartbeat_state",
         "indexer_heartbeat_watermarks",
+        "notification_log",
       ]) {
         for (const role of ["anon", "authenticated"]) {
           const privileges = db.query(

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { recordCustodyReturn } from "@/lib/server/custody-evidence";
+import { notifyConversionStatus } from "@/lib/server/conversion-notifications";
 
 export const maxDuration = 60;
 
@@ -18,6 +19,8 @@ export async function POST(request: Request) {
       wallet,
       params.outcome_tx,
     );
+    // The holder's email, after the response and at most once per request.
+    if (data.status === "returned") notifyConversionStatus(id, "returned");
     return NextResponse.json({ ok: true, data });
   } catch (error) {
     return siwsErrorResponse(error);
