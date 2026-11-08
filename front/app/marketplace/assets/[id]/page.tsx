@@ -44,6 +44,7 @@ import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useArchivedSet } from "@/lib/archive-client";
 import { isWithdrawn } from "@/lib/archive";
 import { WithdrawnNotice } from "@/components/withdrawn-notice";
+import { SupplyConversionsPanel } from "@/components/supply-conversions-panel";
 
 export default function AssetDetailPage({
   params,
@@ -226,6 +227,8 @@ export default function AssetDetailPage({
       <AssetProfileBlock profile={profile} />
 
       <ShareClassesBlock asset={asset} data={data} hidden={conversionTargets} />
+
+      {lookup.kind === "found" && <SupplyConversionsPanel assetPda={lookup.address} />}
 
       {/* Asset metadata */}
       <section className="mt-10">
