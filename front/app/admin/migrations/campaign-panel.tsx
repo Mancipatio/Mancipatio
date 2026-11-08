@@ -42,7 +42,7 @@ import {
   windowStateAt,
   type MigrationStatus,
 } from "@/lib/token-migration/model";
-import { formatBaseUnits, formatEquityBps, formatPercentE4, formatUnits, unitPercent } from "@/lib/token-migration/ratio";
+import { formatBaseUnits, formatEquityBps, formatUnits, percentClause, percentFigure, percentText, unitPercent } from "@/lib/token-migration/ratio";
 import type { DepositRow, MigrationProgress, MigrationRow } from "@/lib/token-migration/rows";
 import { associatedTokenAccount, buildBurnInstructions, buildOpenDepositAccount, buildRefundInstructions } from "@/lib/token-migration/transactions";
 import { DeliveryPanel } from "./delivery-panel";
@@ -253,8 +253,8 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
         aside={<span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-700">{MIGRATION_STATUS_LABEL[m.status]}</span>}
       >
         <dl className="grid gap-x-6 gap-y-1.5 text-[13px] text-slate-700 sm:grid-cols-2">
-          <div><dt className="inline text-slate-500">Ratio: </dt><dd className="inline">1 unit per {formatBaseUnits(lot, m.old_decimals)} {m.old_symbol}; 1 unit = {unitPercent(granularity)} %</dd></div>
-          <div><dt className="inline text-slate-500">E / cap: </dt><dd className="inline">{formatEquityBps(m.equity_bps)} % decided; cap {formatUnits(cap)} units ({formatPercentE4((cap * BigInt(1_000_000)) / granularity)} %)</dd></div>
+          <div><dt className="inline text-slate-500">Ratio: </dt><dd className="inline">1 unit per {formatBaseUnits(lot, m.old_decimals)} {m.old_symbol}; 1 unit {percentClause(unitPercent(granularity))} (G = {formatUnits(granularity)} units)</dd></div>
+          <div><dt className="inline text-slate-500">E / cap: </dt><dd className="inline">{formatEquityBps(m.equity_bps)} % decided; cap {formatUnits(cap)} units ({percentText(percentFigure(cap, granularity))} %)</dd></div>
           <div><dt className="inline text-slate-500">Window: </dt><dd className="inline">{utcText(m.window_opens_at)} to {utcText(m.window_closes_at)}</dd></div>
           <div><dt className="inline text-slate-500">Progress: </dt><dd className="inline">{formatUnits(BigInt(progress.unitsDelivered))} delivered, {formatUnits(BigInt(progress.unitsDue))} due, {progress.holders} holders, {progress.refundsDue} refunds due</dd></div>
           <div><dt className="inline text-slate-500">Deposit account: </dt><dd className="inline"><AddressLink address={m.deposit_ata} /> (owner <AddressLink address={m.deposit_owner} />)</dd></div>

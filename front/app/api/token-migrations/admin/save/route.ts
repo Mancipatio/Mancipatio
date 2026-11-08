@@ -45,7 +45,7 @@ import {
   type MigrationSource,
   type UnclaimedPolicy,
 } from "@/lib/token-migration/model";
-import { computeMigrationRatio, formatUnits, MIGRATION_GRANULARITIES, RatioInputError } from "@/lib/token-migration/ratio";
+import { computeMigrationRatio, formatUnits, isValidGranularity, MAX_GRANULARITY, MIN_GRANULARITY, RatioInputError } from "@/lib/token-migration/ratio";
 import { MIGRATION_SELECT, parseMigrationRow } from "@/lib/token-migration/rows";
 import { associatedTokenAccount } from "@/lib/token-migration/transactions";
 
@@ -65,10 +65,15 @@ function equityParam(value: unknown): number {
   return value;
 }
 
+/**
+ * G: a decimal string (what the editor sends) or a JSON number. Any whole
+ * number of units from 100 to 10^12 (a joint-stock company: its number of
+ * shares); 10^12 is below 2^53, so a number in range arrives exact too.
+ */
 function granularityParam(value: unknown): bigint {
-  const raw = typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : typeof value === "string" && /^\d{1,9}$/.test(value) ? BigInt(value) : null;
-  if (raw === null || !MIGRATION_GRANULARITIES.includes(raw)) {
-    throw new SiwsError(400, "granularity must be 10000, 100000, 1000000 or 10000000");
+  const raw = typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : typeof value === "string" && /^\d{1,13}$/.test(value) ? BigInt(value) : null;
+  if (raw === null || !isValidGranularity(raw)) {
+    throw new SiwsError(400, `granularity must be a whole number of units from ${MIN_GRANULARITY} to ${MAX_GRANULARITY} (a joint-stock company: its number of shares)`);
   }
   return raw;
 }
@@ -184,6 +189,7 @@ export async function POST(request: Request) {
       excluded_note: excludedNote,
       supply_read_at: new Date().toISOString(),
       equity_bps: equityBps,
+      // Exact as a number: a valid G is at most 10^12, below 2^53 (the column is bigint).
       granularity: Number(granularity),
       lot_base_units: ratio.lot.toString(),
       units_cap: ratio.unitsCap.toString(),

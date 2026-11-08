@@ -431,6 +431,25 @@ describe("POST /api/token-migrations/admin/save", () => {
     migrations().push(campaign({ status: "open" }));
     expect(await call(adminSave, ADMIN, draftParams({ id: MIGRATION_ID, slug: "acme" }))).toMatchObject({ status: 409, body: { error: expect.stringMatching(/Only a draft/) } });
   });
+
+  it("takes a custom G (a joint-stock company's number of shares) and refuses one outside 100..10^12 or not whole", async () => {
+    // 37,000 shares, E 12 %: N_target 4,440, lot 200,000, cap 3,000, all computed on the server.
+    const shares = await call(adminSave, ADMIN, draftParams({ granularity: "37000" }));
+    expect(shares.status).toBe(200);
+    expect(shares.body.data!.migration).toMatchObject({ granularity: 37_000, lot_base_units: "200000", units_cap: "3000" });
+    expect((shares.body.data!.warnings as string[]).join(" ")).toContain("leaves the holders ≈ 8.1081 % instead of the decided 12.0000 %");
+    for (const bad of [99, "99", 1_000_000_000_001, "1000000000001", 37_000.5, "37000.5", "37,000", "-37000", -37_000, "3.7e4", null, undefined]) {
+      expect(await call(adminSave, ADMIN, draftParams({ slug: "acme-shares", granularity: bad })), String(bad)).toMatchObject({
+        status: 400,
+        body: { error: "granularity must be a whole number of units from 100 to 1000000000000 (a joint-stock company: its number of shares)" },
+      });
+    }
+    // E below one unit of a small G is refused with the smallest E that works.
+    expect(await call(adminSave, ADMIN, draftParams({ slug: "acme-tiny", granularity: 300, equity_bps: 33 }))).toMatchObject({
+      status: 400,
+      body: { error: expect.stringMatching(/E must be at least 0\.34 %/) },
+    });
+  });
 });
 
 describe("POST /api/token-migrations/admin/transition", () => {

@@ -4607,7 +4607,12 @@ the company's Manci share class from the **treasury wallet**. The ratio:
 `lib/token-migration/ratio.ts` (E = the shareholders' decision in basis
 points, G = the units that make 100 %, the lot rounded **up** to a nice
 number so the effective equity never exceeds E; the units cap is
-`floor(S_old / L)`). Campaigns and deposits live in migration 0085
+`floor(S_old / L)`). G is 1,000,000 by default and may be any whole number
+from 100 to 10^12: a joint-stock company uses its **number of shares**, so
+one unit is one share (*Custom* in the draft's G list). The ratio stays
+exact for any G; a percentage of a G that does not divide evenly (one share
+of 37,000 is 0.0027027… %) is shown rounded and marked "≈" on the screens
+and in the final report. Campaigns and deposits live in migration 0085
 (`token_migrations`, `token_migration_deposits`); the routes are
 `app/api/token-migrations/*`; the screens are `/admin/migrations`,
 `/portfolio/migration` and the public `/migrations`.
@@ -4674,7 +4679,12 @@ What the server checks, every time (nothing from a browser is trusted):
 
 1. The shareholders' decision: E (the share for the holders) and the source
    of the units (transfer from the founders' shares, or a capital increase),
-   recorded off chain.
+   recorded off chain. For a joint-stock company G is its number of shares,
+   from the share register (with a capital increase as the source, the
+   count the decision fixes after the increase; counsel confirms it). Check
+   that one unit of the share class is the same share of the company the
+   asset's other pages state (its tokenize figures), so no page says two
+   different things about one unit.
 2. The **Swap Terms**, counsel's document for this campaign: the ratio and
    lot (from the saved draft), the window dates, the excluded supply, the
    treatment of irregular deposits (refund), of unclaimed units (back to the
@@ -4718,9 +4728,13 @@ What the server checks, every time (nothing from a browser is trusted):
 
 1. `/admin/migrations` → *+ New draft*: pick the share class, enter the old
    mint and the excluded wallets (team, treasury, liquidity pools,
-   exchanges), *Read the token*. The calculator shows S_old, N_target, the
-   lot, the units cap, E_eff and the warnings (too few units: raise G; a
-   lot that is not a whole number of tokens; E_eff more than 5 % below E).
+   exchanges), *Read the token*. Enter E and choose G (a preset, or
+   *Custom* with a joint-stock company's number of shares). The calculator
+   shows S_old, N_target, the lot, the units cap, E_eff and the warnings
+   (too few units: raise G, for a joint-stock company only after a share
+   split; a lot that is not a whole number of tokens; E_eff more than 5 %
+   below E). An E below one unit of a small G is refused with the smallest
+   E that works.
    Fill the window (60–90 days), the source, the unclaimed policy, the
    deposit owner and the treasury, *Save as draft*. The server reads the
    chain again and stores its own numbers: read them back on the campaign.

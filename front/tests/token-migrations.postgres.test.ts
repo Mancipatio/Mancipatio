@@ -134,6 +134,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     expect(() => create({ units_cap: "119999" })).toThrow(/check constraint/);
     expect(() => create({ lot_base_units: "4000", units_cap: "150000" })).toThrow(/check constraint/);
     expect(() => create({ excluded_amount: "400000001" })).toThrow(/check constraint/);
+    // A smaller G with the same lot and cap would let N_eff pass N_target.
     expect(() => create({ granularity: "50000" })).toThrow(/check constraint/);
     expect(() => create({ old_token_program: `'${addr("6")}'` })).toThrow(/check constraint/);
     expect(() => create({ terms_doc_url: "'http://example.com/terms'" })).toThrow(/check constraint/);
@@ -142,6 +143,25 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     expect(() => create({ slug: "'twice'" })).toThrow(/duplicate key/);
     expect(() => create({ status: "'open'" })).toThrow(/bare draft/);
     expect(() => create({ opened_slot: "5" })).toThrow(/bare draft/);
+  });
+
+  it("takes any whole G from 100 to 10^12 (a joint-stock company's number of shares) and refuses one outside", () => {
+    // Rows that keep every ratio CHECK (E 100 %, S_old = lot × G, cap = G), so only the G check can refuse one.
+    const atG = (g: string, lot: string) =>
+      create({
+        old_total_supply: (BigInt(g) * BigInt(lot)).toString(), excluded_wallet_amount: "0", excluded_manual_amount: "0", excluded_amount: "0",
+        equity_bps: "10000", granularity: g, lot_base_units: lot, units_cap: g,
+      });
+    for (const [g, lot] of [["100", "10"], ["37000", "1000"], ["50000", "20"], ["1000000000000", "1"]]) {
+      expect(atG(g, lot), g).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    expect(() => atG("99", "10")).toThrow(/token_migrations_granularity_check/);
+    expect(() => atG("1000000000001", "1")).toThrow(/token_migrations_granularity_check/);
+    // The worked example on 37,000 shares (E 12 %): N_target 4,440, lot 200,000, cap 3,000.
+    const id = create({ granularity: "37000", lot_base_units: "200000", units_cap: "3000" });
+    expect(db.query(`select granularity||'|'||lot_base_units||'|'||units_cap from public.token_migrations where id='${id}'`)).toBe("37000|200000|3000");
+    // G is still bound to the ratio: 37,000 with the 1,000,000-unit lot and cap breaks N_eff ≤ N_target.
+    expect(() => create({ granularity: "37000" })).toThrow(/check constraint/);
   });
 
   it("moves through its lifecycle, stamps each step and freezes the published terms and the opening slot", () => {

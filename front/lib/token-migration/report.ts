@@ -9,9 +9,11 @@
 // every amount is a decimal string (base units for the old token, whole
 // units for the class), deposits are in chain order (slot, then signature),
 // and the only clock in it is `completed_at`, which the caller passes in and
-// the database stores.
+// the database stores. The two percentages are display figures, rounded
+// half up and marked "≈ " when rounded (a G that is not a power of ten);
+// the unit counts and G beside them are the exact figures.
 
-import { formatPercentE4 } from "@/lib/token-migration/ratio";
+import { percentFigure, percentText } from "@/lib/token-migration/ratio";
 import { chainOrder, migrationProgress, type DepositRow, type MigrationRow } from "@/lib/token-migration/rows";
 
 export const FINAL_REPORT_KIND = "manci.token-migration.final-report";
@@ -86,7 +88,7 @@ export function buildFinalReport(row: MigrationRow, deposits: readonly DepositRo
       lot_base_units: row.lot_base_units,
       units_cap: row.units_cap,
       qualified_supply: (BigInt(row.old_total_supply) - BigInt(row.excluded_amount)).toString(),
-      cap_equity_percent: formatPercentE4((unitsCap * BigInt(1_000_000)) / granularity),
+      cap_equity_percent: percentText(percentFigure(unitsCap, granularity)),
     },
     totals: {
       deposits: deposits.length,
@@ -94,7 +96,7 @@ export function buildFinalReport(row: MigrationRow, deposits: readonly DepositRo
       old_tokens_exchanged: progress.depositedBase,
       units_delivered: progress.unitsDelivered,
       units_unclaimed: (unitsCap - unitsDelivered).toString(),
-      delivered_equity_percent: formatPercentE4((unitsDelivered * BigInt(1_000_000)) / granularity),
+      delivered_equity_percent: percentText(percentFigure(unitsDelivered, granularity)),
       old_tokens_refunded: progress.refundedBase,
     },
     deposits: [...deposits].sort(chainOrder).map((d) => ({

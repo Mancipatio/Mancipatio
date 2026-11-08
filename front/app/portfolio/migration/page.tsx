@@ -46,7 +46,7 @@ import { explainSendError } from "@/lib/tx-error";
 import { walletSigner } from "@/lib/wallet-signer";
 import { fetchPublicMigration, fetchPublicMigrations, precheckDeposit, recordMigrationDeposit } from "@/lib/token-migration/client";
 import { DEPOSIT_STATUS_LABEL, ratioSentence, windowStateAt } from "@/lib/token-migration/model";
-import { formatBaseUnits, formatPercentE4, formatUnits, lotsFor, unitPercent } from "@/lib/token-migration/ratio";
+import { formatBaseUnits, formatUnits, lotsFor, percentClause, percentFigure, percentText, unitPercent } from "@/lib/token-migration/ratio";
 import type { PublicDeposit, PublicMigration } from "@/lib/token-migration/rows";
 import { associatedTokenAccount, buildDepositInstructions } from "@/lib/token-migration/transactions";
 
@@ -61,8 +61,9 @@ function receiptMigration(receipt: PendingChainRecord): string {
   return receipt.entityId.split(":", 1)[0];
 }
 
+/** The holder's share of the company, marked "≈" when rounded. */
 function percentOf(units: bigint, granularity: number): string {
-  return formatPercentE4((units * BigInt(1_000_000)) / BigInt(granularity));
+  return percentText(percentFigure(units, BigInt(granularity)));
 }
 
 function dateText(iso: string): string {
@@ -345,7 +346,7 @@ function MigrationWorkspace() {
                   <Link href={`/migrations/${c.slug}`} className="text-xs text-brand-700 underline underline-offset-2">Campaign page and proof</Link>
                 </div>
                 <p className="mt-2 text-sm text-slate-700">
-                  {ratioSentence(formatBaseUnits(lot, c.old_decimals), c.old_symbol)}; 1 unit = {unitPercent(BigInt(c.granularity))} % of {c.company_name}.
+                  {ratioSentence(formatBaseUnits(lot, c.old_decimals), c.old_symbol)}; 1 unit {percentClause(unitPercent(BigInt(c.granularity)))} of {c.company_name}.
                 </p>
                 <dl className="mt-3 grid gap-x-6 gap-y-1 text-xs text-slate-600 sm:grid-cols-2">
                   <div><dt className="inline font-medium">Window: </dt><dd className="inline">{dateText(c.window_opens_at)} to {dateText(c.window_closes_at)}</dd></div>

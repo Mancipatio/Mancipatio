@@ -37,9 +37,15 @@ import {
   formatPercentE4,
   formatUnits,
   lotsFor,
+  MAX_GRANULARITY,
   MIGRATION_GRANULARITIES,
+  MIN_GRANULARITY,
   parseEquityPercent,
+  parseGranularity,
   parseTokenAmount,
+  percentClause,
+  percentFigure,
+  percentText,
   RatioInputError,
   unitPercent,
   type MigrationRatio,
@@ -50,6 +56,9 @@ import { Card, errorText, Field, inputClass, Notes, primaryButton, secondaryButt
 type ClassOption = { pda: string; label: string; assetName: string };
 
 const DAY_MS = 86_400_000;
+/** The granularity list's value for a G typed by hand (a joint-stock company: its number of shares). */
+const CUSTOM_GRANULARITY = "custom";
+const GRANULARITY_RANGE = `from ${formatUnits(MIN_GRANULARITY)} to ${formatUnits(MAX_GRANULARITY)}`;
 
 /** A datetime-local value (the browser's local time) for an ISO instant. */
 function localInput(iso: string): string {
@@ -79,7 +88,11 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
   const [manualText, setManualText] = useState(draft ? formatBaseUnits(BigInt(draft.excluded_manual_amount), draft.old_decimals).replace(/,/g, "") : "0");
   const [note, setNote] = useState(draft?.excluded_note ?? "");
   const [equityText, setEquityText] = useState(draft ? formatEquityBps(draft.equity_bps) : "");
-  const [granularity, setGranularity] = useState((draft ? BigInt(draft.granularity) : DEFAULT_GRANULARITY).toString());
+  // G: a preset, or "Custom" with the number typed in.
+  const draftGranularity = draft ? BigInt(draft.granularity) : DEFAULT_GRANULARITY;
+  const draftPreset = MIGRATION_GRANULARITIES.includes(draftGranularity);
+  const [granularityChoice, setGranularityChoice] = useState(draftPreset ? draftGranularity.toString() : CUSTOM_GRANULARITY);
+  const [customGranularity, setCustomGranularity] = useState(draftPreset ? "" : draftGranularity.toString());
   const [marketCap, setMarketCap] = useState("");
   const [valuation, setValuation] = useState("");
   const [source, setSource] = useState<string>(draft?.source ?? "founder_transfer");
@@ -129,6 +142,7 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
   const excluded = useMemo(() => linesOf(excludedText), [excludedText]);
   const inspectKey = `${oldMint.trim()}|${excluded.join(",")}|${shareClass}`;
   const current = inspect && inspect.key === inspectKey ? inspect.answer : null;
+  const granularity = granularityChoice === CUSTOM_GRANULARITY ? parseGranularity(customGranularity) : BigInt(granularityChoice);
 
   async function readToken() {
     if (!conn.wallet || inspecting) return;
@@ -152,12 +166,13 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
     if (manual === null) return { ratio: null, problem: `The manual excluded amount must be a number of whole tokens with at most ${decimals} decimals.` };
     const equityBps = parseEquityPercent(equityText);
     if (equityBps === null) return { ratio: null, problem: "Enter E as a percent between 0.01 and 100 (at most two decimals)." };
+    if (granularity === null) return { ratio: null, problem: `Enter G, the number of shares, as a whole number ${GRANULARITY_RANGE}.` };
     try {
       const ratio = computeMigrationRatio({
         oldTotalSupply: BigInt(current.old_mint.supply),
         excludedAmount: BigInt(current.excluded_total) + manual,
         equityBps,
-        granularity: BigInt(granularity),
+        granularity,
         decimals,
         marketCap: marketCap ? Number(marketCap) : null,
         valuation: valuation ? Number(valuation) : null,
@@ -191,7 +206,7 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
         excluded_manual_amount: (parseTokenAmount(manualText || "0", current.old_mint.decimals) ?? BigInt(0)).toString(),
         excluded_note: note.trim(),
         equity_bps: calc.ratio.equityBps,
-        granularity: Number(granularity),
+        granularity: calc.ratio.granularity.toString(),
         source,
         unclaimed_policy: unclaimed,
         deposit_owner: depositOwner.trim(),
@@ -259,11 +274,17 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
 
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
         <Field label="Share for the holders, E (%)" hint="The shareholders' decision."><input className={inputClass} value={equityText} onChange={(e) => setEquityText(e.target.value)} inputMode="decimal" placeholder="12" /></Field>
-        <Field label="Granularity G (units = 100 %)">
-          <select className={inputClass} value={granularity} onChange={(e) => setGranularity(e.target.value)}>
-            {MIGRATION_GRANULARITIES.map((g) => <option key={g.toString()} value={g.toString()}>{formatUnits(g)} (1 unit = {unitPercent(g)} %)</option>)}
+        <Field label="Granularity G (units = 100 %)" hint="1,000,000 by default. A joint-stock company uses its number of shares: one unit is then one share.">
+          <select className={inputClass} value={granularityChoice} onChange={(e) => setGranularityChoice(e.target.value)}>
+            {MIGRATION_GRANULARITIES.map((g) => <option key={g.toString()} value={g.toString()}>{formatUnits(g)} (1 unit {percentClause(unitPercent(g))})</option>)}
+            <option value={CUSTOM_GRANULARITY}>Custom (joint-stock company: number of shares)</option>
           </select>
         </Field>
+        {granularityChoice === CUSTOM_GRANULARITY && (
+          <Field label="G: the number of shares" hint={granularity !== null ? `1 unit ${percentClause(unitPercent(granularity))} of the company.` : `A whole number ${GRANULARITY_RANGE}.`}>
+            <input className={inputClass} value={customGranularity} onChange={(e) => setCustomGranularity(e.target.value)} inputMode="numeric" placeholder="37,000" />
+          </Field>
+        )}
         <Field label="Example holder (whole tokens)"><input className={inputClass} value={example} onChange={(e) => setExample(e.target.value)} inputMode="decimal" /></Field>
         <Field label="Market cap of the qualified supply (optional)"><input className={inputClass} value={marketCap} onChange={(e) => setMarketCap(e.target.value)} inputMode="decimal" /></Field>
         <Field label="Company valuation, same currency (optional)" hint="Parity reference only: it never changes the ratio."><input className={inputClass} value={valuation} onChange={(e) => setValuation(e.target.value)} inputMode="decimal" /></Field>
@@ -276,11 +297,11 @@ export function DraftEditor({ draft, onSaved, onCancel }: { draft: MigrationRow 
             <div><dt className="inline text-slate-500">Units the decision allows N_target: </dt><dd className="inline font-mono">{formatUnits(r.targetUnits)}</dd></div>
             <div><dt className="inline text-slate-500">Lot L (rounded up): </dt><dd className="inline font-mono">{formatBaseUnits(r.lot, decimals)} {oldSymbol || "tokens"}</dd></div>
             <div><dt className="inline text-slate-500">Units cap N_eff: </dt><dd className="inline font-mono">{formatUnits(r.unitsCap)}</dd></div>
-            <div><dt className="inline text-slate-500">Effective share E_eff: </dt><dd className="inline font-mono">{formatPercentE4(r.effectivePercentE4)} % (decided {formatPercentE4(r.equityPercentE4)} %)</dd></div>
+            <div><dt className="inline text-slate-500">Effective share E_eff: </dt><dd className="inline font-mono">{percentText(r.effectiveShare)} % (decided {formatPercentE4(r.equityPercentE4)} %)</dd></div>
             <div><dt className="inline text-slate-500">Parity reference: </dt><dd className="inline font-mono">{formatParityPercent(r.parityPercent) ? `${formatParityPercent(r.parityPercent)} %` : "—"}</dd></div>
             {exampleBase !== null && exampleBase > BigInt(0) && (
               <div className="sm:col-span-2"><dt className="inline text-slate-500">Example holder: </dt><dd className="inline">
-                {formatUnits(lotsFor(exampleBase, r.lot))} lots = {formatUnits(lotsFor(exampleBase, r.lot))} units ({formatPercentE4((lotsFor(exampleBase, r.lot) * BigInt(1_000_000)) / r.granularity)} %); {formatBaseUnits(exampleBase % r.lot, decimals)} {oldSymbol || "tokens"} stay in the wallet
+                {formatUnits(lotsFor(exampleBase, r.lot))} lots = {formatUnits(lotsFor(exampleBase, r.lot))} units ({percentText(percentFigure(lotsFor(exampleBase, r.lot), r.granularity))} %); {formatBaseUnits(exampleBase % r.lot, decimals)} {oldSymbol || "tokens"} stay in the wallet
               </dd></div>
             )}
           </dl>

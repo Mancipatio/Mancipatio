@@ -21,7 +21,7 @@ import {
   TOKEN_PROGRAM_2022,
   UNCLAIMED_POLICY_LABEL,
 } from "@/lib/token-migration/model";
-import { formatBaseUnits, formatEquityBps, formatPercentE4, formatUnits, unitPercent } from "@/lib/token-migration/ratio";
+import { formatBaseUnits, formatEquityBps, formatUnits, percentFigure, percentText, unitPercent } from "@/lib/token-migration/ratio";
 import type { PublicMigration } from "@/lib/token-migration/rows";
 import { dateText, HowItWorks, MigrationModuleNotice, ratioWords } from "../shared";
 
@@ -79,8 +79,9 @@ export default async function MigrationCampaignPage({ params }: { params: Promis
   const granularity = BigInt(m.granularity);
   const deposited = BigInt(m.progress.depositedBase);
   const delivered = BigInt(m.progress.unitsDelivered);
-  const capPercent = formatPercentE4((cap * BigInt(1_000_000)) / granularity);
-  const depositedShare = qualified > BigInt(0) ? formatPercentE4((deposited * BigInt(1_000_000)) / qualified) : "0.0000";
+  // Rounded figures carry "≈" (a G that is not a power of ten rarely divides evenly).
+  const capPercent = percentText(percentFigure(cap, granularity));
+  const depositedShare = qualified > BigInt(0) ? percentText(percentFigure(deposited, qualified)) : "0.0000";
   const link = (href: string, text: string) => (
     <a href={href} target="_blank" rel="noopener noreferrer" className="font-mono text-brand-700 underline underline-offset-2">{text}</a>
   );
@@ -97,7 +98,7 @@ export default async function MigrationCampaignPage({ params }: { params: Promis
         <H2>The campaign</H2>
         <dl className="mt-4">
           <Fact label="Ratio">{formatUnits(BigInt(1))} unit for every {formatBaseUnits(lot, m.old_decimals)} {m.old_symbol} (the lot). Deposits are whole lots, at least one.</Fact>
-          <Fact label="One unit">{unitPercent(granularity)} % of {m.company_name} ({formatUnits(granularity)} units make 100 %)</Fact>
+          <Fact label="One unit">{percentText(unitPercent(granularity))} % of {m.company_name} ({formatUnits(granularity)} units make 100 %)</Fact>
           <Fact label="Share for the holders">{formatEquityBps(m.equity_bps)} % decided; at most {formatUnits(cap)} units ({capPercent} %) can be delivered, the lot being rounded up</Fact>
           <Fact label="Opt-in window">{dateText(m.window_opens_at)} to {dateText(m.window_closes_at)}</Fact>
           <Fact label="Where the units come from">{MIGRATION_SOURCE_LABEL[m.source]}. {UNCLAIMED_POLICY_LABEL[m.unclaimed_policy]}.</Fact>

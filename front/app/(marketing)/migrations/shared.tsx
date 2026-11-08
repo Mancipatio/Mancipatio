@@ -6,7 +6,7 @@ import { Steps } from "@/components/mx";
 import { moduleEnabled } from "@/lib/features";
 import type { ModuleRouteState } from "@/lib/pilot-scope";
 import { ratioSentence } from "@/lib/token-migration/model";
-import { formatBaseUnits, unitPercent } from "@/lib/token-migration/ratio";
+import { formatBaseUnits, percentClause, unitPercent } from "@/lib/token-migration/ratio";
 
 const OFF_STATE: ModuleRouteState = {
   route: { prefix: "/migrations", modules: ["tokenMigration"], mode: "gate" },
@@ -20,9 +20,9 @@ export function MigrationModuleNotice() {
   return <PilotModuleNotice state={OFF_STATE} gate />;
 }
 
-/** "1 Manci unit for every 5,000 OLD; 1 unit = 0.0001 % of Acme d.o.o." */
+/** "1 Manci unit for every 5,000 OLD; 1 unit = 0.0001 % of Acme d.o.o." ("≈" when the share is rounded). */
 export function ratioWords(m: { lot_base_units: string; old_decimals: number; old_symbol: string; granularity: number; company_name: string }): string {
-  return `${ratioSentence(formatBaseUnits(BigInt(m.lot_base_units), m.old_decimals), m.old_symbol)}; 1 unit = ${unitPercent(BigInt(m.granularity))} % of ${m.company_name}`;
+  return `${ratioSentence(formatBaseUnits(BigInt(m.lot_base_units), m.old_decimals), m.old_symbol)}; 1 unit ${percentClause(unitPercent(BigInt(m.granularity)))} of ${m.company_name}`;
 }
 
 export function dateText(iso: string): string {

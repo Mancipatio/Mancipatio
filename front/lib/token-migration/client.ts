@@ -135,7 +135,8 @@ export type DraftInput = {
   excluded_manual_amount: string;
   excluded_note: string;
   equity_bps: number;
-  granularity: number;
+  /** G as a decimal string: a whole number of units from 100 to 10^12. */
+  granularity: string;
   source: string;
   unclaimed_policy: string;
   deposit_owner: string;

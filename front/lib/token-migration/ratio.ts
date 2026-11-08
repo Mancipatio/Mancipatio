@@ -16,6 +16,13 @@
 //   N_eff    = floor(S_old / L) ≤ N_target              (the units cap)
 //   E_eff    = N_eff × 10000 / G bps ≤ E
 //
+// G is any whole number of units from 100 to 10^12: 1,000,000 by default
+// (MIGRATION_GRANULARITIES are the calculator's presets) and, for a
+// joint-stock company, its number of shares, so that one unit is one share.
+// Whatever G is, every figure above stays an exact bigint; only a
+// percentage shown to a person is rounded, and then marked "≈"
+// (percentFigure, percentText, percentClause).
+//
 // Rounding the lot UP is the point: the effective equity can only fall short
 // of the shareholders' decision E, never exceed it, so the sum of delivered
 // units can never pass what the decision covers. A holder deposits exact
@@ -33,7 +40,15 @@ const BPS = BigInt(10_000);
 /** The largest SPL token amount (u64::MAX): no supply, balance or lot can exceed it. */
 export const U64_MAX = BigInt("18446744073709551615");
 
-/** The granularities a migration class may use: how many units make 100 % of the company. */
+/** The smallest granularity G: one unit is then 1 % of the company. */
+export const MIN_GRANULARITY = BigInt(100);
+/** The largest granularity G, 10^12 (below 2^53: any valid G is also an exact JavaScript number). */
+export const MAX_GRANULARITY = BigInt("1000000000000");
+/**
+ * The calculator's suggested granularities: how many units make 100 % of the
+ * company. Any whole G from MIN_GRANULARITY to MAX_GRANULARITY is valid; a
+ * joint-stock company uses its number of shares (owner decision 2026-11-08).
+ */
 export const MIGRATION_GRANULARITIES: readonly bigint[] = [
   BigInt(10_000),
   BigInt(100_000),
@@ -43,7 +58,7 @@ export const MIGRATION_GRANULARITIES: readonly bigint[] = [
 /** Owner decision 2026-11-08: the standard granularity of a migration class. */
 export const DEFAULT_GRANULARITY = BigInt(1_000_000);
 
-/** Below this many units in the cap, a unit is too coarse for a community: raise G. */
+/** Below this many units in the cap, a unit is too coarse for a community: raise G (a joint-stock company: split its shares). */
 export const MIN_COMFORTABLE_UNITS = BigInt(1_000);
 /** E_eff may fall short of E by at most this share before the calculator warns (5 %). */
 export const MAX_EQUITY_SHORTFALL_PERCENT = 5;
@@ -64,7 +79,7 @@ export type MigrationRatioInput = {
   excludedAmount: bigint;
   /** E: the share of the company for the holders, in basis points (1..10000). */
   equityBps: number;
-  /** G: units that make 100 % (one of MIGRATION_GRANULARITIES; default 1,000,000). */
+  /** G: units that make 100 %, a whole number from 100 to 10^12 (default 1,000,000; a joint-stock company: its number of shares). */
   granularity?: bigint;
   /** The old token's decimals (0..18): only the warnings and the display read it. */
   decimals: number;
@@ -93,8 +108,10 @@ export type MigrationRatio = {
   lot: bigint;
   /** N_eff = floor(S_old / L): the most units the migration can deliver (0 only with the "no_units" warning). */
   unitsCap: bigint;
-  /** E_eff in percent × 10^4 (floor): 120000 is 12.0000 %. */
+  /** E_eff in percent × 10^4, rounded down (120000 is 12.0000 %): for comparisons; show `effectiveShare`. */
   effectivePercentE4: bigint;
+  /** E_eff for a person to read: rounded half up, `exact` false when that dropped digits (often, with a G that is not a power of ten). */
+  effectiveShare: PercentFigure;
   /** E in percent × 10^4 (E bps × 100). */
   equityPercentE4: bigint;
   /** E_par = marketCap / valuation in percent, or null when either is missing. Display only. */
@@ -102,8 +119,9 @@ export type MigrationRatio = {
   warnings: RatioWarning[];
 };
 
-function isGranularity(value: bigint): boolean {
-  return MIGRATION_GRANULARITIES.some((g) => g === value);
+/** True for a granularity a migration class may use: a whole number of units from 100 to 10^12. */
+export function isValidGranularity(value: unknown): value is bigint {
+  return typeof value === "bigint" && value >= MIN_GRANULARITY && value <= MAX_GRANULARITY;
 }
 
 /** 10^n as a bigint. */
@@ -152,7 +170,8 @@ function parityPercent(marketCap: number | null | undefined, valuation: number |
  * The ratio, its cap and its warnings. THROWS RatioInputError for an input
  * the migration cannot use: a supply outside 1..u64::MAX, an excluded amount
  * that leaves nothing qualified, E outside 1..10000 bps, a granularity that
- * is not one of MIGRATION_GRANULARITIES, decimals outside 0..18.
+ * is not a whole number from 100 to 10^12, an E that is less than one unit
+ * of that granularity, decimals outside 0..18.
  */
 export function computeMigrationRatio(input: MigrationRatioInput): MigrationRatio {
   const { oldTotalSupply, excludedAmount, equityBps, decimals } = input;
@@ -169,8 +188,8 @@ export function computeMigrationRatio(input: MigrationRatioInput): MigrationRati
   if (!Number.isSafeInteger(equityBps) || equityBps < 1 || equityBps > 10_000) {
     throw new RatioInputError("The equity share E must be between 1 and 10,000 basis points (0.01 % to 100 %).");
   }
-  if (typeof granularity !== "bigint" || !isGranularity(granularity)) {
-    throw new RatioInputError("The granularity must be 10,000, 100,000, 1,000,000 or 10,000,000 units.");
+  if (!isValidGranularity(granularity)) {
+    throw new RatioInputError(`The granularity G must be a whole number of units from ${formatUnits(MIN_GRANULARITY)} to ${formatUnits(MAX_GRANULARITY)}.`);
   }
   if (!Number.isSafeInteger(decimals) || decimals < 0 || decimals > MAX_OLD_DECIMALS) {
     throw new RatioInputError(`The old token's decimals must be between 0 and ${MAX_OLD_DECIMALS}.`);
@@ -178,12 +197,19 @@ export function computeMigrationRatio(input: MigrationRatioInput): MigrationRati
 
   const qualifiedSupply = oldTotalSupply - excludedAmount;
   const targetUnits = (BigInt(equityBps) * granularity) / BPS;
-  // E ≥ 1 bps and G ≥ 10,000 make N_target ≥ 1. The smallest integer ≥ rawLot
-  // is ceil(S_old / N_target); nice numbers are integers, so the smallest nice
-  // number ≥ that integer is the smallest nice number ≥ rawLot.
+  if (targetUnits < ONE) {
+    // Only a G below 10,000 gets here: E × G under 10,000 bps is not one whole unit.
+    throw new RatioInputError(
+      `At G = ${formatUnits(granularity)} units, E = ${formatEquityBps(equityBps)} % is less than one unit: E must be at least ${formatEquityBps(Number(ceilDiv(BPS, granularity)))} %.`,
+    );
+  }
+  // N_target ≥ 1. The smallest integer ≥ rawLot is ceil(S_old / N_target);
+  // nice numbers are integers, so the smallest nice number ≥ that integer is
+  // the smallest nice number ≥ rawLot.
   const lot = niceLotAtLeast(ceilDiv(qualifiedSupply, targetUnits));
   const unitsCap = qualifiedSupply / lot;
   const effectivePercentE4 = (unitsCap * BigInt(100) * BPS) / granularity;
+  const effectiveShare = percentFigure(unitsCap, granularity);
   const equityPercentE4 = BigInt(equityBps) * BigInt(100);
 
   const warnings: RatioWarning[] = [];
@@ -198,7 +224,7 @@ export function computeMigrationRatio(input: MigrationRatioInput): MigrationRati
   } else if (unitsCap < MIN_COMFORTABLE_UNITS) {
     warnings.push({
       code: "few_units",
-      text: `Only ${formatUnits(unitsCap)} units can be delivered: one unit is too coarse for a community of holders. Raise the granularity G.`,
+      text: `Only ${formatUnits(unitsCap)} units can be delivered: one unit is too coarse for a community of holders. Raise the granularity G; when G is a joint-stock company's number of shares, that takes a share split first.`,
     });
   }
   const whole = pow10(decimals);
@@ -214,7 +240,7 @@ export function computeMigrationRatio(input: MigrationRatioInput): MigrationRati
   if (unitsCap > ZERO && shortfall * BigInt(100) > decided * BigInt(MAX_EQUITY_SHORTFALL_PERCENT)) {
     warnings.push({
       code: "equity_shortfall",
-      text: `Rounding the lot up leaves the holders ${formatPercentE4(effectivePercentE4)} % instead of the decided ${formatPercentE4(equityPercentE4)} %, more than ${MAX_EQUITY_SHORTFALL_PERCENT} % short. Consider a finer granularity G or a different E.`,
+      text: `Rounding the lot up leaves the holders ${percentText(effectiveShare)} % instead of the decided ${formatPercentE4(equityPercentE4)} %, more than ${MAX_EQUITY_SHORTFALL_PERCENT} % short. Consider a finer granularity G or a different E.`,
     });
   }
 
@@ -230,6 +256,7 @@ export function computeMigrationRatio(input: MigrationRatioInput): MigrationRati
     lot,
     unitsCap,
     effectivePercentE4,
+    effectiveShare,
     equityPercentE4,
     parityPercent: parityPercent(input.marketCap, input.valuation),
     warnings,
@@ -328,16 +355,69 @@ export function parseEquityPercent(text: string): number | null {
   return bps >= 1 && bps <= 10_000 ? bps : null;
 }
 
-/** The share of the company one unit is, in percent: G = 1,000,000 → "0.0001". */
-export function unitPercent(granularity: bigint): string {
+/**
+ * A percentage for a person to read: `text` without the "%" sign, and
+ * whether it is the exact value or a rounded one.
+ */
+export type PercentFigure = { text: string; exact: boolean };
+
+/** The decimals a percent figure shows, and the most it grows to for a tiny share. */
+const FIGURE_DECIMALS = 4;
+const FIGURE_MAX_DECIMALS = 12;
+
+/**
+ * part / whole in percent, rounded half up to 4 decimals ("12.0000"). A
+ * positive share below 0.01 % gets the decimals two significant digits need
+ * (at most 12: one unit of G = 10^12 is "0.0000000001"), with trailing zeros
+ * past the fourth trimmed. `exact` is false when the rounding dropped
+ * digits, which a G that is not a power of ten often does (3,000 units of
+ * G = 37,000 are 8.108108… %): show the figure with percentText or
+ * percentClause, which mark it "≈", never as a bare number.
+ */
+export function percentFigure(part: bigint, whole: bigint): PercentFigure {
+  if (whole < ONE || part < ZERO) throw new RatioInputError("Invalid share");
+  const hundredfold = part * BigInt(100);
+  let decimals = FIGURE_DECIMALS;
+  while (part > ZERO && decimals < FIGURE_MAX_DECIMALS && hundredfold * pow10(decimals) < TEN * whole) decimals += 1;
+  const scaled = hundredfold * pow10(decimals);
+  const rounded = (BigInt(2) * scaled + whole) / (BigInt(2) * whole);
+  const digits = rounded.toString().padStart(decimals + 1, "0");
+  let fraction = digits.slice(-decimals);
+  if (decimals > FIGURE_DECIMALS) fraction = fraction.replace(/0+$/, "").padEnd(FIGURE_DECIMALS, "0");
+  return { text: `${group(digits.slice(0, -decimals))}.${fraction}`, exact: scaled % whole === ZERO };
+}
+
+/** "12.0000" for an exact figure, "≈ 8.1081" for a rounded one (add " %"). */
+export function percentText(figure: PercentFigure): string {
+  return figure.exact ? figure.text : `≈ ${figure.text}`;
+}
+
+/** "= 0.0001 %" or "≈ 0.0027 %", for sentences such as "1 unit ≈ 0.0027 % of Acme". */
+export function percentClause(figure: PercentFigure): string {
+  return `${figure.exact ? "=" : "≈"} ${figure.text} %`;
+}
+
+/**
+ * The share of the company one unit is, trailing zeros trimmed: G = 1,000,000
+ * → "0.0001" (exact), G = 50,000 → "0.002" (exact), G = 37,000 → "0.0027"
+ * (rounded: 0.0027027… %).
+ */
+export function unitPercent(granularity: bigint): PercentFigure {
   if (granularity < ONE) throw new RatioInputError("Invalid granularity");
-  // 100 / G with enough decimals for any power-of-ten G (trailing zeros trimmed).
-  const scale = granularity.toString().length + 1;
-  const e = (BigInt(100) * pow10(scale)) / granularity;
-  const digits = e.toString().padStart(scale + 1, "0");
-  const whole = digits.slice(0, -scale);
-  const fraction = digits.slice(-scale).replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole;
+  const figure = percentFigure(ONE, granularity);
+  return { text: figure.text.replace(/\.?0+$/, ""), exact: figure.exact };
+}
+
+/**
+ * G typed by a person ("37000", "37,000"): the bigint, or null when it is
+ * not a whole number of units from 100 to 10^12. Commas and spaces are
+ * grouping only.
+ */
+export function parseGranularity(text: string): bigint | null {
+  const value = text.trim().replace(/[,\s]/g, "");
+  if (!/^\d{1,13}$/.test(value)) return null;
+  const granularity = BigInt(value);
+  return isValidGranularity(granularity) ? granularity : null;
 }
 
 /** The parity reference as "14.3" (one decimal at most; display only). */

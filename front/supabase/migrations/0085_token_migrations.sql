@@ -96,7 +96,9 @@ create table if not exists public.token_migrations (
   -- The ratio (lib/token-migration/ratio.ts is the authority; the CHECKs
   -- below keep a hand-edited row consistent with its invariants).
   equity_bps integer not null check (equity_bps between 1 and 10000),
-  granularity bigint not null default 1000000 check (granularity in (10000, 100000, 1000000, 10000000)),
+  -- G: 1,000,000 by default, any whole number from 100 to 10^12 (a
+  -- joint-stock company: its number of shares, one unit per share).
+  granularity bigint not null default 1000000 check (granularity between 100 and 1000000000000),
   lot_base_units numeric(39, 0) not null check (lot_base_units >= 1),
   units_cap numeric(39, 0) not null check (units_cap >= 1),
   source text not null check (source in ('founder_transfer', 'capital_increase')),

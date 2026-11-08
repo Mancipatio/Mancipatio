@@ -2,7 +2,9 @@
 // is the smallest nice integer at or above S_old / N_target, so the units cap
 // never exceeds what the shareholders' decision E allows. Exhaustive fixtures
 // (decimals 0/6/9/18, tiny and huge supplies up to u64::MAX, E = 1 and 10000
-// bps, every granularity) and the invariants on every one of them.
+// bps, every preset granularity and custom ones from 100 to 10^12, a
+// joint-stock company's number of shares) and the invariants on every one of
+// them, including the rounded-and-marked percentages a person reads.
 import { describe, expect, it } from "vitest";
 import {
   computeMigrationRatio,
@@ -14,17 +16,25 @@ import {
   formatPercentE4,
   formatUnits,
   isNiceLot,
+  isValidGranularity,
   lotsFor,
+  MAX_GRANULARITY,
   MIGRATION_GRANULARITIES,
+  MIN_GRANULARITY,
   niceLotAtLeast,
   parseEquityPercent,
+  parseGranularity,
   parseTokenAmount,
+  percentClause,
+  percentFigure,
+  percentText,
   pow10,
   RatioInputError,
   U64_MAX,
   unitPercent,
   unitsForDeposit,
   type MigrationRatio,
+  type PercentFigure,
 } from "@/lib/token-migration/ratio";
 
 const B = (v: number | string) => BigInt(v);
@@ -41,6 +51,18 @@ function niceNumbers(digits: number): bigint[] {
     out.push(B(5) * p);
   }
   return [...new Set(out)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * A percent figure is part / whole × 100 rounded to its last shown digit, and
+ * "exact" only when nothing was dropped (every digit checked in bigint).
+ */
+function checkFigure(figure: PercentFigure, part: bigint, whole: bigint, minDecimals = 4) {
+  const [intPart, fraction = ""] = figure.text.replace(/,/g, "").split(".");
+  expect(fraction.length >= minDecimals, `${figure.text}: at least ${minDecimals} decimals`).toBe(true);
+  const error = B(intPart + fraction) * whole - part * B(100) * pow10(fraction.length);
+  expect(B(2) * (error < ZERO ? -error : error) <= whole, `${figure.text}: rounded to its last digit`).toBe(true);
+  expect(figure.exact, `${figure.text}: exact only when nothing was dropped`).toBe(error === ZERO);
 }
 
 /** The invariants every ratio must satisfy. */
@@ -64,6 +86,7 @@ function checkInvariants(r: MigrationRatio) {
   // E_eff ≤ E, exactly: N_eff × 10000 ≤ E × G.
   expect(r.unitsCap * B(10_000) <= B(r.equityBps) * r.granularity, `${label}: E_eff ≤ E`).toBe(true);
   expect(r.effectivePercentE4 <= r.equityPercentE4, `${label}: E_eff% ≤ E%`).toBe(true);
+  checkFigure(r.effectiveShare, r.unitsCap, r.granularity);
   expect(r.targetUnits).toBe((B(r.equityBps) * r.granularity) / B(10_000));
   expect(r.qualifiedSupply).toBe(r.oldTotalSupply - r.excludedAmount);
 }
@@ -182,6 +205,43 @@ describe("computeMigrationRatio: fixtures", () => {
     }
   });
 
+  it("satisfies every invariant with a custom G on the grid, and refuses an E below one unit of it", () => {
+    const customs = [B(100), B(101), B(337), B(9_999), B(37_000), B(50_000), B(123_456_789), B("999999999989"), pow10(12)];
+    let count = 0;
+    for (const supply of supplies) {
+      for (const equityBps of equities) {
+        for (const granularity of customs) {
+          const input = { oldTotalSupply: supply, excludedAmount: ZERO, equityBps, granularity, decimals: 6 };
+          if (B(equityBps) * granularity < B(10_000)) {
+            expect(() => computeMigrationRatio(input)).toThrow(RatioInputError);
+            continue;
+          }
+          checkInvariants(computeMigrationRatio(input));
+          checkFigure(unitPercent(granularity), ONE, granularity, 0);
+          count++;
+        }
+      }
+    }
+    expect(count).toBeGreaterThan(500);
+  });
+
+  it("satisfies every invariant on 4,000 pseudo-random custom G from 100 to 10^12", () => {
+    const next = rng(B("5165161616161"));
+    const span = MAX_GRANULARITY - MIN_GRANULARITY + ONE;
+    for (let i = 0; i < 4_000; i++) {
+      const digits = Number(next() % B(20)) + 1;
+      const supply = (next() % pow10(digits)) + ONE;
+      const clamped = supply > U64_MAX ? U64_MAX : supply;
+      const excluded = clamped > ONE ? next() % clamped : ZERO;
+      const equityBps = Number(next() % B(10_000)) + 1;
+      // Half the draws over the whole range, half among small share counts.
+      const granularity = MIN_GRANULARITY + (i % 2 === 0 ? next() % span : next() % B(100_000));
+      const input = { oldTotalSupply: clamped, excludedAmount: excluded, equityBps, granularity, decimals: Number(next() % B(19)) };
+      if (B(equityBps) * granularity < B(10_000)) expect(() => computeMigrationRatio(input)).toThrow(RatioInputError);
+      else checkInvariants(computeMigrationRatio(input));
+    }
+  });
+
   it("E = 1 bps on the smallest granularity: one unit, the whole qualified supply as its lot (rounded up to nice)", () => {
     const r = computeMigrationRatio({ oldTotalSupply: B(1_000_000), excludedAmount: ZERO, equityBps: 1, granularity: B(10_000), decimals: 0 });
     expect(r.targetUnits).toBe(ONE);
@@ -212,6 +272,68 @@ describe("computeMigrationRatio: fixtures", () => {
     checkInvariants(r);
     expect(r.lot).toBe(B("2000000000000"));
     expect(r.unitsCap).toBe(B(9_223_372));
+  });
+});
+
+describe("computeMigrationRatio: a custom G (a joint-stock company's number of shares)", () => {
+  // The worked example's supply (1e9 total, 4e8 excluded, E 12 %) on 50,000 and on 37,000 shares.
+  const shares = (granularity: bigint, decimals: number) =>
+    computeMigrationRatio({ oldTotalSupply: B(1_000_000_000) * pow10(decimals), excludedAmount: B(400_000_000) * pow10(decimals), equityBps: 1200, granularity, decimals });
+
+  it.each([0, 9])("G = 50,000: N_target 6,000, lot 100,000 whole tokens, cap 6,000, E_eff exactly 12 %% (decimals %i)", (decimals) => {
+    const r = shares(B(50_000), decimals);
+    checkInvariants(r);
+    expect(r.targetUnits).toBe(B(6_000));
+    expect(r.rawLot).toEqual({ numerator: B(600_000_000) * pow10(decimals), denominator: B(6_000) });
+    expect(r.lot).toBe(B(100_000) * pow10(decimals));
+    expect(r.unitsCap).toBe(B(6_000));
+    expect(r.effectivePercentE4).toBe(B(120_000));
+    expect(r.effectiveShare).toEqual({ text: "12.0000", exact: true });
+    expect(r.warnings).toEqual([]);
+    // 100 / 50,000 ends: one unit is exactly 0.002 %, so nothing is marked.
+    expect(unitPercent(r.granularity)).toEqual({ text: "0.002", exact: true });
+    expect(percentClause(unitPercent(r.granularity))).toBe("= 0.002 %");
+    expect(percentText(percentFigure(B(1_234), r.granularity))).toBe("2.4680");
+  });
+
+  it.each([0, 9])("G = 37,000: N_target 4,440, lot 200,000 whole tokens, cap 3,000, E_eff ≈ 8.1081 %% (decimals %i)", (decimals) => {
+    const r = shares(B(37_000), decimals);
+    checkInvariants(r);
+    expect(r.targetUnits).toBe(B(4_440)); // 1200 × 37,000 / 10,000, exactly
+    expect(r.rawLot).toEqual({ numerator: B(600_000_000) * pow10(decimals), denominator: B(4_440) });
+    // ceil(600,000,000 / 4,440) = 135,136 whole tokens, rounded up to the next nice number.
+    expect(r.lot).toBe(B(200_000) * pow10(decimals));
+    expect(r.unitsCap).toBe(B(3_000));
+    // E_eff = 3,000 / 37,000 = 8.108108… %: exact as a fraction, rounded only where a person reads it.
+    expect(r.unitsCap * B(10_000) <= B(r.equityBps) * r.granularity).toBe(true);
+    expect(r.effectivePercentE4).toBe(B(81_081));
+    expect(r.effectiveShare).toEqual({ text: "8.1081", exact: false });
+    expect(percentText(r.effectiveShare)).toBe("≈ 8.1081");
+    expect(r.warnings.map((w) => w.code)).toEqual(["equity_shortfall"]);
+    expect(r.warnings[0].text).toContain("leaves the holders ≈ 8.1081 % instead of the decided 12.0000 %");
+    // One share is 1/37,000 of the company, 0.0027027… %.
+    expect(unitPercent(r.granularity)).toEqual({ text: "0.0027", exact: false });
+    expect(percentClause(unitPercent(r.granularity))).toBe("≈ 0.0027 %");
+    // 4,440 shares are exactly 12 %: a round figure is not marked.
+    expect(percentFigure(B(4_440), r.granularity)).toEqual({ text: "12.0000", exact: true });
+  });
+
+  it("few units also covers a joint-stock company with a small number of shares", () => {
+    const r = computeMigrationRatio({ oldTotalSupply: B(1_000_000), excludedAmount: ZERO, equityBps: 10_000, granularity: B(500), decimals: 0 });
+    expect(r.targetUnits).toBe(B(500));
+    expect(r.lot).toBe(B(2_000));
+    expect(r.unitsCap).toBe(B(500));
+    expect(r.warnings.map((w) => w.code)).toEqual(["few_units"]);
+    expect(r.warnings[0].text).toContain("Raise the granularity G; when G is a joint-stock company's number of shares, that takes a share split first.");
+  });
+
+  it("refuses an E that is less than one unit of a small G, naming the smallest E that works", () => {
+    const base = { oldTotalSupply: B(1_000_000), excludedAmount: ZERO, decimals: 0 };
+    expect(() => computeMigrationRatio({ ...base, equityBps: 33, granularity: B(300) })).toThrow("At G = 300 units, E = 0.33 % is less than one unit: E must be at least 0.34 %.");
+    expect(() => computeMigrationRatio({ ...base, equityBps: 99, granularity: B(100) })).toThrow("E must be at least 1 %.");
+    const r = computeMigrationRatio({ ...base, equityBps: 34, granularity: B(300) });
+    expect(r.targetUnits).toBe(ONE);
+    checkInvariants(r);
   });
 });
 
@@ -271,7 +393,12 @@ describe("computeMigrationRatio: refused inputs", () => {
     ["E = 0", { equityBps: 0 }],
     ["E over 100 %", { equityBps: 10_001 }],
     ["E not an integer", { equityBps: 12.5 }],
-    ["G not allowed", { granularity: B(50_000) }],
+    ["G below 100", { granularity: B(99) }],
+    ["G above 10^12", { granularity: pow10(12) + ONE }],
+    ["G zero", { granularity: ZERO }],
+    ["G negative", { granularity: B(-37_000) }],
+    ["G not an integer", { granularity: 37_000.5 as unknown as bigint }],
+    ["G a number, not a bigint", { granularity: 37_000 as unknown as bigint }],
     ["decimals 19", { decimals: 19 }],
     ["negative decimals", { decimals: -1 }],
   ])("%s", (_name, over) => {
@@ -331,7 +458,48 @@ describe("display helpers", () => {
     for (const bad of ["0", "100.01", "12.345", "-1", "abc", ""]) expect(parseEquityPercent(bad), bad).toBeNull();
   });
 
-  it("says what one unit is of the company for every granularity", () => {
-    expect(MIGRATION_GRANULARITIES.map(unitPercent)).toEqual(["0.01", "0.001", "0.0001", "0.00001"]);
+  it("says what one unit is of the company: exact when 100 / G ends, marked ≈ when rounded", () => {
+    expect(MIGRATION_GRANULARITIES.map((g) => unitPercent(g).text)).toEqual(["0.01", "0.001", "0.0001", "0.00001"]);
+    expect(MIGRATION_GRANULARITIES.every((g) => unitPercent(g).exact)).toBe(true);
+    expect(unitPercent(B(100))).toEqual({ text: "1", exact: true });
+    expect(unitPercent(B(50_000))).toEqual({ text: "0.002", exact: true });
+    expect(unitPercent(pow10(12))).toEqual({ text: "0.0000000001", exact: true });
+    expect(unitPercent(B(37_000))).toEqual({ text: "0.0027", exact: false });
+    expect(unitPercent(B(300))).toEqual({ text: "0.3333", exact: false });
+    expect(unitPercent(B(7) * pow10(11))).toEqual({ text: "0.00000000014", exact: false });
+    expect(percentClause(unitPercent(B(1_000_000)))).toBe("= 0.0001 %");
+    expect(percentClause(unitPercent(B(37_000)))).toBe("≈ 0.0027 %");
+    expect(() => unitPercent(ZERO)).toThrow(RatioInputError);
+  });
+
+  it("rounds a share half up to 4 decimals (more for a tiny one) and marks every rounded figure", () => {
+    expect(percentFigure(B(120_000), B(1_000_000))).toEqual({ text: "12.0000", exact: true });
+    expect(percentFigure(B(19), B(37_000))).toEqual({ text: "0.0514", exact: false }); // 0.051351… % rounds up
+    expect(percentFigure(B(1), B(37_000))).toEqual({ text: "0.0027", exact: false }); // 0.0027027… % rounds down
+    expect(percentFigure(B(1_234_567), B(10_000_000))).toEqual({ text: "12.3457", exact: false });
+    expect(percentFigure(B(1), B(10_000_000))).toEqual({ text: "0.00001", exact: true });
+    expect(percentFigure(B(2), B(1_000_000))).toEqual({ text: "0.0002", exact: true });
+    expect(percentFigure(B(3), pow10(12))).toEqual({ text: "0.0000000003", exact: true });
+    expect(percentFigure(ZERO, B(37_000))).toEqual({ text: "0.0000", exact: true });
+    expect(percentFigure(B(37_000), B(37_000))).toEqual({ text: "100.0000", exact: true });
+    expect(percentText({ text: "8.1081", exact: false })).toBe("≈ 8.1081");
+    expect(percentText({ text: "12.0000", exact: true })).toBe("12.0000");
+    expect(() => percentFigure(ONE, ZERO)).toThrow(RatioInputError);
+    expect(() => percentFigure(B(-1), B(100))).toThrow(RatioInputError);
+  });
+
+  it("reads a typed G and refuses one outside 100..10^12 or not whole", () => {
+    expect(parseGranularity("37000")).toBe(B(37_000));
+    expect(parseGranularity(" 37,000 ")).toBe(B(37_000));
+    expect(parseGranularity("37 000")).toBe(B(37_000));
+    expect(parseGranularity("100")).toBe(MIN_GRANULARITY);
+    expect(parseGranularity("1,000,000,000,000")).toBe(MAX_GRANULARITY);
+    for (const bad of ["99", "1000000000001", "37000.5", "3.7e4", "-37000", "", "abc", "0"]) expect(parseGranularity(bad), bad).toBeNull();
+    expect(isValidGranularity(MIN_GRANULARITY)).toBe(true);
+    expect(isValidGranularity(MAX_GRANULARITY)).toBe(true);
+    expect(isValidGranularity(B(99))).toBe(false);
+    expect(isValidGranularity(MAX_GRANULARITY + ONE)).toBe(false);
+    expect(isValidGranularity(37_000)).toBe(false);
+    expect(MAX_GRANULARITY < B(Number.MAX_SAFE_INTEGER)).toBe(true);
   });
 });
