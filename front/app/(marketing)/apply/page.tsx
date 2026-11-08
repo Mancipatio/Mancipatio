@@ -57,6 +57,7 @@ import {
 } from "@/lib/apply-read-state";
 import { useToast } from "@/lib/toast";
 import { featureDisabledMessage, features } from "@/lib/features";
+import { FeeQuote } from "@/components/fee-quote";
 
 /**
  * "Apply to issue" — prototype `#page-apply`, on the live application wizard.
@@ -1564,6 +1565,7 @@ export default function ApplyPage() {
                   { label: "Email", value: form.founderEmail },
                 ]}
               />
+              <FeeQuote kind="tokenization_setup" className="mt-5" />
 
               <FootNote className="mt-5">
                 We use these details only to assess your application. See our{" "}
