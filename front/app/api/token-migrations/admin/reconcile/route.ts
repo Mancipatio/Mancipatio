@@ -7,7 +7,7 @@
 // classified, screened report-only, inserted under the units cap. A
 // transaction that is not a deposit (the account's creation, a refund, a
 // transfer that cannot be attributed to one wallet) is examined and skipped,
-// and listed for the operator (runbook §22: an unattributable transfer is
+// and listed for the operator (runbook §24: an unattributable transfer is
 // returned by hand).
 //
 // The deposit account is public, so anyone can make transactions that touch
@@ -101,7 +101,7 @@ export async function POST(request: Request) {
     const sb = getSupabaseAdmin();
     const migration = await readMigration(sb, uuidParam(params.id, "id"));
     if (migration.status === "draft" || migration.opened_slot === null) throw new SiwsError(409, "A draft has no deposits: open the campaign first");
-    if (migration.status === "completed") throw new SiwsError(409, "A completed campaign is final: a late deposit is returned by hand (runbook §22)");
+    if (migration.status === "completed") throw new SiwsError(409, "A completed campaign is final: a late deposit is returned by hand (runbook §24)");
 
     const results: Outcome[] = [];
     let stop: Stop | null = null;

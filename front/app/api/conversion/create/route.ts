@@ -24,6 +24,11 @@
 // acceptance, 503 when it cannot be checked), checked last, right before
 // the write.
 //
+// After the insert, the request's emails (the holder's confirmation, the
+// operator's "new request") are scheduled for after the response
+// (lib/server/conversion-notifications.ts): at most once, never delaying or
+// failing this route.
+//
 // One balance, one set of requests: the wallet's requests of the same share
 // class whose units are STILL IN THE WALLET (requested / vault_opened) claim
 // units of that balance, so their sum plus this request must fit it (409
@@ -44,6 +49,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { requireVerifiedClient } from "@/lib/server/kyc-gate";
 import { requireSanctionsClear } from "@/lib/server/sanctions";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
+import { notifyConversionStatus } from "@/lib/server/conversion-notifications";
 import { detectNetwork } from "@/lib/network";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -193,6 +199,10 @@ export async function POST(request: Request) {
       console.error("[api/conversion/create] insert failed:", error?.message);
       throw new SiwsError(500, "Could not save the conversion request");
     }
+
+    // The holder's and the operator's emails, after the response and at most
+    // once (lib/server/conversion-notifications.ts); never this route's error.
+    notifyConversionStatus(data.id as string, "requested");
 
     return NextResponse.json({ ok: true, data: { id: data.id as string, request: data } });
   } catch (err) {

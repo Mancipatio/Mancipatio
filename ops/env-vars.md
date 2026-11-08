@@ -19,7 +19,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | Variable | Kind | Mainnet | Devnet | When unset | Read by |
 |---|---|---|---|---|---|
 | `NEXT_PUBLIC_NETWORK` | Public, build | `mainnet` (guard) | `devnet` | Vercel builds refuse; any production build refuses when the RPC URL names mainnet; locally sniffed from the RPC URL, else devnet | `lib/network.ts` |
-| `NEXT_PUBLIC_SITE_URL` | Public, build | `https://www.manci.io` (guard `site-url`: an https origin; `mainnet.siteOrigin` in `scripts/ops/targets.json`) | `https://devnet.manci.io` from the moment devnet releases `www.manci.io`, right before mainnet takes it (runbook §18 R; `https://www.manci.io` until then) | Email sign-in, account emails and links answer 503 in production | `lib/server/account-origin.ts`, alert links |
+| `NEXT_PUBLIC_SITE_URL` | Public, build | `https://www.manci.io` (guard `site-url`: an https origin; `mainnet.siteOrigin` in `scripts/ops/targets.json`) | `https://devnet.manci.io` from the moment devnet releases `www.manci.io`, right before mainnet takes it (runbook §18 R; `https://www.manci.io` until then) | Email sign-in, account emails and links answer 503 in production; canonical links, og:url, the share image URL and the sitemap use `https://www.manci.io` (also for a value that is not an https origin) | `lib/server/account-origin.ts`, alert links, `lib/site-url.ts` |
 | `NEXT_PUBLIC_SUPABASE_URL` | Public, build | `https://<mainnet ref>.supabase.co` (guard; ref recorded in `SUPABASE_PROJECT_REFS` and `scripts/ops/targets.json`) | devnet project | No database | `lib/supabase*.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public, build | `sb_publishable_…` (guard) | publishable key | No browser database reads | `lib/supabase.ts` |
 | `NEXT_PUBLIC_KYC_REGISTRY` | Public, build | platform KYC registry address (guard) | registry address | Mainnet and Vercel production refuse; else scan fallback | `lib/kyc-registry-pin.ts` |
@@ -27,7 +27,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_SOLANA_WS_URL` | Public, build | wss URL of the same provider, with the browser key (guard; the same server-key check) | optional | Derived from the RPC URL | `lib/network.ts` |
 | `NEXT_PUBLIC_SOLANA_GENESIS_HASH` | Public, build | leave unset | leave unset | Built-in cluster hashes (a conflicting value is refused); localnet requires it | `lib/network-identity.ts` |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public, build | Turnstile widget of the mainnet domain, never a Cloudflare test key (guard `turnstile`) | recommended | No bot check on email sign-in and the contact form | `lib/turnstile.ts` |
-| `NEXT_PUBLIC_ALLOW_INDEXING` | Public, build | `true` to be indexed (Vercel production only) | unset | `noindex` | `lib/indexing.ts` |
+| `NEXT_PUBLIC_ALLOW_INDEXING` | Public, build | `true` to be indexed (Vercel production only): robots.txt then allows crawling outside the signed-in and admin areas and names `/sitemap.xml` | unset | `noindex`, robots.txt `Disallow: /`, an empty sitemap | `lib/indexing.ts`, `lib/sitemap.ts` |
 | `NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
@@ -39,13 +39,13 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | leave unset (off): not offered by the Terms | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | unset (off) until the Terms in force offer conversion into company shares; then `true` in the **same production build** as those Terms, with KYC-only mode off (left before, or in that same build with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false`; runbook §21, §20 step 1). It stays unset in a redeploy that leaves KYC-only mode unless that build also carries those Terms ("Leaving KYC-only mode later" step 1). Pause bit 0x08 is **not** cleared with it, only for each conversion's short open-and-deposit window (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | leave unset (off): physical delivery is not offered. Never `true` to let a conversion through (runbook §21) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
-| `NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION` | Public, build | leave unset (off) until the Terms in force offer the exchange of an existing token for Manci units (counsel's clause); then `true` in the **same production build** as those Terms, with KYC-only mode off (runbook §22). No program pause bit covers the deposits (plain SPL transfers): the switch stops the holder's precheck and the opening of campaigns only | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION` | Public, build | leave unset (off) until the Terms in force offer the exchange of an existing token for Manci units (counsel's clause); then `true` in the **same production build** as those Terms, with KYC-only mode off (runbook §24). No program pause bit covers the deposits (plain SPL transfers): the switch stops the holder's precheck and the opening of campaigns only | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
 | `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry, alarm, sanctions and fx (automatic EUR rate, 0080) workers refuse every call | `lib/server/retry-worker.ts` |
 | `HELIUS_MAINNET_RPC` (or `SOLANA_MAINNET_RPC`) | Secret (key in the URL) | server key of the paid provider (guard) | — | Mainnet server fails closed | `lib/server/rpc.ts` |
 | `HELIUS_DEVNET_RPC` / `HELIUS_TESTNET_RPC` / `SOLANA_LOCALNET_RPC` | Secret | — | recommended (proves the Helius path before mainnet) | Public endpoint | `lib/server/rpc.ts` |
-| `COMPLIANCE_ALERT_EMAIL` | Public (addresses) | required (≤ 5 addresses) | `office@mancipatio.io` | `/api/health/alarms` 503 on mainnet | `lib/server/system-alerts.ts` |
+| `COMPLIANCE_ALERT_EMAIL` | Public (addresses) | required (≤ 5 addresses) | `office@mancipatio.io` | `/api/health/alarms` 503 on mainnet; no operator email for a new conversion request or a deposit ("Conversion emails") | `lib/server/system-alerts.ts`, `lib/server/notifications.ts` |
 | `ALERT_WEBHOOK_URL` | Secret (the URL is the credential) | https (guard `alert-webhook`) | recommended | Email is the only alert channel | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_TOKEN` | Secret | optional (bearer for ntfy or a relay) | optional | No Authorization header | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_MIN_SEVERITY` | Public | `high` (default) | default | `high`; without email the webhook takes every row | `lib/server/system-alerts.ts` |
@@ -143,7 +143,7 @@ windows.
 | Distributions | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | `/api/distribution-plans/prepare`, `/bind` | `create_distribution`, `route_yield` | `/portfolio/rights` (with rights), `/admin/payouts` |
 | Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type DeliveryEscrow declared as a conversion (the admin's "Approve & open vault" on a conversion request, `/admin/custody`). ConversionPending is retired on-chain (VaultTypeRetired, 6142) and belongs to no module | `/portfolio/conversion`, `/admin/custody` (with delivery) |
 | Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | every other `open_custody_vault` of type DeliveryEscrow (a delivery request's approval, a DeliveryEscrow from "+ Open vault") | `/portfolio/delivery`, `/admin/custody` (with conversion; with delivery off the page hides "Approve & open vault" on delivery requests and the DeliveryEscrow type in "+ Open vault", and keeps reject, cancel, return, confirm and "Finish recording approval" for a vault already opened) |
-| Token migration (exchange of an existing token for Manci units) | `NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION` | `/api/token-migrations/precheck` (the holder's only path to a deposit) and the admin's opening of a campaign (`/api/token-migrations/admin/transition` to `open`) | none: deposits, refunds and the burn are plain SPL transfers, outside every Manci program and every pause bit. A holder can still transfer by hand to an open campaign's deposit account; such a deposit is recorded and refunded or accepted by the campaign's own rules, so stop a campaign by cancelling it (runbook §22) | `/portfolio/migration`, `/admin/migrations` (notice above the page; drafts, reconcile, deliveries, refunds, completion and the burn record stay), `/migrations` (public proof pages, notice only) |
+| Token migration (exchange of an existing token for Manci units) | `NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION` | `/api/token-migrations/precheck` (the holder's only path to a deposit) and the admin's opening of a campaign (`/api/token-migrations/admin/transition` to `open`) | none: deposits, refunds and the burn are plain SPL transfers, outside every Manci program and every pause bit. A holder can still transfer by hand to an open campaign's deposit account; such a deposit is recorded and refunded or accepted by the campaign's own rules, so stop a campaign by cancelling it (runbook §24) | `/portfolio/migration`, `/admin/migrations` (notice above the page; drafts, reconcile, deliveries, refunds, completion and the burn record stay), `/migrations` (public proof pages, notice only) |
 
 Off means: the entry routes answer 403 with "…: not available on Solana
 mainnet." before any database, screening or chain work, the
@@ -266,7 +266,7 @@ build guards read), and the two core areas without a switch of their own:
 | Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
 |---|---|---|---|
 | Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
-| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open), `issuer-updates/save`, `attach`, `detach` and `publish` (an issuer's updates for its holders; discarding a draft, withdrawing an update and every read stay open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts`, `/issuer/updates` (notice, entry buttons hidden) |
 
 Also refused before the wallet: `deposit_to_custody_vault` and the vesting
 series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
@@ -417,3 +417,72 @@ return 503 rather than old seed answers. Quota-store failure uses published
 prepared answers without making paid requests. The existing server
 Supabase credential and canonical site origin are reused; feature flags,
 network selection and on-chain pause masks are unchanged by this feature.
+
+## Conversion emails (0088)
+
+No new variable. Each status change of a conversion request that goes
+through its routes (requested, escrow vault opened, deposited, converted,
+cancelled, returned) emails the holder once; a new request and a deposit
+also email `COMPLIANCE_ALERT_EMAIL`, the operational mailbox this table
+requires on mainnet and the team that handles a conversion's KYC and
+sanctions side (`CONTACT_NOTIFY_EMAIL` stays the contact form's). The
+transport is `SMTP_*` or `RESEND_API_KEY` with `EMAIL_FROM`; links use
+`NEXT_PUBLIC_SITE_URL` (https only, never a request's host).
+
+- Holder address, in this order: the account's confirmed email
+  (`account_profiles.email` with `email_verified_at`), the verified
+  dossier's email (`clients.email` of the request's `client_id`), the
+  request's contact when it is one plain address. None of them: skipped
+  (`NO_RECIPIENT`).
+- Content: the event, the request's short id, the asset label and units,
+  the next step with its typical duration, the outcome transaction and a
+  link to `/portfolio/conversion`. The operator email names only the event,
+  the short id and `/admin/custody`. Never KYC data, a wallet, the holder's
+  contact or note, or an admin note.
+- At most once per request, event and recipient: `public.notification_log`
+  (migration 0088) is claimed before sending and then records `sent`,
+  `failed` or `skipped` with an error class (`TIMEOUT`, `TRANSPORT`,
+  `REJECTED`, `NOT_CONFIGURED`, `NO_RECIPIENT`, `RESERVED_DOMAIN`,
+  `RESOLVE_FAILED`, `MESSAGE_FAILED`), never an address or a body. A failed
+  email is not retried; a row still `pending` means the outcome is unknown
+  (the send may have gone out).
+- Never in the way: the email runs after the response (Next `after()`),
+  with an 8 s send deadline and 4 s per database step; a failure is
+  recorded and swallowed. Without 0088 applied (or with the database
+  unreachable) nothing is sent and the routes behave as before.
+
+Apply 0088 to the target before (or with) the front that sends them.
+Read back one request's emails with `select event, recipient_role, status,
+error, recipient_source, created_at from public.notification_log where
+kind = 'conversion' and ref_id = '<request id>' order by id;`.
+
+## Fee schedule (pricing)
+
+No variable: the price list is data in the database (migration 0089,
+runbook §23), not configuration, so publishing or retiring a price needs no
+redeploy. `/pricing`, `GET /api/fees/public` and the fee shown on the
+conversion request form and the `/apply` review step
+(`components/fee-quote.tsx`) read the published rows on every request.
+While none is published, `/pricing` keeps the launch-phase text word for
+word, the quote surfaces show nothing, and no charge can be booked.
+
+Where the owner publishes: `/admin/fees` → *Fee schedule*. Any Admin
+prepares drafts (*Load suggested defaults* creates the owner's suggested
+prices as drafts only) and books charges; only the Super Admin publishes
+or retires a price. **Publication is a business and legal decision**, not
+a deployment step. Before publishing:
+
+- a fee paid by a holder, buyer or seller: the Terms in force (clause 11)
+  say the Operator charges buyers and holders no fee and will publish a new
+  Terms version before introducing one, so publish it only with Terms that
+  provide for it;
+- a fee paid by an issuer: the launch-phase pricing page promises that
+  existing issuers are told before platform fees are introduced, and the
+  Terms say issuers pay what their engagement agreement provides;
+- a fee whose service the build does not offer (KYC-only mode, a module
+  switched off, token migration) is listed "where offered", never as an
+  available service.
+
+Collection is by invoice, off-chain; `Platform.protocol_fee_bps` stays
+unused. The feature flags, the network selection and the on-chain pause
+masks are unchanged by this feature.

@@ -271,7 +271,7 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
             ? [`The treasury holds ${formatUnits(treasuryUnits)} units, fewer than the ${formatUnits(BigInt(progress.unitsDue))} due: put units in the treasury before the next delivery.`]
             : []),
           ...(typeof treasuryUnits === "bigint" && m.status === "draft" && m.source === "founder_transfer" && treasuryUnits < cap
-            ? [`The treasury holds ${formatUnits(treasuryUnits)} of the ${formatUnits(cap)} units the cap can claim: the founders' units go to the treasury before opening (runbook §22).`]
+            ? [`The treasury holds ${formatUnits(treasuryUnits)} of the ${formatUnits(cap)} units the cap can claim: the founders' units go to the treasury before opening (runbook §24).`]
             : []),
         ]} />
         <div className="mt-4 flex flex-wrap gap-2">

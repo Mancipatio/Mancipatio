@@ -115,11 +115,17 @@ export const KYC_ONLY_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/issuer/assets", modules: ["issuance"], mode: "notice" },
   { prefix: "/issuer/launchpad", modules: ["primarySales", "issuance"], mode: "notice" },
   { prefix: "/issuer/payouts", modules: ["issuance"], mode: "notice" },
+  // The issuer's cap table is a read of its own assets: it stays, under the notice.
+  { prefix: "/issuer/cap-table", modules: ["issuance"], mode: "notice" },
+  // Investor relations: composing pauses; reading, discarding and withdrawing stay.
+  { prefix: "/issuer/updates", modules: ["issuance"], mode: "notice" },
 ];
 
 /** KYC-only mode: guides of what it pauses leave every menu (the pages stay, without a notice). */
 export const KYC_ONLY_NAV_PREFIXES: readonly string[] = [
   "/solutions/issuer-registry", "/solutions/tokenization", "/solutions/share-classes", "/solutions/launchpad",
+  // Issuing through a Serbian SPV; the guide carries the notice itself while the mode is on.
+  "/solutions/serbian-spv",
 ];
 
 function matches(path: string, prefix: string): boolean {
@@ -182,6 +188,8 @@ export const NAV_ROUTES: readonly NavRoute[] = [
   { prefix: "/solutions/otc", modules: ["secondaryTrading"], features: [] },
   { prefix: "/solutions/governance", modules: ["governance"], features: [] },
   { prefix: "/solutions/rights-vesting", modules: ["rights", "vesting", "distributions"], features: [] },
+  // The ESOP guide carries the module notice itself while vesting is off (app/(marketing)/solutions/esop).
+  { prefix: "/solutions/esop", modules: ["vesting"], features: [] },
   { prefix: "/solutions/custody", modules: ["custodyConversion", "custodyDelivery"], features: [] },
   // The public campaign pages carry their own notice (they stay reachable: the proof of a campaign is public).
   { prefix: "/migrations", modules: ["tokenMigration"], features: [] },

@@ -13,6 +13,8 @@ import { Kpi } from "@/components/kpi";
 import { IssuerRecoveryBanner } from "@/components/issuer-recovery-banner";
 import { scopeEnabled } from "@/lib/features";
 import type { Address } from "@solana/kit";
+import { useIssuerJourney } from "@/lib/use-issuer-journey";
+import { IssuerJourneyTracker } from "@/components/issuer-journey";
 import { useIssuerWorkflow } from "./use-issuer-workflow";
 import { IssuerCompanyTools, IssuerWorkflow } from "./issuer-workflow";
 
@@ -50,9 +52,44 @@ export default function IssuerOverviewPage() {
   const currentProfile = profileRead?.key === profileKey ? profileRead : null;
   const myAssets = useMemo(() => data?.assets.filter((asset) => asset.issuer.toString() === myIssuerPda) ?? [], [data, myIssuerPda]);
   const status = issuerStatus(me?.kybStatus);
+  // The issuer journey (lib/issuer-journey.ts): every step of the engagement
+  // and who acts next, from what this page and its session can read. Signed
+  // out: null; signed in but the verification not loaded: undefined.
+  const journeyVerification = useMemo(
+    () => !workflow.signedIn ? null : workflow.verification
+      ? { kyc: workflow.verification.kyc, kyb: workflow.verification.kyb, documentsRequested: workflow.verification.documents_requested }
+      : undefined,
+    [workflow.signedIn, workflow.verification],
+  );
+  const [journeyRevision, setJourneyRevision] = useState(0);
+  // "No issuer" only when it is a fact: signed out with no wallet (nothing to
+  // have registered), or a wallet whose chain snapshot is in and lists none.
+  // Unknown (undefined) while the snapshot loads or failed, without a wallet
+  // while signed in, and for a wallet that is not one of the account's.
+  const journeyIssuer = !wallet
+    ? workflow.signedIn ? undefined : null
+    : !data || workflow.failed || !workflow.walletMatchesAccount ? undefined : me ?? null;
+  const journey = useIssuerJourney({
+    audience: "issuer", data, issuer: journeyIssuer, verification: journeyVerification, session: conn.wallet, refreshKey: journeyRevision,
+  });
+  const chainLoading = !!wallet && !data && !workflow.failed;
+  const tracker = chainLoading || workflow.authLoading || !journey.journey
+    ? <SkeletonCard className="mt-6" rows={4} />
+    : <IssuerJourneyTracker
+        journey={journey.journey}
+        audience="issuer"
+        companyName={currentProfile?.profile?.company_name ?? (me ? fromBytes32(me.legalEntityId) : null)}
+        loading={journey.loading}
+        unavailable={journey.unavailable}
+        onRetry={() => {
+          setJourneyRevision((revision) => revision + 1);
+          // A failed chain snapshot is read again too.
+          if (workflow.failed) void refresh();
+        }}
+      />;
 
   return <main className="min-w-0 flex-1">
-    <IssuerWorkflow workflow={workflow} />
+    <IssuerWorkflow workflow={workflow} tracker={tracker} />
     {workflow.failed && <div role="alert" className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
       <p>Issuer assets could not be loaded. Your verification remains available above.</p>
       <button type="button" onClick={() => void refresh()} className="btn-brand mt-3">Try again</button>

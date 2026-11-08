@@ -28,7 +28,7 @@
 // somewhere else as well, pays several holders from several sources) is not
 // proof of anything here: it is never recorded, and a transfer into the
 // deposit account that cannot be attributed is returned by the deposit owner
-// by hand (ops/runbook-mainnet.md §22).
+// by hand (ops/runbook-mainnet.md §24).
 
 import { getBase58Encoder } from "@solana/kit";
 import { ChainEvidenceError, type ChainTransaction, type CompiledChainInstruction } from "@/lib/chain-evidence";

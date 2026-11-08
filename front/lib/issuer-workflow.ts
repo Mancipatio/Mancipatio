@@ -7,6 +7,8 @@ export const ISSUER_WORKFLOW_TABS = [
   ["/issuer/request", "3. Token request"],
   ["/issuer/launchpad", "4. Primary sales"],
   ["/issuer/assets", "My assets"],
+  ["/issuer/cap-table", "Cap table"],
+  ["/issuer/updates", "Updates"],
 ] as const;
 
 export const ISSUER_VERIFICATION_LABEL: Record<AccountWalletKycStatus, string> = {

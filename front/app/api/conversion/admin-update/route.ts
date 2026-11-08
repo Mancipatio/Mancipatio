@@ -2,7 +2,8 @@
 // request (open vault, confirm conversion, reject, return). Signed (SIWS) +
 // on-chain admin gate. Status transitions are additionally pinned by the DB
 // trigger from migration 0034 — an illegal jump surfaces as a 409 here.
-// Mirror of /api/delivery/admin-update.
+// Mirror of /api/delivery/admin-update. A status that changed emails the
+// holder after the response (lib/server/conversion-notifications.ts).
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -10,6 +11,7 @@ import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { validateCustodyUpdate } from "@/lib/server/custody-evidence";
+import { isConversionEvent, notifyConversionStatus } from "@/lib/server/conversion-notifications";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -125,6 +127,14 @@ export async function POST(request: Request) {
       );
     }
     if (!data) throw new SiwsError(404, "Conversion request not found");
+
+    // A status change emails the holder (and, for a deposit, the operator)
+    // after the response, at most once per request and status; a note-only
+    // patch or a repeated status sends nothing.
+    const status = data.status as string;
+    if (status !== previousStatus && isConversionEvent(status)) {
+      notifyConversionStatus(data.id as string, status);
+    }
 
     return NextResponse.json({
       ok: true,

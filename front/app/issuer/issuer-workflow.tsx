@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { IconArrowUpRight, IconCheck, IconClipboard, IconCoins, IconRepeat, IconShield } from "@/components/icons";
 import { features, moduleEnabled, scopeEnabled } from "@/lib/features";
 import { navHrefVisible } from "@/lib/pilot-scope";
@@ -10,7 +11,12 @@ import styles from "./issuer-workflow.module.css";
 
 export type WorkflowData = ReturnType<typeof useIssuerWorkflow>;
 
-export function IssuerWorkflow({ workflow }: { workflow: WorkflowData }) {
+/**
+ * `tracker`: the issuer journey (components/issuer-journey.tsx), which the
+ * workspace renders in place of the four-step overview: the same process in
+ * eight steps, each with its state and who acts next.
+ */
+export function IssuerWorkflow({ workflow, tracker }: { workflow: WorkflowData; tracker?: ReactNode }) {
   const state = issuerWorkflowState(workflow.verification, workflow.me?.kybStatus ?? null);
   const hasIssuedAssets = state.canManageIssuer && (workflow.me?.assetsCount ?? BigInt(0)) > BigInt(0);
   const steps = [
@@ -27,13 +33,13 @@ export function IssuerWorkflow({ workflow }: { workflow: WorkflowData }) {
     <p className={styles.eyebrow}>Issuer workspace</p>
     <h1 id="issuer-process-heading" className={styles.title}>{scopeEnabled("issuance") ? "From verification to your token offer." : "Verification and review."}</h1>
     <p className={styles.intro}>One place to follow the process, respond to review and manage your company&apos;s equity tokens. Start with email, Google or your wallet.</p>
-    <ol className={styles.steps} aria-label="Issuer process">
+    {tracker ?? <ol className={styles.steps} aria-label="Issuer process">
       {steps.map((step, index) => <li key={step.title} className={styles.step} data-state={step.done ? "done" : step.current ? "current" : "upcoming"}>
         <div className={styles.stepTop}><span className={styles.number} aria-label={`Step ${index + 1}`}>{step.done ? <IconCheck size={15} /> : index + 1}</span><span className={styles.status} data-tone={step.done ? "positive" : step.current ? "attention" : undefined}>{step.status}</span></div>
         <h3>{step.title}</h3><p>{step.description}</p>
         <Link href={step.href} className={styles.stepLink}>{step.action}<step.icon size={14} /></Link>
       </li>)}
-    </ol>
+    </ol>}
     <IssuerVerificationSummary workflow={workflow} />
     {moduleEnabled("secondaryTrading") && <aside className={styles.holder}>
       <IconCoins size={21} /><div><strong>After the primary sale · Token trading</strong>

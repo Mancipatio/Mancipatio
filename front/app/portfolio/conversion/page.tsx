@@ -29,6 +29,11 @@ import { WalletRequired } from "@/components/wallet-required";
 // resolver the create route's gate uses, so "+ Request conversion" is enabled
 // exactly when /api/conversion/create would accept, and the reason it is not
 // is always written next to it (lib/conversion-holder.ts conversionRequestGate).
+//
+// Every request shows its timeline (lib/conversion-timeline.ts): the current
+// step, who acts next, the vault deadline read from the vault above (never
+// from the row) and each step's TYPICAL duration, compact in the status cell
+// and in full under the row (open while the request is in progress).
 
 import Link from "next/link";
 import { address, type Address } from "@solana/kit";
@@ -41,7 +46,7 @@ import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   AssetRegistryInstruction,
   findAssetPda,
@@ -63,6 +68,7 @@ import {
   conversionRequestGate,
   conversionRowsLive,
   HOLDER_CONVERSION_POLL_MS,
+  isOpenConversionStatus,
   latestConversionRead,
   loadConversionBalances,
   nextConversionStep,
@@ -98,6 +104,8 @@ import {
 } from "@/lib/chain-record-recovery";
 import { useChainRecordRecovery } from "@/lib/use-chain-record-recovery";
 import { ChainRecordRecoveryPanel } from "@/components/chain-record-recovery-panel";
+import { ConversionTimelineCompact, ConversionTimelineFull } from "@/components/conversion-timeline";
+import { FeeQuote } from "@/components/fee-quote";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -1197,7 +1205,8 @@ function ConversionWorkspace() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {requests.map((r) => (
-                <tr key={r.id} className="text-slate-700">
+                <Fragment key={r.id}>
+                <tr className="text-slate-700">
                   <td className="px-4 py-3">
                     <p className="font-medium text-slate-900">
                       {r.asset_label || "—"}
@@ -1224,6 +1233,12 @@ function ConversionWorkspace() {
                         ? ` Note: ${r.admin_note}`
                         : ""}
                     </p>
+                    <ConversionTimelineCompact
+                      status={r.status}
+                      hasVault={r.vault_pda !== null}
+                      vaultDeadlineSec={r.vault_pda ? vaultDeadlines.get(r.vault_pda) : null}
+                      nowSec={nowSec}
+                    />
                     {/* Actions sit under the status, not in a trailing column, so a
                         holder on a phone reaches them without horizontal scrolling. */}
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
@@ -1302,6 +1317,25 @@ function ConversionWorkspace() {
                     </div>
                   </td>
                 </tr>
+                <tr className="bg-slate-50/60">
+                  <td colSpan={4} className="px-4 pb-3 pt-0">
+                    {/* Open while the request is in progress; history rows stay folded. */}
+                    <details open={isOpenConversionStatus(r.status)}>
+                      <summary className="cursor-pointer py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+                        Timeline and typical durations
+                      </summary>
+                      <div className="pb-1 pt-1">
+                        <ConversionTimelineFull
+                          status={r.status}
+                          hasVault={r.vault_pda !== null}
+                          vaultDeadlineSec={r.vault_pda ? vaultDeadlines.get(r.vault_pda) : null}
+                          nowSec={nowSec}
+                        />
+                      </div>
+                    </details>
+                  </td>
+                </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -1553,6 +1587,7 @@ function RequestConversionModal({
             escrow. They are returned if the conversion is cancelled and burned
             once the off-chain conversion is executed.
           </p>
+          <FeeQuote kind="conversion" />
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
           {blocker && (

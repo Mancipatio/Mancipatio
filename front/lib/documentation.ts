@@ -83,6 +83,12 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         keywords: "company onboarding",
       },
       {
+        href: "/solutions/serbian-spv",
+        title: "Issuing through a Serbian SPV",
+        description: "For companies outside Serbia: the SPV Manci incorporates for an issuance.",
+        keywords: "spv foreign company incorporation abroad structure",
+      },
+      {
         href: "/solutions/tokenization",
         title: "Asset registration",
         description: "Create the asset record and attach its documentation.",
@@ -124,6 +130,12 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         description:
           "Vesting series, scheduled releases and Rights-token claims.",
         keywords: "unlock milestone income merkle",
+      },
+      {
+        href: "/solutions/esop",
+        title: "Employee equity (ESOP)",
+        description: "A cliff-then-monthly vesting schedule for employee grants.",
+        keywords: "esop employees team grant cliff vesting",
       },
       {
         href: "/solutions/compliance",

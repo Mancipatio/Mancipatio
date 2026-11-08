@@ -7,7 +7,7 @@
 // reconciles the deposit account daily, delivers the units from the
 // treasury, refunds irregular deposits, closes the campaign after its
 // window, records the burn of the collected old tokens and completes it
-// with the final report (ops/runbook-mainnet.md §22). Every route behind
+// with the final report (ops/runbook-mainnet.md §24). Every route behind
 // this page is admin-gated on chain (app/api/token-migrations/admin/*);
 // drafts and records stay usable in KYC-only mode like the rest of the
 // admin console, and the AppShell shows the module notice above the page

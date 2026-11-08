@@ -10,7 +10,7 @@
 -- No program change: deposits, refunds and the burn of the collected tokens
 -- are plain SPL transfers, so no pause bit of asset_registry covers them; the
 -- platform's switches are the routes and the status below
--- (lib/token-migration/model.ts, ops/runbook-mainnet.md §22).
+-- (lib/token-migration/model.ts, ops/runbook-mainnet.md §24).
 --
 --   token_migrations          one campaign: the old mint and its supply
 --                             snapshot, the ratio (E, G, lot, units cap,
