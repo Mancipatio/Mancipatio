@@ -265,6 +265,10 @@ export function issuerUpdateRecordText(update: IssuerUpdateRecordInput): string 
 
 // ── Display ─────────────────────────────────────────────────────────────────
 
+/** Shown with every list of updates readers see: whose words they are and what the platform checked. */
+export const ISSUER_CONTENT_NOTE =
+  "Published by the issuer. Manci checks that each document matches its recorded SHA-256; it does not verify what an update says.";
+
 /** The opening of the text, cut at a word boundary, for list views. */
 export function issuerUpdateExcerpt(body: string, max = 280): { text: string; truncated: boolean } {
   const flat = body.replace(/\s+/g, " ").trim();

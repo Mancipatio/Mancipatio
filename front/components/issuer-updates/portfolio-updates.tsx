@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WalletSession } from "@solana/client";
 import { WalletSessionRequiredError } from "@/lib/siws-client";
 import { assetHref } from "@/lib/asset-links";
-import { ISSUER_UPDATE_LIMITS, type HolderIssuerUpdate } from "@/lib/issuer-updates";
+import { ISSUER_CONTENT_NOTE, ISSUER_UPDATE_LIMITS, type HolderIssuerUpdate } from "@/lib/issuer-updates";
 import { loadHolderIssuerUpdates, openIssuerUpdateDocument, publicDocumentHref } from "@/lib/issuer-updates-client";
 import { useToast } from "@/lib/toast";
 import { UpdateArticle } from "@/components/issuer-updates/update-article";
@@ -83,6 +83,7 @@ export function PortfolioUpdates({ session, holdings }: {
   return (
     <section className="mt-10">
       <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">Updates from your companies</h2>
+      <p className="mt-2 text-xs text-slate-500">{ISSUER_CONTENT_NOTE}</p>
       {current.state === "loading" ? (
         <p className="mt-4 text-sm text-slate-500" role="status">Checking your holdings for updates…</p>
       ) : current.state === "signin" || current.state === "error" ? (

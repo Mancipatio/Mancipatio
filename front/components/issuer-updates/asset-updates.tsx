@@ -19,7 +19,7 @@ import {
   publicDocumentHref,
   type PublicUpdatesAnswer,
 } from "@/lib/issuer-updates-client";
-import { byPublicationDesc, type HolderIssuerUpdate, type PublicIssuerUpdate } from "@/lib/issuer-updates";
+import { byPublicationDesc, ISSUER_CONTENT_NOTE, type HolderIssuerUpdate, type PublicIssuerUpdate } from "@/lib/issuer-updates";
 import { useToast } from "@/lib/toast";
 import { UpdateArticle } from "@/components/issuer-updates/update-article";
 
@@ -114,6 +114,7 @@ export function AssetUpdatesBlock({ assetPda, issuerPda }: { assetPda: string; i
       <h2 className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
         Updates from the issuer
       </h2>
+      <p className="mt-2 text-xs text-mx-ink-faint">{ISSUER_CONTENT_NOTE}</p>
       {published === null ? (
         <p className="mt-4 text-sm text-mx-ink-faint" role="status">Loading updates…</p>
       ) : published === "error" ? (
