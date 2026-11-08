@@ -3953,6 +3953,63 @@ nothing changes there. The upgrade authority (the devnet deployer) is not
 part of the handover; the plan warns when the target would make it the SA,
 the BA or an Admin.
 
+### Mainnet holders on 2026-11-08 and the remaining hardening
+
+Read from mainnet at `finalized` on 2026-11-08 (Platform PDA
+`FJaWxqhSxjYsH8yMqc76H769vL8kapaFvEWB37yxom4Z`, the hook's
+`BlocklistAuthority` PDA `473HUFNiP6pXDvV3wP9zmifoLVoAPV9tDsZVwNSNLMYD`, the KYC
+registry `G6V9c3hVNGBj8h5W49s6dZSobr8wipPNi48YBjGNU14B`, both programs'
+ProgramData and the Squads multisig account):
+
+| Role | Holder today | Target |
+|---|---|---|
+| Super admin (SA) and its Admin record | `8TEm…` (software wallet) | the company hardware wallet |
+| Other Admin records | `6AnF…` (owner) | one independent hardware key of a second trusted person; `6AnF` removed unless it is a hardware key |
+| KYC registry authority | `8TEm…` | the company hardware wallet now; its own compliance key when one exists |
+| BlocklistAuthority (hook) | `8TEm…` | the company hardware wallet |
+| Protocol treasury | `8TEm…` | the Squads vault `CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ` (fees never land on an operational key) |
+| Upgrade authority, both programs | Squads vault `Cegf…` | unchanged |
+| Squads multisig `CrEU4aeHdVSrag3BBR4rKnFF61vt2xvcXVMCo3AmRe3M` | 1 of 1, member `21yE…`, time lock 0, no config authority | 2 of 3 hardware keys held by people other than the company wallet's holder, time lock 24 h |
+| Pause flags | `0x40` (only the payout modules paused) | as decided per mode (§8) |
+
+One key therefore holds every operational role, and one key can upgrade
+both programs at once. The order below closes the bigger risk first.
+
+1. **Squads, in the Squads app, signed by `21yE`** while the threshold is
+   still 1: "Add member" for the two new hardware keys (initiate, vote,
+   execute), then "Change time lock" to 86400 seconds, then "Change
+   threshold" to 2, last. Each is a config transaction that `21yE` approves
+   and executes alone until the threshold changes. `21yE` stays a member
+   only if it is a hardware key; otherwise remove it after the new members
+   have approved one transaction together. A time lock also delays an
+   incident upgrade (§11) by the same 24 hours: the owner accepts that
+   delay or keeps 0 and relies on 2 of 3. Then update the role map's
+   `squads` object, `ALARM_SQUADS_CONFIG` in Vercel Production, and the
+   README "Upgrade authority" paragraph.
+2. **Operational roles** to the company hardware wallet with the handover
+   procedure above. Write a mainnet company role map from
+   `front/scripts/chain/role-map.company.example.json` (company wallet as
+   SA, `admins` = company wallet plus the independent second Admin,
+   `kyc.authority`, `blocklistAuthority`, `protocolTreasury` = the Squads
+   vault, the new `squads` object; keep `acknowledgedRoleOverlaps` only for
+   the overlaps that remain), run `npm run chain:handover` against mainnet
+   (it sends nothing and prints the ordered steps with who signs and when),
+   and follow it on the site: proposals at T signed by the current SA
+   `8TEm`, timelocked executions at T+48h, the super admin accept last,
+   then the cleanup (remove `8TEm`'s Admin record and every record the map
+   does not keep).
+3. **Read back**: `npm run chain:inventory` with the new role map (no
+   `pending-admin`, no `pending-recovery`, no single-key warning), the
+   Platform admin and treasury, the BlocklistAuthority and the KYC
+   registry authority equal the target, and the Squads account shows
+   threshold 2, three members and the time lock. Update
+   `ALARM_BALANCE_WATCH` with the new signing keys and their refill lines
+   (§1), and retire `8TEm` from every alarm once it holds nothing.
+
+Until step 2 is done, `8TEm` is a hot key that can clear the pause, block
+wallets, switch hook modes, approve sales and decide KYC alone; keep it on
+one device and offline when not signing.
+
 ## 20. Switching trading through Manci on
 
 **First prerequisite: the platform has left KYC-only mode.** The mainnet
