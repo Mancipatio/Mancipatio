@@ -41,16 +41,19 @@ day the site (<https://www.manci.io>) went public.
   <!-- Change this line only together with SECURITY_AUDIT in
   front/lib/legal/audit.ts. -->
 
-The mainnet build runs in **KYC-only mode** by default (owner decision of
-2026-10-10, on `main` since PR #78 and in every release made from it): Manci
-is open for sign-up and identity verification (KYC for people, KYB for
-companies) only. Sales, trading, issuance, conversion and the other
-services are paused; exits of existing positions stay open
+The mainnet build left **KYC-only mode** on 2026-11-08 (owner decision;
+`NEXT_PUBLIC_FEATURE_KYC_ONLY=false` in Vercel Production): besides sign-up
+and identity verification (KYC for people, KYB for companies), primary
+sales and issuance are open on the platform side, for equity only. Every
+pilot module (trading through Manci, conversion into shares, token
+migration, vesting, rights, distributions, governance, delivery) stays off
+until the Terms in force offer it, and the program's pause flags decide
+on-chain (payout modules, 0x40, stay paused). The lockdown of 2026-10-10
+(PR #78) returns by deleting that variable and redeploying
 ([`ops/env-vars.md`](ops/env-vars.md), "KYC-only mode and offered asset
-classes"). Outside that mode, the Terms in force, the module switches and
-the program's pause flags decide per network which modules are offered
-(same file, "Pilot scope"). The site serves the commit last pushed to
-`release/mainnet`; [`ops/release-checklist.md`](ops/release-checklist.md)
+classes"; "Pilot scope" for the module switches). The site serves the
+commit last pushed to `release/mainnet`;
+[`ops/release-checklist.md`](ops/release-checklist.md)
 requires that commit to be the tip of `main` and checks it before the push.
 
 ## Repository
