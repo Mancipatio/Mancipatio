@@ -118,6 +118,10 @@ const RPC_REFUSALS: Array<[string, number, string]> = [
   ["DELIVERY_TX_ALREADY_RECORDED", 409, "This transaction is already recorded as the delivery of other deposits"],
   ["DELIVERY_DEPOSITS_NOT_ACCEPTED", 409, "Some of these deposits are no longer waiting for delivery: reload the campaign"],
   ["MIGRATION_NOT_DELIVERING", 409, "Deliveries are recorded while the campaign is open or closed"],
+  ["REFUND_TX_ALREADY_RECORDED", 409, "This transaction is already recorded as the refund of other deposits"],
+  ["REFUND_DEPOSITS_NOT_REFUNDABLE", 409, "These deposits cannot be refunded together: one holder's irregular deposits (or, in a cancelled campaign, accepted ones) only. Reload the campaign"],
+  ["MIGRATION_NOT_REFUNDING", 409, "Refunds are recorded while the campaign is open, closed or cancelled"],
+  ["DEPOSIT_BEFORE_OPENING", 400, "This transfer happened before the campaign opened, so it is not one of its deposits"],
 ];
 
 /**
@@ -173,11 +177,34 @@ export async function listMigrations(sb: SupabaseClient, opts: { publicOnly: boo
 }
 
 /** The deposits of the given campaigns (chain order is the caller's: rows.ts chainOrder). */
+/** Rows one read returns at most: PostgREST caps every answer (max_rows, supabase/config.toml). */
+const PAGE = 1000;
+/** A campaign's deposits stop being read past this many (a flood of dust deposits would otherwise exhaust a route). */
+const MAX_DEPOSIT_ROWS = 50_000;
+
+/**
+ * The deposits of the given campaigns, every one of them: read in pages of
+ * PAGE rows in id order until a short page (PostgREST answers at most its
+ * max_rows, so one unpaged read would silently stop at the first thousand).
+ * Chain order is the caller's (rows.ts chainOrder).
+ */
 export async function readDeposits(sb: SupabaseClient, migrationIds: readonly string[]): Promise<DepositRow[]> {
   if (migrationIds.length === 0) return [];
-  const { data, error } = await sb.from(DEPOSITS).select(DEPOSIT_SELECT).eq("network", detectNetwork()).in("migration_id", [...migrationIds]).limit(10_000);
-  if (error) dbFailure(error, "deposit list");
-  return rows(data, parseDepositRow);
+  const out: DepositRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb
+      .from(DEPOSITS)
+      .select(DEPOSIT_SELECT)
+      .eq("network", detectNetwork())
+      .in("migration_id", [...migrationIds])
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) dbFailure(error, "deposit list");
+    const page = rows(data, parseDepositRow);
+    out.push(...page);
+    if (page.length < PAGE) return out;
+    if (out.length >= MAX_DEPOSIT_ROWS) throw new SiwsError(503, "This campaign has more deposits than one request can read; contact the operator");
+  }
 }
 
 /** Units of accepted and delivered deposits: what the cap has left is units_cap minus this. */
@@ -211,7 +238,8 @@ export class NotADepositError extends SiwsError {
  *      while it is not, 503 when the node cannot be read) and must prove a
  *      deposit into this campaign's deposit account (lib/token-migration/
  *      evidence.ts; NotADepositError otherwise), from `holder` when one
- *      claims it;
+ *      claims it, made at or after the campaign's opening slot (an older
+ *      transfer into the account is not this campaign's);
  *   3. it is classified (window, excluded wallet, signer, lots, memo), and
  *      the depositing wallet is screened report-only (the tokens already
  *      moved): a hit raises the compliance alert and records the deposit as
@@ -246,6 +274,10 @@ export async function recordDepositFromChain(
     if (err instanceof ChainEvidenceError) throw new NotADepositError(err.message);
     throw err;
   }
+  // Nothing that reached the deposit account before the campaign opened is one of its deposits.
+  if (migration.opened_slot === null || facts.slot < BigInt(migration.opened_slot)) {
+    throw new NotADepositError("This transfer happened before the campaign opened, so it is not one of its deposits");
+  }
   if (facts.blockTime === null) {
     throw new SiwsError(503, "The network did not report when this transaction ran; retry recording shortly (do not deposit again)");
   }
@@ -278,6 +310,7 @@ export async function recordDepositFromChain(
     p_reason: reasonCode ? IRREGULAR_REASON_TEXT[reasonCode] : null,
     p_recorded_via: opts.via,
   });
+  if (error?.message?.includes("DEPOSIT_BEFORE_OPENING")) throw new NotADepositError("This transfer happened before the campaign opened, so it is not one of its deposits");
   if (error) dbFailure(error, "deposit");
   const result = data as { created?: unknown } | null;
   const recorded = await readDepositByTx(sb, signature);

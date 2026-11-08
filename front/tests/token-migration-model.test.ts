@@ -168,6 +168,7 @@ function migrationRow(over: Partial<MigrationRow> = {}): MigrationRow {
     window_opens_at: "2027-01-01T00:00:00.000Z", window_closes_at: "2027-03-17T00:00:00.000Z",
     terms_doc_sha256: "ab".repeat(32), terms_doc_url: "https://example.com/terms.pdf", treasury_wallet: key(10),
     final_report_sha256: null, old_tokens_burn_tx: null, old_tokens_burned: null, created_by: key(11),
+    opened_slot: 100, reconcile_cursor: "5".repeat(88), reconcile_sweep_top: null, reconcile_sweep_before: null,
     opened_at: "2027-01-01T00:00:00.000Z", closed_at: "2027-03-17T01:00:00.000Z", completed_at: null, cancelled_at: null,
     created_at: "2026-12-01T00:00:00.000Z", updated_at: "2027-03-17T01:00:00.000Z",
     ...over,
@@ -204,6 +205,8 @@ describe("rows", () => {
     const view = publicMigration(migrationRow(), deposits);
     expect(view).not.toHaveProperty("created_by");
     expect(view).not.toHaveProperty("network");
+    expect(view).not.toHaveProperty("reconcile_cursor");
+    expect(view).toHaveProperty("opened_slot", 100);
     expect(view.deposits.map((d) => d.deposit_tx[0])).toEqual(["5", "8", "7"]);
     expect(view.deposits[2]).toMatchObject({ status: "irregular", reason: "Held for review" });
     expect(JSON.stringify(view)).not.toMatch(/Sanctions/);

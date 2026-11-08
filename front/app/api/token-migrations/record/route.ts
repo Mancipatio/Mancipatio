@@ -13,19 +13,29 @@
 // (and refunded if it is irregular). Maintenance lets it through for the same
 // reason (lib/maintenance.ts). 409 "awaiting finalization" while the network
 // has not finalized the transaction: the page keeps its receipt and records
-// again, sending nothing again.
+// again, sending nothing again. Rate-limited per wallet across instances
+// (lib/server/shared-rate-limit): a flood of tiny deposits recorded one by
+// one costs the flooder its limit, not the operator a route.
 
 import { NextResponse } from "next/server";
-import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
+import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { readMigration, recordDepositFromChain, uuidParam } from "@/lib/server/token-migrations";
 import { publicDeposit } from "@/lib/token-migration/rows";
 
 export const maxDuration = 60;
 
+/** Deposit records per wallet, shared by every instance. */
+const RECORD_SHARED_LIMIT = 30;
+const RECORD_SHARED_WINDOW_SECONDS = 600;
+
 export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "tokenMigration.recordDeposit");
+    if ((await consumeSharedRateLimit(`token-migration-record:wallet:${wallet}`, RECORD_SHARED_LIMIT, RECORD_SHARED_WINDOW_SECONDS)) === "limited") {
+      throw new SiwsError(429, "Too many deposit records from this wallet — wait a few minutes and retry recording (nothing is lost)");
+    }
     const migrationId = uuidParam(params.migration_id, "migration_id");
     const sb = getSupabaseAdmin();
     const migration = await readMigration(sb, migrationId);

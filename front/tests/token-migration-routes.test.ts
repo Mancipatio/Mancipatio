@@ -36,9 +36,12 @@ const chain = vi.hoisted(() => ({
   readShareClassFacts: vi.fn(),
   readDepositAccount: vi.fn(),
   readHolderBalance: vi.fn(),
-  depositAccountSignatures: vi.fn(),
+  depositAccountPage: vi.fn(),
+  readFinalizedSlot: vi.fn(),
 }));
 vi.mock("@/lib/server/token-migration-chain", () => chain);
+const limiter = vi.hoisted(() => ({ result: "ok" as "ok" | "limited" | "unavailable" }));
+vi.mock("@/lib/server/shared-rate-limit", () => ({ consumeSharedRateLimit: vi.fn(async () => limiter.result) }));
 const txs = vi.hoisted(() => ({ map: new Map<string, unknown>(), pending: new Set<string>() }));
 vi.mock("@/lib/server/chain-evidence", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/server/chain-evidence")>();
@@ -131,6 +134,7 @@ function campaign(over: Record<string, unknown> = {}) {
     window_opens_at: "2027-01-15T00:00:00.000Z", window_closes_at: "2027-03-31T00:00:00.000Z",
     terms_doc_sha256: "ab".repeat(32), terms_doc_url: "https://example.com/swap-terms.pdf", treasury_wallet: TREASURY,
     final_report: null, final_report_sha256: null, old_tokens_burn_tx: null, old_tokens_burned: null, created_by: ADMIN, updated_by: null,
+    opened_slot: 100, reconcile_cursor: null, reconcile_sweep_top: null, reconcile_sweep_before: null,
     opened_at: "2027-01-15T00:00:00.000Z", closed_at: null, completed_at: null, cancelled_at: null,
     created_at: "2027-01-01T00:00:00.000Z", updated_at: "2027-01-15T00:00:00.000Z",
     ...over,
@@ -212,6 +216,18 @@ function emulateRecordingFunctions() {
     rows().push(row);
     return { created: true, id: row.id, status, reason_code: reason, units_due: units };
   };
+  db.ref!.rpcs.record_token_migration_refund = (args) => {
+    const ids = args.p_deposit_ids as string[];
+    const recorded = rows().filter((d) => d.refund_tx === args.p_refund_tx).map((d) => d.id).sort();
+    if (recorded.length) {
+      if (JSON.stringify(recorded) === JSON.stringify([...ids].sort())) return { created: false, count: recorded.length };
+      throw new Error("REFUND_TX_ALREADY_RECORDED");
+    }
+    const chosen = rows().filter((d) => ids.includes(d.id as string) && d.status === "irregular");
+    if (chosen.length !== ids.length || new Set(chosen.map((d) => d.holder_wallet)).size !== 1) throw new Error("REFUND_DEPOSITS_NOT_REFUNDABLE");
+    for (const d of chosen) Object.assign(d, { status: "refunded", refund_tx: args.p_refund_tx });
+    return { created: true, count: chosen.length };
+  };
   db.ref!.rpcs.record_token_migration_delivery = (args) => {
     const ids = args.p_deposit_ids as string[];
     const recorded = rows().filter((d) => d.delivery_tx === args.p_delivery_tx).map((d) => d.id).sort();
@@ -251,6 +267,7 @@ beforeEach(async () => {
   txs.map.clear();
   txs.pending.clear();
   for (const fn of Object.values(chain)) fn.mockReset();
+  limiter.result = "ok";
   depositAta = await associatedTokenAccount(DEPOSIT_OWNER, OLD_MINT, TOKEN_PROGRAM_CLASSIC);
   holderAta = await associatedTokenAccount(HOLDER, OLD_MINT, TOKEN_PROGRAM_CLASSIC);
   treasuryAta = await associatedTokenAccount(TREASURY, NEW_MINT, TOKEN_PROGRAM_2022);
@@ -342,6 +359,15 @@ describe("POST /api/token-migrations/record", () => {
     expect(deposits()[1].reason_code).toBe("compliance_hold");
   });
 
+  it("is rate-limited per wallet", async () => {
+    migrations().push(campaign());
+    const s = sig();
+    depositTx(s, { lots: 1 });
+    limiter.result = "limited";
+    expect(await record(s)).toMatchObject({ status: 429 });
+    expect(deposits()).toHaveLength(0);
+  });
+
   it("refuses to record unscreened, before finalization, and what is not a deposit", async () => {
     migrations().push(campaign());
     const s = sig();
@@ -424,7 +450,8 @@ describe("POST /api/token-migrations/admin/transition", () => {
     chain.readDepositAccount.mockResolvedValueOnce({ ok: false, problem: "The deposit account already holds tokens" });
     expect(await go("open")).toMatchObject({ status: 409, body: { error: "The deposit account already holds tokens" } });
     chain.readDepositAccount.mockResolvedValueOnce({ ok: true, amount: B(0) });
-    expect((await go("open")).body.data!.migration).toMatchObject({ status: "open" });
+    chain.readFinalizedSlot.mockResolvedValueOnce(B(4242));
+    expect((await go("open")).body.data!.migration).toMatchObject({ status: "open", opened_slot: 4242 });
     expect(signer.action).toBe("tokenMigration.adminTransition");
   });
 
@@ -448,6 +475,8 @@ describe("POST /api/token-migrations/admin/transition", () => {
     expect(typeof stored.final_report).toBe("string");
     expect(stored.final_report_sha256).toBe(await sha256Hex(stored.final_report as string));
     expect(JSON.parse(stored.final_report as string).totals).toMatchObject({ units_delivered: "1", units_unclaimed: "119999" });
+    // The row keeps the completion time the report states, so the report can be rebuilt from the row.
+    expect(JSON.parse(stored.final_report as string).completed_at).toBe(stored.completed_at);
   });
 });
 
@@ -472,21 +501,43 @@ describe("POST /api/token-migrations/admin/record", () => {
     expect(await rec({ kind: "delivery", signature: none })).toMatchObject({ status: 400, body: { error: expect.stringMatching(/paid no holder/) } });
   });
 
-  it("refund: one irregular deposit back in full; a compliance hold needs the compliance decision", async () => {
+  /** A finalized refund: `amount` from the deposit account back to `owner`, at `slot`. */
+  function refundTx(signature: string, amount: number, slot = 2_000, owner = HOLDER) {
+    txs.map.set(signature, {
+      slot, blockTime: Math.floor(NOW / 1000), transaction: { signatures: [signature], message: { header: { numRequiredSignatures: 1 }, accountKeys: [DEPOSIT_OWNER, depositAta, holderAta], instructions: [] } },
+      meta: { err: null, innerInstructions: [],
+        preTokenBalances: [{ accountIndex: 1, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "50000", decimals: 0 } }],
+        postTokenBalances: [{ accountIndex: 1, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: String(50_000 - amount), decimals: 0 } }, { accountIndex: 2, mint: OLD_MINT, owner, uiTokenAmount: { amount: String(amount), decimals: 0 } }] },
+    });
+  }
+
+  it("refund: irregular deposits back in full, a compliance hold only on the compliance decision, never before the deposit", async () => {
     migrations().push(campaign());
     const held = seedDeposit({ status: "irregular", units_due: "0", reason_code: "compliance_hold", amount_base: "1234" });
     const s = sig();
-    txs.map.set(s, {
-      slot: 5, blockTime: 1, transaction: { signatures: [s], message: { header: { numRequiredSignatures: 1 }, accountKeys: [DEPOSIT_OWNER, depositAta, holderAta], instructions: [] } },
-      meta: { err: null, innerInstructions: [],
-        preTokenBalances: [{ accountIndex: 1, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "5000", decimals: 0 } }],
-        postTokenBalances: [{ accountIndex: 1, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "3766", decimals: 0 } }, { accountIndex: 2, mint: OLD_MINT, owner: HOLDER, uiTokenAmount: { amount: "1234", decimals: 0 } }] },
-    });
+    refundTx(s, 1234);
     expect(await rec({ kind: "refund", signature: s, deposit_id: held.id })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/compliance/) } });
-    expect((await rec({ kind: "refund", signature: s, deposit_id: held.id, compliance_cleared: true })).body.data).toEqual({ created: true, deposit_id: held.id });
+    expect((await rec({ kind: "refund", signature: s, deposit_id: held.id, compliance_cleared: true })).body.data).toEqual({ created: true, deposits: 1, amount_base: "1234" });
     expect(held).toMatchObject({ status: "refunded", refund_tx: s });
     const accepted = seedDeposit({});
     expect(await rec({ kind: "refund", signature: sig(), deposit_id: accepted.id })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/unless the campaign is cancelled/) } });
+    // An older transfer between the same accounts is not the refund of a later deposit.
+    const late = seedDeposit({ status: "irregular", units_due: "0", reason_code: "outside_window", amount_base: "77", deposit_slot: 3_000 });
+    const early = sig();
+    refundTx(early, 77, 2_500);
+    expect(await rec({ kind: "refund", signature: early, deposit_ids: [late.id] })).toMatchObject({ status: 400, body: { error: expect.stringMatching(/not later than the deposits/) } });
+  });
+
+  it("refund: one transaction returns several small deposits of one holder, never two holders'", async () => {
+    migrations().push(campaign());
+    const dust = [1, 2, 3].map((n) => seedDeposit({ status: "irregular", units_due: "0", reason_code: "not_lot_multiple", amount_base: String(n) }));
+    const stranger = seedDeposit({ status: "irregular", units_due: "0", reason_code: "not_lot_multiple", amount_base: "4", holder_wallet: OTHER });
+    expect(await rec({ kind: "refund", signature: sig(), deposit_ids: [dust[0].id, stranger.id] })).toMatchObject({ status: 400, body: { error: expect.stringMatching(/one holder/) } });
+    const s = sig();
+    refundTx(s, 6);
+    expect((await rec({ kind: "refund", signature: s, deposit_ids: dust.map((d) => d.id) })).body.data).toEqual({ created: true, deposits: 3, amount_base: "6" });
+    expect(dust.every((d) => d.status === "refunded" && d.refund_tx === s)).toBe(true);
+    expect((await rec({ kind: "refund", signature: s, deposit_ids: dust.map((d) => d.id) })).body.data).toMatchObject({ created: false });
   });
 
   it("burn: only after the window, once", async () => {
@@ -496,13 +547,21 @@ describe("POST /api/token-migrations/admin/record", () => {
     burnData[0] = 15;
     new DataView(burnData.buffer).setBigUint64(1, B(10_000), true);
     txs.map.set(s, {
-      slot: 7, blockTime: 1, transaction: { signatures: [s], message: { header: { numRequiredSignatures: 1 }, accountKeys: [DEPOSIT_OWNER, TOKEN_PROGRAM_CLASSIC, depositAta, OLD_MINT], instructions: [{ programIdIndex: 1, accounts: [2, 3, 0], data: b58.decode(burnData) }] } },
+      slot: 7_000, blockTime: Math.floor(NOW / 1000), transaction: { signatures: [s], message: { header: { numRequiredSignatures: 1 }, accountKeys: [DEPOSIT_OWNER, TOKEN_PROGRAM_CLASSIC, depositAta, OLD_MINT], instructions: [{ programIdIndex: 1, accounts: [2, 3, 0], data: b58.decode(burnData) }] } },
       meta: { err: null, innerInstructions: [],
         preTokenBalances: [{ accountIndex: 2, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "10000", decimals: 0 } }],
         postTokenBalances: [{ accountIndex: 2, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "0", decimals: 0 } }] },
     });
     expect(await rec({ kind: "burn", signature: s })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/close the campaign first/) } });
-    migrations()[0].status = "closed";
+    Object.assign(migrations()[0], { status: "closed", closed_at: new Date(NOW - 3_600_000).toISOString() });
+    // Not while a deposit still waits for its refund.
+    const pending = seedDeposit({ status: "irregular", units_due: "0", reason_code: "outside_window" });
+    expect(await rec({ kind: "burn", signature: s })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/every deposit is settled/) } });
+    Object.assign(pending, { status: "refunded", refund_tx: sig() });
+    // Not a burn from before the close.
+    Object.assign(migrations()[0], { closed_at: new Date(NOW + 3_600_000).toISOString() });
+    expect(await rec({ kind: "burn", signature: s })).toMatchObject({ status: 400, body: { error: expect.stringMatching(/before the campaign closed/) } });
+    Object.assign(migrations()[0], { closed_at: new Date(NOW - 3_600_000).toISOString() });
     expect((await rec({ kind: "burn", signature: s })).body.data).toEqual({ created: true, burned: "10000" });
     expect(migrations()[0]).toMatchObject({ old_tokens_burn_tx: s, old_tokens_burned: "10000" });
     expect(await rec({ kind: "burn", signature: sig() })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/already recorded/) } });
@@ -510,23 +569,88 @@ describe("POST /api/token-migrations/admin/record", () => {
 });
 
 describe("POST /api/token-migrations/admin/reconcile", () => {
-  it("records the deposits nobody recorded, skips what is known and what is not a deposit", async () => {
+  /** The deposit account's history, newest first, served page by page like getSignaturesForAddress. */
+  function history(newestFirst: string[]) {
+    chain.depositAccountPage.mockImplementation(async (_ata: string, opts: { before: string | null; until: string | null; limit: number }) => {
+      let list = newestFirst;
+      if (opts.until) list = list.slice(0, Math.max(0, list.indexOf(opts.until)));
+      if (opts.before) list = list.slice(list.indexOf(opts.before) + 1);
+      const page = list.slice(0, opts.limit);
+      return { entries: page.map((signature) => ({ signature, slot: B(5_000), failed: false })), exhausted: page.length < opts.limit || page.length === list.length };
+    });
+  }
+  /** A transaction that touched the deposit account without moving the old token (noise). */
+  function noise(signature: string) {
+    txs.map.set(signature, {
+      slot: 5_000, blockTime: 1, transaction: { signatures: [signature], message: { header: { numRequiredSignatures: 1 }, accountKeys: [OTHER, depositAta], instructions: [] } },
+      meta: { err: null, innerInstructions: [], preTokenBalances: [], postTokenBalances: [] },
+    });
+  }
+
+  it("records the deposits nobody recorded, passes over what is known, and skips what is not a deposit", async () => {
     migrations().push(campaign());
     const known = seedDeposit({});
     const fresh = sig();
     depositTx(fresh, { lots: 1 });
     const creation = sig();
-    txs.map.set(creation, {
-      slot: 1, blockTime: 1, transaction: { signatures: [creation], message: { header: { numRequiredSignatures: 1 }, accountKeys: [ADMIN, depositAta], instructions: [] } },
-      meta: { err: null, innerInstructions: [], preTokenBalances: [], postTokenBalances: [{ accountIndex: 1, mint: OLD_MINT, owner: DEPOSIT_OWNER, uiTokenAmount: { amount: "0", decimals: 0 } }] },
-    });
-    chain.depositAccountSignatures.mockResolvedValue({ signatures: [creation, known.deposit_tx, fresh], truncated: false });
+    noise(creation);
+    history([fresh, known.deposit_tx as string, creation]);
     const res = await call(adminReconcile, ADMIN, { id: MIGRATION_ID });
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ scanned: 3, processed: 2, remaining: 0 });
-    expect((res.body.data!.results as Array<{ outcome: string }>).map((r) => r.outcome)).toEqual(["not_a_deposit", "recorded"]);
+    expect(res.body.data).toMatchObject({ examined: 2, complete: true, stopped: null });
+    expect((res.body.data!.results as Array<{ outcome: string }>).map((r) => r.outcome)).toEqual(["recorded", "not_a_deposit"]);
     expect(deposits().find((d) => d.deposit_tx === fresh)).toMatchObject({ recorded_via: "reconcile", status: "accepted" });
+    // The sweep is complete: its newest signature is the cursor, and the next run reads nothing again.
+    expect(migrations()[0]).toMatchObject({ reconcile_cursor: fresh, reconcile_sweep_top: null, reconcile_sweep_before: null });
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID })).body.data).toMatchObject({ examined: 0, complete: true });
     expect((await call(adminReconcile, HOLDER, { id: MIGRATION_ID })).status).toBe(403);
+  });
+
+  it("cannot be stalled by noise: a sweep resumes where the last run stopped until it reaches the deposits", async () => {
+    migrations().push(campaign());
+    // 100 noise transactions on top of an unrecorded deposit (the oldest).
+    const deposit = sig();
+    depositTx(deposit, { lots: 2 });
+    const spam = Array.from({ length: 100 }, () => sig());
+    spam.forEach(noise);
+    history([...spam].reverse().concat(deposit));
+    const first = await call(adminReconcile, ADMIN, { id: MIGRATION_ID });
+    expect(first.body.data).toMatchObject({ examined: 40, complete: false });
+    expect(migrations()[0].reconcile_sweep_top).toBe(spam[spam.length - 1]);
+    const second = await call(adminReconcile, ADMIN, { id: MIGRATION_ID });
+    expect(second.body.data).toMatchObject({ examined: 40, complete: false });
+    const third = await call(adminReconcile, ADMIN, { id: MIGRATION_ID });
+    expect(third.body.data).toMatchObject({ examined: 21, complete: true });
+    expect(deposits().find((d) => d.deposit_tx === deposit)).toMatchObject({ status: "accepted", units_due: "2" });
+    expect(migrations()[0]).toMatchObject({ reconcile_cursor: spam[spam.length - 1], reconcile_sweep_top: null });
+    // A new deposit later: the next sweep reads only what came after the cursor.
+    const later = sig();
+    depositTx(later, { lots: 1 });
+    history([later, ...[...spam].reverse(), deposit]);
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID })).body.data).toMatchObject({ examined: 1, complete: true });
+  });
+
+  it("stops at a screen that cannot answer and reads that transaction again next time", async () => {
+    migrations().push(campaign());
+    const a = sig();
+    depositTx(a, { lots: 1 });
+    history([a]);
+    screen.unavailable = true;
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID })).status).toBe(503);
+    expect(migrations()[0]).toMatchObject({ reconcile_cursor: null, reconcile_sweep_top: null });
+    screen.unavailable = false;
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID })).body.data).toMatchObject({ examined: 1, complete: true });
+  });
+
+  it("records one transaction the operator names, and never one from before the opening", async () => {
+    migrations().push(campaign());
+    const named = sig();
+    depositTx(named, { lots: 1 });
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID, signature: named })).body.data).toMatchObject({ results: [{ outcome: "recorded" }] });
+    migrations()[0].opened_slot = 1_000_000;
+    const old = sig();
+    depositTx(old, { lots: 1 });
+    expect((await call(adminReconcile, ADMIN, { id: MIGRATION_ID, signature: old })).body.data).toMatchObject({ results: [{ outcome: "not_a_deposit", detail: expect.stringMatching(/before the campaign opened/) }] });
   });
 });
 

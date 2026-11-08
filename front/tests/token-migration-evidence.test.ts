@@ -195,6 +195,17 @@ describe("depositEvidence", () => {
     expect(() => depositEvidence(tx, SIG, expectation)).toThrow(message);
   });
 
+  it("refuses a source account whose owner changed inside the transaction (classic SPL SetAuthority)", () => {
+    const handedOver = deposit({
+      pre: [{ account: HOLDER_ATA, mint: OLD_MINT, owner: HOLDER, amount: 12_345 }],
+      post: [
+        { account: HOLDER_ATA, mint: OLD_MINT, owner: OTHER, amount: 2_345 },
+        { account: DEPOSIT_ATA, mint: OLD_MINT, owner: DEPOSIT_OWNER, amount: 10_000 },
+      ],
+    });
+    expect(() => depositEvidence(handedOver, SIG, { ...expectation, holder: null })).toThrow(/owner changed inside this transaction/);
+  });
+
   it("refuses a deposit the claiming wallet did not make", () => {
     expect(() => depositEvidence(deposit(), SIG, { ...expectation, holder: OTHER })).toThrow(/did not come from your wallet/);
   });

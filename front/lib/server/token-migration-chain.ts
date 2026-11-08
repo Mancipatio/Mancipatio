@@ -218,32 +218,46 @@ export async function readHolderBalance(input: { holder: string; oldMint: string
   }
 }
 
-/** The most signatures one reconcile reads back through the deposit account's history. */
-export const RECONCILE_SCAN_LIMIT = 5_000;
+/** The network's finalized slot now (the opening slot of a campaign). */
+export async function readFinalizedSlot(): Promise<bigint> {
+  try {
+    return BigInt(await getServerRpc().getSlot({ commitment: "finalized" }).send({ abortSignal: AbortSignal.timeout(READ_TIMEOUT_MS) }));
+  } catch (err) {
+    unavailable("finalized slot read failed", err);
+  }
+}
+
+export type DepositAccountEntry = { signature: string; slot: bigint; failed: boolean };
 
 /**
- * Every successful, finalized transaction that touched the deposit account,
- * oldest first (up to RECONCILE_SCAN_LIMIT; `truncated` says there may be
- * older ones).
+ * One page of the finalized transactions that touched the deposit account,
+ * NEWEST FIRST: below `before` (exclusive; from the newest when null), above
+ * `until` (exclusive; down to the oldest when null), and at or after
+ * `minSlot` (the opening slot). `exhausted` says nothing older remains in
+ * that range (the page was short, or it reached `until` or the opening
+ * slot). Failed transactions are listed too: they moved nothing, and the
+ * reconcile passes over them.
  */
-export async function depositAccountSignatures(depositAta: string): Promise<{ signatures: string[]; truncated: boolean }> {
+export async function depositAccountPage(
+  depositAta: string,
+  opts: { before: string | null; until: string | null; minSlot: bigint; limit: number },
+): Promise<{ entries: DepositAccountEntry[]; exhausted: boolean }> {
   try {
-    const rpc = getServerRpc();
-    const out: string[] = [];
-    let before: Signature | undefined;
-    for (;;) {
-      const page = await rpc
-        .getSignaturesForAddress(address(depositAta) as Address, {
-          commitment: "finalized",
-          limit: 1000,
-          ...(before ? { before } : {}),
-        })
-        .send({ abortSignal: AbortSignal.timeout(READ_TIMEOUT_MS) });
-      for (const entry of page) if (entry.err === null) out.push(entry.signature);
-      if (page.length < 1000) return { signatures: out.reverse(), truncated: false };
-      if (out.length >= RECONCILE_SCAN_LIMIT) return { signatures: out.reverse(), truncated: true };
-      before = page[page.length - 1].signature;
+    const page = await getServerRpc()
+      .getSignaturesForAddress(address(depositAta) as Address, {
+        commitment: "finalized",
+        limit: opts.limit,
+        ...(opts.before ? { before: opts.before as Signature } : {}),
+        ...(opts.until ? { until: opts.until as Signature } : {}),
+      })
+      .send({ abortSignal: AbortSignal.timeout(READ_TIMEOUT_MS) });
+    const entries: DepositAccountEntry[] = [];
+    for (const entry of page) {
+      const slot = BigInt(entry.slot);
+      if (slot < opts.minSlot) return { entries, exhausted: true };
+      entries.push({ signature: entry.signature, slot, failed: entry.err !== null });
     }
+    return { entries, exhausted: page.length < opts.limit };
   } catch (err) {
     unavailable("deposit account history read failed", err);
   }

@@ -17,7 +17,12 @@
 //              accepted deposits of a cancelled campaign are then refunded.
 //   completed  closed → completed, once every deposit is delivered or
 //              refunded: the final report (lib/token-migration/report.ts) is
-//              built here, stored with its SHA-256, and immutable from then on.
+//              built here, stored with its SHA-256 and its completion time,
+//              and immutable from then on.
+// The opening also stores the finalized slot it read: no transfer before it
+// is one of the campaign's deposits. Every step is applied only to the row as
+// it was read (status and revision), so a concurrent change (a burn, another
+// step) refuses it instead of being overwritten or left out of the report.
 // Every step but the opening stays available while the module is off: they
 // close or wind down what exists.
 
@@ -29,7 +34,7 @@ import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { dbFailure, MIGRATIONS, readDeposits, readMigration, unitsTaken, uuidParam } from "@/lib/server/token-migrations";
-import { readDepositAccount, readOldMint } from "@/lib/server/token-migration-chain";
+import { readDepositAccount, readFinalizedSlot, readOldMint } from "@/lib/server/token-migration-chain";
 import { migrationTransitionAllowed, MIGRATION_STATUS_LABEL, type MigrationStatus } from "@/lib/token-migration/model";
 import { buildFinalReport, sha256Hex } from "@/lib/token-migration/report";
 import { MIGRATION_SELECT, parseMigrationRow } from "@/lib/token-migration/rows";
@@ -83,6 +88,8 @@ export async function POST(request: Request) {
         program: migration.old_token_program,
       });
       if (!account.ok) throw new SiwsError(409, account.problem);
+      // No transfer before this slot is one of the campaign's deposits (0085 opened_slot).
+      patch.opened_slot = Number(await readFinalizedSlot());
     }
     if (target === "closed") {
       const ended = Date.now() >= Date.parse(migration.window_closes_at);
@@ -97,10 +104,13 @@ export async function POST(request: Request) {
       if (open.length > 0) {
         throw new SiwsError(409, `${open.length} deposit(s) still wait for delivery or refund: settle every deposit before completing`);
       }
-      const report = buildFinalReport(migration, deposits, new Date().toISOString());
+      // The report states this completion time, and the row keeps it (0085 keeps a plausible one).
+      const completedAt = new Date().toISOString();
+      const report = buildFinalReport(migration, deposits, completedAt);
       reportSha = await sha256Hex(report);
       patch.final_report = report;
       patch.final_report_sha256 = reportSha;
+      patch.completed_at = completedAt;
     }
 
     const { data, error } = await sb
@@ -109,6 +119,8 @@ export async function POST(request: Request) {
       .eq("network", detectNetwork())
       .eq("id", id)
       .eq("status", migration.status)
+      // Nothing else changed since it was read (a burn recorded meanwhile would be missing from the report).
+      .eq("updated_at", migration.updated_at)
       .select(MIGRATION_SELECT)
       .maybeSingle();
     if (error?.code === "23505") throw new SiwsError(409, "Another open campaign already uses this deposit account");

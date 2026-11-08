@@ -161,20 +161,26 @@ export function transitionMigration(
 }
 
 export type ReconcileAnswer = {
-  scanned: number;
-  truncated: boolean;
-  processed: number;
-  remaining: number;
-  results: { signature: string; outcome: "recorded" | "already" | "not_a_deposit" | "awaiting_finalization"; detail?: string; status?: string }[];
+  /** Transactions this run read. */
+  examined: number;
+  /** True when the sweep reached the last examined point: nothing older is left unread. */
+  complete: boolean;
+  /** Why the run stopped early (a screen or a node that could not answer, a concurrent change), or null. */
+  stopped: string | null;
+  results: { signature: string; outcome: "recorded" | "already" | "not_a_deposit" | "other_campaign"; detail?: string; status?: string }[];
 };
 
-export function reconcileMigration(session: WalletSession | null | undefined, id: string): Promise<ReconcileAnswer> {
-  return signedFetch<ReconcileAnswer>(session, "/api/token-migrations/admin/reconcile", "tokenMigration.adminReconcile", { id });
+/** The next stretch of the deposit account's history, or (with `signature`) that one transaction. */
+export function reconcileMigration(session: WalletSession | null | undefined, id: string, signature?: string): Promise<ReconcileAnswer> {
+  return signedFetch<ReconcileAnswer>(session, "/api/token-migrations/admin/reconcile", "tokenMigration.adminReconcile", {
+    id,
+    ...(signature ? { signature } : {}),
+  });
 }
 
 export type SettlementInput =
   | { id: string; kind: "delivery"; signature: string; deposit_ids?: string[] }
-  | { id: string; kind: "refund"; signature: string; deposit_id: string; compliance_cleared?: boolean }
+  | { id: string; kind: "refund"; signature: string; deposit_ids: string[]; compliance_cleared?: boolean }
   | { id: string; kind: "burn"; signature: string };
 
 export function recordMigrationSettlement(

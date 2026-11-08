@@ -32,7 +32,7 @@ export const MIGRATION_SELECT = [
   "source", "unclaimed_policy", "deposit_owner", "deposit_ata", "window_opens_at", "window_closes_at",
   "terms_doc_sha256", "terms_doc_url", "treasury_wallet", "final_report_sha256",
   "old_tokens_burn_tx", "old_tokens_burned:old_tokens_burned::text",
-  "created_by", "opened_at", "closed_at", "completed_at", "cancelled_at", "created_at", "updated_at",
+  "created_by", "opened_slot", "reconcile_cursor", "reconcile_sweep_top", "reconcile_sweep_before", "opened_at", "closed_at", "completed_at", "cancelled_at", "created_at", "updated_at",
 ].join(",");
 
 export const DEPOSIT_SELECT = [
@@ -81,6 +81,12 @@ export type MigrationRow = {
   old_tokens_burn_tx: string | null;
   old_tokens_burned: string | null;
   created_by: string;
+  /** The finalized slot read when the campaign opened: no earlier transfer is a deposit. */
+  opened_slot: number | null;
+  /** The reconcile's sweep of the deposit account (0085: the cursor of the last completed sweep, and the one in progress). */
+  reconcile_cursor: string | null;
+  reconcile_sweep_top: string | null;
+  reconcile_sweep_before: string | null;
   opened_at: string | null;
   closed_at: string | null;
   completed_at: string | null;
@@ -199,6 +205,10 @@ export function parseMigrationRow(raw: unknown): MigrationRow {
     old_tokens_burn_tx: optStr(r, "old_tokens_burn_tx"),
     old_tokens_burned: optDecimal(r, "old_tokens_burned"),
     created_by: str(r, "created_by"),
+    opened_slot: r.opened_slot === null || r.opened_slot === undefined ? null : int(r, "opened_slot"),
+    reconcile_cursor: optStr(r, "reconcile_cursor"),
+    reconcile_sweep_top: optStr(r, "reconcile_sweep_top"),
+    reconcile_sweep_before: optStr(r, "reconcile_sweep_before"),
     opened_at: optStr(r, "opened_at"),
     closed_at: optStr(r, "closed_at"),
     completed_at: optStr(r, "completed_at"),
@@ -296,7 +306,10 @@ export type PublicDeposit = {
 };
 
 /** The campaign as the public pages and the public route show it (no operator wallet, no internal note). */
-export type PublicMigration = Omit<MigrationRow, "created_by" | "updated_at" | "network"> & {
+export type PublicMigration = Omit<
+  MigrationRow,
+  "created_by" | "updated_at" | "network" | "reconcile_cursor" | "reconcile_sweep_top" | "reconcile_sweep_before"
+> & {
   progress: MigrationProgress;
   deposits: PublicDeposit[];
 };
@@ -322,11 +335,13 @@ export function chainOrder(a: Pick<DepositRow, "deposit_slot" | "deposit_tx">, b
 }
 
 export function publicMigration(row: MigrationRow, deposits: readonly DepositRow[]): PublicMigration {
-  // The operator's wallet, the row revision and the network stay internal.
-  const { created_by: createdBy, updated_at: updatedAt, network, ...facts } = row;
-  void createdBy;
-  void updatedAt;
-  void network;
+  // The operator's wallet, the row revision, the network and the reconcile state stay internal.
+  const {
+    created_by: createdBy, updated_at: updatedAt, network,
+    reconcile_cursor: cursor, reconcile_sweep_top: sweepTop, reconcile_sweep_before: sweepBefore,
+    ...facts
+  } = row;
+  void [createdBy, updatedAt, network, cursor, sweepTop, sweepBefore];
   return {
     ...facts,
     progress: migrationProgress(deposits),

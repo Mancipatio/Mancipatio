@@ -165,17 +165,17 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
     setConfirm(null);
   }
 
-  async function reconcile() {
+  /** The next stretch of the deposit account's history, or one transaction the operator names. */
+  async function reconcile(signature?: string) {
     await run("Reconciling the deposit account…", async () => {
       if (!conn.wallet) throw new Error("Connect your wallet.");
-      const answer = await reconcileMigration(conn.wallet, m.id);
+      const answer = await reconcileMigration(conn.wallet, m.id, signature);
       const recorded = answer.results.filter((r) => r.outcome === "recorded").length;
-      const skipped = answer.results.filter((r) => r.outcome === "not_a_deposit");
+      const skipped = answer.results.filter((r) => r.outcome === "not_a_deposit" || r.outcome === "other_campaign");
       setReconcileNote(
-        `${answer.scanned} transactions in the deposit account's history; ${recorded} new ${recorded === 1 ? "deposit" : "deposits"} recorded` +
-          (skipped.length ? `; ${skipped.length} not a deposit (${skipped.map((s) => `${short(s.signature)}: ${s.detail}`).join("; ")})` : "") +
-          (answer.remaining ? `; ${answer.remaining} still to read: run it again.` : ".") +
-          (answer.truncated ? " The history is longer than one scan: older transactions were not read." : ""),
+        `${answer.examined} ${answer.examined === 1 ? "transaction" : "transactions"} read; ${recorded} new ${recorded === 1 ? "deposit" : "deposits"} recorded` +
+          (skipped.length ? `; ${skipped.length} not a deposit of this campaign (${skipped.map((x) => `${short(x.signature)}: ${x.detail}`).join("; ")})` : "") +
+          (answer.stopped ? `. Stopped: ${answer.stopped}` : answer.complete ? ". The deposit account's history is read up to now." : ". More history is left: run it again."),
       );
     });
   }
@@ -184,7 +184,7 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
     const session = conn.wallet;
     if (!session) throw new Error("Connect your wallet.");
     const outcome = await refundRecovery.recordFinalized(receipt, async () => {
-      await recordMigrationSettlement(session, { id: m.id, kind: "refund", signature: receipt.signature, deposit_id: depositId, compliance_cleared: cleared });
+      await recordMigrationSettlement(session, { id: m.id, kind: "refund", signature: receipt.signature, deposit_ids: [depositId], compliance_cleared: cleared });
     });
     if (outcome === "failed") throw new Error("The refund failed on the network: nothing moved.");
     if (outcome === "not_finalized") throw new Error("The refund is not finalized yet: use Retry recording in a minute; do not refund again.");
@@ -226,11 +226,16 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
   }
 
   async function recordElsewhere() {
+    if (record.kind === "reconcile") {
+      await reconcile(record.signature.trim());
+      setRecord({ kind: record.kind, signature: "", depositId: "", cleared: false });
+      return;
+    }
     await run("Recording the transaction…", async () => {
       if (!conn.wallet) throw new Error("Connect your wallet.");
       const signature = record.signature.trim();
       const input = record.kind === "refund"
-        ? { id: m.id, kind: "refund" as const, signature, deposit_id: record.depositId.trim(), compliance_cleared: record.cleared }
+        ? { id: m.id, kind: "refund" as const, signature, deposit_ids: record.depositId.split(/[\s,]+/).filter(Boolean), compliance_cleared: record.cleared }
         : record.kind === "burn" ? { id: m.id, kind: "burn" as const, signature } : { id: m.id, kind: "delivery" as const, signature };
       const answer = await recordMigrationSettlement(conn.wallet, input);
       toast.show({ kind: "success", title: answer.created === false ? "Already recorded" : "Transaction recorded" });
@@ -335,19 +340,20 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
 
       {m.status !== "draft" && (
         <Card title="Record a transaction made elsewhere">
-          <p className="text-[13px] text-slate-600">A delivery, refund or burn a Squads vault executed: the server reads it at finalized and records it only when its balances prove exactly that.</p>
+          <p className="text-[13px] text-slate-600">A delivery, refund or burn a Squads vault executed, or one deposit seen on an explorer: the server reads it at finalized and records it only when its balances prove exactly that. One refund transaction may return several irregular deposits of one holder.</p>
           <div className="mt-3 grid gap-3 sm:grid-cols-[10rem_1fr]">
             <Field label="Kind">
               <select className={inputClass} value={record.kind} onChange={(e) => setRecord({ ...record, kind: e.target.value })}>
                 <option value="delivery">Delivery</option>
                 <option value="refund">Refund</option>
                 <option value="burn">Burn</option>
+                <option value="reconcile">Deposit (one transaction)</option>
               </select>
             </Field>
             <Field label="Transaction signature"><input className={`${inputClass} font-mono text-xs`} value={record.signature} onChange={(e) => setRecord({ ...record, signature: e.target.value })} /></Field>
             {record.kind === "refund" && (
               <>
-                <Field label="Deposit id"><input className={`${inputClass} font-mono text-xs`} value={record.depositId} onChange={(e) => setRecord({ ...record, depositId: e.target.value })} placeholder={deposits.find((d) => d.status === "irregular")?.id} /></Field>
+                <Field label="Deposit ids (one holder's, comma-separated)"><input className={`${inputClass} font-mono text-xs`} value={record.depositId} onChange={(e) => setRecord({ ...record, depositId: e.target.value })} placeholder={deposits.find((d) => d.status === "irregular")?.id} /></Field>
                 <label className="flex items-center gap-2 self-end text-xs text-slate-700"><input type="checkbox" checked={record.cleared} onChange={(e) => setRecord({ ...record, cleared: e.target.checked })} /> The compliance team decided this refund (needed for a compliance hold)</label>
               </>
             )}

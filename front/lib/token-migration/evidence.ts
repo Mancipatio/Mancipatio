@@ -85,8 +85,11 @@ function context(tx: ChainTransaction, signature: string) {
 
 export type BalanceChange = {
   account: string;
-  /** The token account's owner as the node reports it (null when it does not). */
+  /** The token account's owner as the node reports it (after the transaction, else before; null when it does not). */
   owner: string | null;
+  /** The owner before and after, separately: a classic SPL account's owner can change inside the transaction. */
+  preOwner: string | null;
+  postOwner: string | null;
   pre: bigint;
   post: bigint;
 };
@@ -113,7 +116,7 @@ export function mintBalanceChanges(tx: ChainTransaction, mint: string): BalanceC
     const account = keys[index(accountIndex, keys.length)];
     let change = changes.get(account);
     if (!change) {
-      change = { account, owner: null, pre: ZERO, post: ZERO };
+      change = { account, owner: null, preOwner: null, postOwner: null, pre: ZERO, post: ZERO };
       changes.set(account, change);
     }
     return change;
@@ -122,15 +125,25 @@ export function mintBalanceChanges(tx: ChainTransaction, mint: string): BalanceC
     if (balance.mint !== mint) continue;
     const change = entry(balance.accountIndex);
     change.pre = atomic(balance.uiTokenAmount.amount);
+    change.preOwner = balance.owner ?? null;
     change.owner = balance.owner ?? change.owner;
   }
   for (const balance of tx.meta.postTokenBalances ?? []) {
     if (balance.mint !== mint) continue;
     const change = entry(balance.accountIndex);
     change.post = atomic(balance.uiTokenAmount.amount);
+    change.postOwner = balance.owner ?? null;
     change.owner = balance.owner ?? change.owner;
   }
   return [...changes.values()];
+}
+
+/** Refuses an account whose owner changed inside the transaction (attribution would follow the new owner). */
+function sameOwner(ch: BalanceChange): void {
+  requireProof(
+    ch.preOwner === null || ch.postOwner === null || ch.preOwner === ch.postOwner,
+    "A token account's owner changed inside this transaction, so it proves nothing here",
+  );
 }
 
 function utf8(data: Uint8Array): string | null {
@@ -180,6 +193,7 @@ export function depositEvidence(tx: ChainTransaction, signature: string, expecte
   const changes = mintBalanceChanges(tx, expected.oldMint);
   const deposit = changes.find((ch) => ch.account === expected.depositAta);
   requireProof(deposit && deposit.post > deposit.pre, "This transaction put no tokens into the campaign's deposit account");
+  sameOwner(deposit);
   const amount = deposit.post - deposit.pre;
   let sent = ZERO;
   const sources = new Set<string>();
@@ -187,6 +201,7 @@ export function depositEvidence(tx: ChainTransaction, signature: string, expecte
     if (ch.account === expected.depositAta || ch.post === ch.pre) continue;
     requireProof(ch.post < ch.pre, "This transaction also moved the token into another account, so it is not a plain deposit (the deposit owner returns it by hand)");
     requireProof(ch.owner, "The network did not report who owns the source token account; try again later");
+    sameOwner(ch);
     sources.add(ch.owner);
     sent += ch.pre - ch.post;
   }
@@ -243,6 +258,7 @@ export function deliveryEvidence(tx: ChainTransaction, signature: string, expect
     const ch = changes.get(ata);
     requireProof(ch && ch.post - ch.pre === units, `The holder ${holder} did not receive exactly ${units.toString()} units in this transaction`);
     requireProof(ch.owner === holder, `The receiving token account does not belong to ${holder}`);
+    sameOwner(ch);
     total += units;
   }
   const treasury = changes.get(expected.treasuryAta);
@@ -276,6 +292,7 @@ export function refundEvidence(tx: ChainTransaction, signature: string, expected
   for (const ch of changes) {
     if (ch.account === expected.depositAta || ch.post === ch.pre) continue;
     requireProof(ch.post > ch.pre && ch.owner === expected.holder, "The tokens did not go back to the wallet that deposited them");
+    sameOwner(ch);
     received += ch.post - ch.pre;
   }
   requireProof(received === expected.amount, "The holder did not receive exactly this deposit's amount");
