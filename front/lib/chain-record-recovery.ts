@@ -18,7 +18,12 @@ export type ChainRecordKind =
   | "conversion"
   | "delivery_return"
   | "conversion_return"
-  | "custody_outcome";
+  | "custody_outcome"
+  // Token migration (lib/token-migration): a holder's deposit, and the
+  // operator's delivery and refund transactions, each recorded once finalized.
+  | "migration_deposit"
+  | "migration_delivery"
+  | "migration_refund";
 export type ChainRecordScope = {
   kind: ChainRecordKind;
   network: Network;
@@ -39,6 +44,9 @@ const KINDS: ChainRecordKind[] = [
   "delivery_return",
   "conversion_return",
   "custody_outcome",
+  "migration_deposit",
+  "migration_delivery",
+  "migration_refund",
 ];
 const NETWORKS: string[] = ["mainnet", "devnet", "testnet", "localnet"];
 

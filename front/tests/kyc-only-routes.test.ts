@@ -329,6 +329,7 @@ describe("source matrix", () => {
       "inquiries/create", "launchpad/record-purchase", "conversion/cancel", "conversion/reclaim", "conversion/deposited",
       "delivery/cancel", "delivery/reclaim", "resell/update", "sale-requests/decide",
       "distribution-plans/proof", "payout-snapshots/proof",
+      "token-migrations/record", "token-migrations/public", "token-migrations/report",
     ]) {
       const text = source(route);
       expect(text, route).not.toContain("requireArea(");
@@ -398,6 +399,10 @@ describe("every API route is classified", () => {
     "sale-approvals/settle": "platform",
     // Finishes an upload that storage/upload (gated for issuers) authorized.
     "storage/finalize": "recording",
+    // Token migration: the public campaigns and their final reports (facts public on chain), and the
+    // holder's record of a deposit that already landed (its entry, the precheck, is module-gated).
+    "token-migrations/public": "read", "token-migrations/report": "read",
+    "token-migrations/record": "recording",
     "tos/accept": "terms", "tos/status": "terms",
     "vesting-series/creation-state": "read", "vesting-series/list-mine": "read",
     "vesting-series/mark-cancelled": "exit",
