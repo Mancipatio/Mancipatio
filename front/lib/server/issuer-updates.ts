@@ -201,7 +201,8 @@ export function issuerUpdateDigest(row: IssuerUpdateRow, docs: readonly IssuerUp
 
 /** The issuer's (and the admin's) view, with the memo to sign while a published update is unanchored. */
 export function toRecord(row: IssuerUpdateRow, docs: readonly IssuerUpdateDocumentRow[] = []): IssuerUpdateRecord {
-  const anchor = row.status === "published" && !row.anchor_tx
+  // 0090 gives every published row its published_at; without one nothing is offered to anchor.
+  const anchor = row.status === "published" && !row.anchor_tx && row.published_at
     ? { reference: issuerUpdateAnchorReference(row.id), sha256: issuerUpdateDigest(row, docs) }
     : null;
   return {
