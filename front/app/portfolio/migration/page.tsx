@@ -269,9 +269,9 @@ function MigrationWorkspace() {
       toast.dismiss(pendingId);
       if (sent) {
         toast.showTx(sent, { title: "Deposit sent: recording pending" });
-        toast.showError("Retry recording the deposit", err instanceof Error ? err.message : explainSendError(err));
+        toast.showError("Retry recording the deposit", explainSendError(err));
       } else {
-        toast.showError("Deposit not sent", err instanceof Error && !/wallet|transaction|simulat/i.test(err.message) ? err.message : explainSendError(err));
+        toast.showError("Deposit not sent", explainSendError(err));
       }
     } finally {
       busyRef.current = false;
