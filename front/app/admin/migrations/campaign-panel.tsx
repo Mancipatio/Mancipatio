@@ -36,6 +36,7 @@ import { readAdminMigration, reconcileMigration, recordMigrationSettlement, tran
 import {
   DEPOSIT_STATUS_LABEL,
   MIGRATION_STATUS_LABEL,
+  TOKEN_PROGRAM_2022,
   MIGRATION_SOURCE_LABEL,
   UNCLAIMED_POLICY_LABEL,
   windowStateAt,
@@ -43,7 +44,7 @@ import {
 } from "@/lib/token-migration/model";
 import { formatBaseUnits, formatEquityBps, formatPercentE4, formatUnits, unitPercent } from "@/lib/token-migration/ratio";
 import type { DepositRow, MigrationProgress, MigrationRow } from "@/lib/token-migration/rows";
-import { buildBurnInstructions, buildOpenDepositAccount, buildRefundInstructions } from "@/lib/token-migration/transactions";
+import { associatedTokenAccount, buildBurnInstructions, buildOpenDepositAccount, buildRefundInstructions } from "@/lib/token-migration/transactions";
 import { DeliveryPanel } from "./delivery-panel";
 import { AddressLink, Card, dangerButton, errorText, Field, inputClass, Notes, primaryButton, secondaryButton, short, TxLink, utcText } from "./ui";
 
@@ -83,6 +84,26 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
+
+  // The treasury's units of the class against the cap and what is due (re-read with every reload).
+  const [treasuryUnits, setTreasuryUnits] = useState<bigint | null | undefined>(undefined);
+  useEffect(() => {
+    if (!data) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const ata = await associatedTokenAccount(data.migration.treasury_wallet, data.migration.new_mint, TOKEN_PROGRAM_2022);
+        const account = await withRpcReadRetry(() => fetchEncodedAccount(client.runtime.rpc, ata, { commitment: "confirmed" }));
+        const units = account.exists && account.programAddress === TOKEN_PROGRAM_2022 ? getTokenDecoder().decode(account.data).amount : BigInt(0);
+        if (!cancelled) setTreasuryUnits(units);
+      } catch {
+        if (!cancelled) setTreasuryUnits(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data, client]);
 
   const refresh = useCallback(() => {
     void load();
@@ -232,7 +253,7 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
           <div><dt className="inline text-slate-500">Window: </dt><dd className="inline">{utcText(m.window_opens_at)} to {utcText(m.window_closes_at)}</dd></div>
           <div><dt className="inline text-slate-500">Progress: </dt><dd className="inline">{formatUnits(BigInt(progress.unitsDelivered))} delivered, {formatUnits(BigInt(progress.unitsDue))} due, {progress.holders} holders, {progress.refundsDue} refunds due</dd></div>
           <div><dt className="inline text-slate-500">Deposit account: </dt><dd className="inline"><AddressLink address={m.deposit_ata} /> (owner <AddressLink address={m.deposit_owner} />)</dd></div>
-          <div><dt className="inline text-slate-500">Treasury: </dt><dd className="inline"><AddressLink address={m.treasury_wallet} />, mint <AddressLink address={m.new_mint} /></dd></div>
+          <div><dt className="inline text-slate-500">Treasury: </dt><dd className="inline"><AddressLink address={m.treasury_wallet} /> holds {treasuryUnits === undefined ? "…" : treasuryUnits === null ? "(unreadable)" : formatUnits(treasuryUnits)} units of mint <AddressLink address={m.new_mint} /></dd></div>
           <div><dt className="inline text-slate-500">Source: </dt><dd className="inline">{MIGRATION_SOURCE_LABEL[m.source]}; {UNCLAIMED_POLICY_LABEL[m.unclaimed_policy].toLowerCase()}</dd></div>
           <div><dt className="inline text-slate-500">Swap Terms: </dt><dd className="inline">{m.terms_doc_url ? <a href={m.terms_doc_url} target="_blank" rel="noopener noreferrer" className="text-brand-700 underline">document</a> : "not set"}{m.terms_doc_sha256 ? ` · ${short(m.terms_doc_sha256)}` : ""}</dd></div>
           {m.final_report_sha256 && <div className="sm:col-span-2"><dt className="inline text-slate-500">Final report: </dt><dd className="inline"><a href={`/api/token-migrations/report?slug=${m.slug}`} className="text-brand-700 underline">JSON</a> · SHA-256 <span className="font-mono">{m.final_report_sha256}</span></dd></div>}
@@ -241,6 +262,12 @@ export function CampaignPanel({ id, onEdit, onChanged }: { id: string; onEdit: (
         <Notes tone="warn" items={[
           ...(m.deposit_owner === wallet && m.status === "draft" ? ["The deposit owner is your own wallet: one key could then move every deposit. A Squads vault is recommended."] : []),
           ...(m.status === "draft" && !entryOpen ? [moduleDisabledMessage("tokenMigration")] : []),
+          ...(typeof treasuryUnits === "bigint" && (m.status === "open" || m.status === "closed") && treasuryUnits < BigInt(progress.unitsDue)
+            ? [`The treasury holds ${formatUnits(treasuryUnits)} units, fewer than the ${formatUnits(BigInt(progress.unitsDue))} due: put units in the treasury before the next delivery.`]
+            : []),
+          ...(typeof treasuryUnits === "bigint" && m.status === "draft" && m.source === "founder_transfer" && treasuryUnits < cap
+            ? [`The treasury holds ${formatUnits(treasuryUnits)} of the ${formatUnits(cap)} units the cap can claim: the founders' units go to the treasury before opening (runbook §22).`]
+            : []),
         ]} />
         <div className="mt-4 flex flex-wrap gap-2">
           {m.status === "draft" && (
