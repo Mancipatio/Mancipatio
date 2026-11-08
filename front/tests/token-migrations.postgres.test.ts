@@ -190,7 +190,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
   it("serializes concurrent recordings so the cap is never passed", async () => {
     const id = create({ old_total_supply: "1000000000", excluded_wallet_amount: "0", excluded_manual_amount: "999950000", excluded_amount: "999950000", equity_bps: "1", granularity: "100000", lot_base_units: "5000", units_cap: "10" });
     setStatus(id, "open");
-    const calls = Array.from({ length: 12 }, (_, i) => db.queryAsync(`set role service_role; select public.record_token_migration_deposit(
+    const calls = Array.from({ length: 12 }, () => db.queryAsync(`set role service_role; select public.record_token_migration_deposit(
       '${id}', '${addr("b")}', '${sig()}', 1, now(), ${LOT}, 1, null, null, 'holder')->>'status'`));
     const results = await Promise.all(calls);
     expect(results.filter((r) => r === "accepted")).toHaveLength(10);
