@@ -11,6 +11,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Body, Button, ButtonRow, H2, PageHeader, Section } from "@/components/mx";
 import { detectNetwork, explorerAddressUrl, explorerTxUrl } from "@/lib/network";
+import { indexingAllowed } from "@/lib/indexing";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { loadPublicMigration } from "@/lib/server/token-migrations-public";
 import {
@@ -41,6 +42,8 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   return {
     title: `${m.old_symbol} to ${m.company_name}: token migration · Manci`,
     description: `${ratioWords(m)}. Window ${dateText(m.window_opens_at)} to ${dateText(m.window_closes_at)}. Proof of every deposit and delivery.`,
+    // The module off: the page stays (its proof is public) but is noindex where indexing is allowed.
+    ...(!navHrefVisible("/migrations") && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
 }
 

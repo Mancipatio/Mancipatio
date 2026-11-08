@@ -7,6 +7,7 @@
 import Link from "next/link";
 import { Body, Button, ButtonRow, EmptyState, H2, PageHeader, Section } from "@/components/mx";
 import { loadPublicMigrations, type PublicMigrationSummary } from "@/lib/server/token-migrations-public";
+import { indexingAllowed } from "@/lib/indexing";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { MIGRATION_STATUS_LABEL } from "@/lib/token-migration/model";
 import { formatBaseUnits, formatUnits } from "@/lib/token-migration/ratio";
@@ -14,10 +15,16 @@ import { dateText, HowItWorks, MigrationModuleNotice, ratioWords } from "./share
 
 export const dynamic = "force-dynamic";
 
+// With the module off (or KYC-only mode on) the page carries the notice and,
+// where the build allows indexing, is noindex like the guide of a
+// switched-off module; the sitemap leaves it out the same way (lib/sitemap.ts).
+const migrationsOff = !navHrefVisible("/migrations");
+
 export const metadata = {
   title: "Token migrations · Manci",
   description:
     "Companies that already issued a token on Solana can move their holders onto Manci: holders exchange the token for units of the company's share class at a published ratio.",
+  ...(migrationsOff && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
 };
 
 function CampaignCard({ m }: { m: PublicMigrationSummary }) {

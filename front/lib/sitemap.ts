@@ -47,6 +47,8 @@ export const SITEMAP_PAGES: readonly SitemapPage[] = [
   page("/markets/types", "monthly", 0.6),
   page("/markets/whitepapers", "weekly", 0.6),
   page("/markets/resell", "weekly", 0.5),
+  // Token migration campaigns (lib/pilot-scope.ts NAV_ROUTES): listed only while the module is on.
+  page("/migrations", "weekly", 0.5),
   page("/legal-structure", "monthly", 0.5),
   // Guides outside /solutions/[slug]; each leaves the list when its scope is off (navHrefVisible).
   page("/solutions/serbian-spv", "monthly", 0.5),
@@ -84,6 +86,7 @@ export const SITEMAP_EXCLUDED: Readonly<Record<string, string>> = {
   "/marketplace/otc": "client-rendered offer board without page metadata of its own",
   "/marketplace/otc/[offer]": "one page per offer, rendered in the browser from the chain",
   "/marketplace/governance": "client-rendered proposal board without page metadata of its own",
+  "/migrations/[slug]": "one page per token migration campaign, read from the database at request time; /migrations lists and links them",
 };
 
 /** True for a path robots.txt asks crawlers to skip (its prefix rule). */
