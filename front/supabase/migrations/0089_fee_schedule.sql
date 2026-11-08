@@ -97,7 +97,7 @@ grant select, insert, update, delete on public.fee_schedule to service_role;
 -- increasing updated_at, which the routes compare on every write
 -- (compare-and-swap, as 0084).
 --   insert            -> draft only
---   draft             -> draft (edit) | published (publish_fee_schedule)
+--   draft             -> draft (edit) | published (only inside publish_fee_schedule)
 --   published         -> retired (nothing else may change)
 --   retired           -> immutable
 --   delete            -> drafts only
@@ -137,6 +137,11 @@ begin
       new.retired_at := null;
       new.retired_by := null;
     elsif new.status = 'published' then
+      -- Only publish_fee_schedule sets this, for the one row it publishes,
+      -- for the rest of its transaction; a plain update cannot publish.
+      if coalesce(pg_catalog.current_setting('mancipatio.fee_publish', true), '') <> new.id::text then
+        raise exception 'Publish a fee with publish_fee_schedule' using errcode = '23514';
+      end if;
       if new.published_by is null then
         raise exception 'Publishing a fee records who published it' using errcode = '23514';
       end if;
@@ -208,10 +213,12 @@ begin
   update public.fee_schedule
     set status = 'retired', retired_by = p_actor, updated_by = p_actor
     where network = draft.network and kind = draft.kind and status = 'published';
+  perform pg_catalog.set_config('mancipatio.fee_publish', p_id::text, true);
   update public.fee_schedule
     set status = 'published', published_by = p_actor, updated_by = p_actor
     where id = p_id
     returning * into draft;
+  perform pg_catalog.set_config('mancipatio.fee_publish', '', true);
   return draft;
 end;
 $$;
