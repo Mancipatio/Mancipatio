@@ -722,42 +722,79 @@ export function certificateListItem(row: CertificateRow): CertificateListItem | 
   };
 }
 
-/** What the public verification page shows: facts of the chain and the company, never the holder's name or ID number. */
-export type PublicCertificateView =
-  | {
-      found: true;
-      number: string;
-      network: Network;
-      kind: CertificateKind;
-      /** "valid": signed (and possibly anchored), signature and hash check out; "revoked": revoked after signing. */
-      status: "valid" | "revoked" | "invalid";
-      anchored: boolean;
-      issued_at: string;
-      signed_at: string | null;
-      revoked_at: string | null;
-      company: CertificateCompany;
-      asset: CertificatePayload["asset"];
-      share_class: CertificatePayload["share_class"];
-      holder_wallet: string | null;
-      holding: CertificatePayload["holding"];
-      supply: CertificatePayload["supply"];
-      signer: string;
-      signature: string;
-      signature_format: SiwsSignatureFormat;
-      signature_valid: boolean;
-      payload_sha256: string;
-      anchor: { tx: string; slot: number | null; block_time: string | null } | null;
-      /** null: no hash was given. */
-      hash_matches: boolean | null;
-    }
-  | { found: false; number: string; hash_matches: null };
+/**
+ * What a check by number alone, or with a hash that does not match, is told
+ * instead of the contents. Numbers are sequential, so contents by number alone
+ * would let anyone list which wallets obtained certificates; a real verifier
+ * holds the printed certificate, whose SHA-256 (and link) opens the details.
+ */
+export const CERTIFICATE_HASH_HINT =
+  "Enter the SHA-256 printed on the certificate, or choose its JSON file, to see what it states.";
+
+/** The answer to a number without the certificate's hash: whether it exists and its status, nothing it states. */
+export type PublicCertificateSummary = {
+  found: true;
+  details: false;
+  number: string;
+  /** "valid": signed (and possibly anchored), signature and hash check out; "revoked": revoked after signing. */
+  status: "valid" | "revoked" | "invalid";
+  revoked_at: string | null;
+  /** null: no hash was given; false: the given hash is not this certificate's. */
+  hash_matches: null | false;
+  hint: string;
+};
 
 /**
- * The public view of a stored certificate. Copies named fields one by one
- * (never a spread of the payload or the row), so a field added later to
- * either stays private until it is added here. A draft, or a draft revoked
- * before it was signed, was never issued: "not found". `checks` are the
- * route's own re-verification of the signature and of the stored hash.
+ * What the public verification page shows to someone who holds the
+ * certificate (its number and matching SHA-256): facts of the chain and the
+ * company, never the holder's name or ID number.
+ */
+export type PublicCertificateDetails = {
+  found: true;
+  details: true;
+  number: string;
+  network: Network;
+  kind: CertificateKind;
+  /** "valid": signed (and possibly anchored), signature and hash check out; "revoked": revoked after signing. */
+  status: "valid" | "revoked" | "invalid";
+  anchored: boolean;
+  issued_at: string;
+  signed_at: string | null;
+  revoked_at: string | null;
+  company: CertificateCompany;
+  asset: CertificatePayload["asset"];
+  share_class: CertificatePayload["share_class"];
+  holder_wallet: string | null;
+  holding: CertificatePayload["holding"];
+  supply: CertificatePayload["supply"];
+  signer: string;
+  signature: string;
+  signature_format: SiwsSignatureFormat;
+  signature_valid: boolean;
+  payload_sha256: string;
+  anchor: { tx: string; slot: number | null; block_time: string | null } | null;
+  hash_matches: true;
+};
+
+export type PublicCertificateView = PublicCertificateDetails | PublicCertificateSummary | { found: false; number: string; hash_matches: null };
+
+/** Equality of two hex strings in time that does not depend on where they differ. */
+function sameHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return difference === 0;
+}
+
+/**
+ * The public view of a stored certificate. A draft, or a draft revoked before
+ * it was signed, was never issued: "not found". Without the certificate's own
+ * SHA-256 (`checks.providedSha256`), only the summary: that it exists, its
+ * status and the revocation date, with CERTIFICATE_HASH_HINT. With it, the
+ * details, copied named field by named field (never a spread of the payload
+ * or the row), so a field added later to either stays private until it is
+ * added here. `checks` are the route's own re-verification of the signature
+ * and of the stored hash.
  */
 export function publicCertificateView(
   row: Pick<CertificateRow, "number" | "network" | "kind" | "status" | "payload_canonical" | "payload_sha256" | "signer" | "signature" | "signature_format" | "signed_at" | "anchor_tx" | "anchor_slot" | "anchor_block_time" | "revoked_at">,
@@ -775,8 +812,21 @@ export function publicCertificateView(
   }
   const intact = checks.signatureValid && checks.hashConsistent;
   const status: "valid" | "revoked" | "invalid" = row.status === "revoked" ? "revoked" : intact ? "valid" : "invalid";
+  const revokedAt = row.status === "revoked" ? row.revoked_at : null;
+  if (checks.providedSha256 === null || !sameHex(checks.providedSha256, row.payload_sha256)) {
+    return {
+      found: true,
+      details: false,
+      number: row.number,
+      status,
+      revoked_at: revokedAt,
+      hash_matches: checks.providedSha256 === null ? null : false,
+      hint: CERTIFICATE_HASH_HINT,
+    };
+  }
   return {
     found: true,
+    details: true,
     number: row.number,
     network: payload.network,
     kind: payload.kind,
@@ -784,7 +834,7 @@ export function publicCertificateView(
     anchored: row.anchor_tx !== null,
     issued_at: payload.issued_at,
     signed_at: row.signed_at,
-    revoked_at: row.status === "revoked" ? row.revoked_at : null,
+    revoked_at: revokedAt,
     company: {
       legal_name: payload.company.legal_name,
       registration_number: payload.company.registration_number,
@@ -837,7 +887,7 @@ export function publicCertificateView(
     anchor: row.anchor_tx
       ? { tx: row.anchor_tx, slot: row.anchor_slot, block_time: row.anchor_block_time }
       : null,
-    hash_matches: checks.providedSha256 === null ? null : checks.providedSha256 === row.payload_sha256,
+    hash_matches: true,
   };
 }
 

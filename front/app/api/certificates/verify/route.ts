@@ -5,20 +5,30 @@
 // issued.
 //
 // Body: { number: "MC-2026-0001" (case and leading zeros forgiven),
-//         sha256?: the hash printed on the certificate, or the one the page
-//         computed from an uploaded JSON }
+//         sha256?: the hash printed on the certificate (the printed link
+//         carries it), or the one the page computed from an uploaded JSON }
 // Answer (lib/certificates/payload.ts publicCertificateView):
 //   * { found: false } for an unknown number, a draft, or a draft discarded
 //     before it was signed (none of them was ever issued);
-//   * otherwise the status ("valid", "revoked" with its date, or "invalid"
-//     when the route's own re-check fails), the kind, the issue date, the
-//     company, asset, share class, units and percentages, the holder's
-//     wallet, the signer, the signature and the bytes it covers, the
-//     anchor transaction, and whether the given hash matches.
+//   * a number alone, or with a hash that is not the certificate's: only
+//     { found, details: false, status ("valid", "revoked" with its date, or
+//     "invalid" when the route's own re-check fails), hash_matches (null or
+//     false), hint }. Numbers are sequential, so contents by number alone
+//     would let anyone walk MC-YYYY-0001… and list which wallets obtained
+//     certificates; a real verifier holds the printed certificate, number
+//     and SHA-256 both. No wallet, units, percentages, company, asset or
+//     class, signer, signature or anchor here;
+//   * the number with the certificate's own SHA-256: { details: true } and
+//     everything it states: the kind, the issue date, the company, asset,
+//     share class, units and percentages, the holder's wallet, the signer,
+//     the signature and the bytes it covers, and the anchor transaction.
 // Never the holder's name or ID number, the statement that repeats them,
 // the revocation reason, or who created or revoked the row: the route
 // selects only PUBLIC_CERTIFICATE_COLUMNS, and the projection copies named
-// fields of the payload one by one.
+// fields of the payload one by one. An anchored certificate's hash is in its
+// memo on chain, so the hash gate stops walking this route by number; someone
+// who reads the Super Admin's anchor memos can still open anchored
+// certificates one by one (the units and wallets are on chain anyway).
 //
 // Before it answers "valid" it re-hashes the stored canonical payload and
 // re-verifies the stored signature against the signer and the message

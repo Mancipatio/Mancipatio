@@ -17,6 +17,7 @@ import {
   certificateMessage,
   certificateText,
   certificateVerifyPath,
+  CERTIFICATE_HASH_HINT,
   certificateTokenSymbol,
   normalizeCertificateNumber,
   normalizeCertificateSha256,
@@ -324,20 +325,41 @@ describe("the public projection", () => {
   }
   const checks = { signatureValid: true, hashConsistent: true, providedSha256: null };
 
-  it("never carries the holder's name or ID number, the statement, the reason or the people behind the row", async () => {
-    const row = await storedRow({ status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z", revoked_by: fixedAddress(30), revoke_reason: "Holder Petar asked; ID ID-TEST-0001" });
-    const view = publicCertificateView(row, checks);
-    const text = JSON.stringify(view);
-    for (const secret of ["Petar", "Petrovi", "ID-TEST-0001", "statement", "revoke_reason", "revoked_by", "created_by", fixedAddress(30), "salt", row.payload_canonical]) {
-      expect(text, secret).not.toContain(secret);
+  it("tells a number alone, or a wrong hash, only that the certificate exists and its status", async () => {
+    const row = await storedRow();
+    const alone = publicCertificateView(row, checks);
+    expect(alone).toEqual({
+      found: true, details: false, number: "MC-2026-0001", status: "valid", revoked_at: null, hash_matches: null, hint: CERTIFICATE_HASH_HINT,
+    });
+    const wrong = publicCertificateView(row, { ...checks, providedSha256: "0".repeat(64) });
+    expect(wrong).toEqual({ ...alone, hash_matches: false });
+    // Nothing the certificate states: no wallet, units, company, asset, signer, signature or anchor.
+    for (const view of [alone, wrong]) {
+      const text = JSON.stringify(view);
+      for (const secret of [HOLDER, row.signer, row.signature!, row.payload_sha256, EVIDENCE_TX, COMPANY.legal_name, "MANCI", "250"]) {
+        expect(text, secret).not.toContain(secret);
+      }
     }
-    expect(view).toMatchObject({ found: true, status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z", holder_wallet: HOLDER });
   });
 
-  it("shows a valid, anchored certificate with its facts and says whether a given hash matches", async () => {
+  it("never carries the holder's name or ID number, the statement, the reason or the people behind the row, even to the hash holder", async () => {
+    const row = await storedRow({ status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z", revoked_by: fixedAddress(30), revoke_reason: "Holder Petar asked; ID ID-TEST-0001" });
+    for (const providedSha256 of [null, row.payload_sha256]) {
+      const view = publicCertificateView(row, { ...checks, providedSha256 });
+      const text = JSON.stringify(view);
+      for (const secret of ["Petar", "Petrovi", "ID-TEST-0001", "statement", "revoke_reason", "revoked_by", "created_by", fixedAddress(30), "salt", row.payload_canonical]) {
+        expect(text, secret).not.toContain(secret);
+      }
+      expect(view).toMatchObject({ found: true, status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z" });
+    }
+    expect(publicCertificateView(row, { ...checks, providedSha256: row.payload_sha256 })).toMatchObject({ details: true, holder_wallet: HOLDER });
+  });
+
+  it("shows a valid, anchored certificate's facts to whoever holds its hash", async () => {
     const row = await storedRow();
     expect(publicCertificateView(row, { ...checks, providedSha256: row.payload_sha256 })).toMatchObject({
       found: true,
+      details: true,
       number: "MC-2026-0001",
       status: "valid",
       anchored: true,
@@ -348,7 +370,6 @@ describe("the public projection", () => {
       hash_matches: true,
       signature_valid: true,
     });
-    expect(publicCertificateView(row, { ...checks, providedSha256: "0".repeat(64) }).hash_matches).toBe(false);
   });
 
   it("answers not found for a draft or a draft discarded before it was signed, and invalid when a re-check fails", async () => {
@@ -357,8 +378,8 @@ describe("the public projection", () => {
     const discarded = { ...draft, status: "revoked" as const, revoked_at: "2026-11-09T08:00:00.000Z" };
     expect(publicCertificateView(discarded, checks).found).toBe(false);
     const row = await storedRow();
-    expect(publicCertificateView(row, { ...checks, signatureValid: false })).toMatchObject({ status: "invalid" });
-    expect(publicCertificateView(row, { ...checks, hashConsistent: false })).toMatchObject({ status: "invalid" });
+    expect(publicCertificateView(row, { ...checks, signatureValid: false })).toMatchObject({ details: false, status: "invalid" });
+    expect(publicCertificateView(row, { ...checks, hashConsistent: false, providedSha256: row.payload_sha256 })).toMatchObject({ details: true, status: "invalid" });
   });
 
   it("lists a row without its payload", async () => {

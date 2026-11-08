@@ -2,10 +2,12 @@
 // Unsigned and open in KYC-only mode (this suite also runs with the mode on:
 // vitest.config.ts KYC_ONLY_OPEN_SUITES). It answers "not found" for what was
 // never issued, re-verifies the stored hash and signature before it says
-// "valid", says whether a given hash matches, and never returns the holder's
-// name or ID number, the statement that repeats them, or the revocation
-// reason. Burst and shared rate limits, a small body cap. Supabase is in
-// memory; the shared limiter is mocked.
+// "valid", tells a number alone (or a wrong hash) only whether the
+// certificate exists and its status, opens what it states only with the
+// certificate's own SHA-256, and never returns the holder's name or ID
+// number, the statement that repeats them, or the revocation reason. Burst
+// and shared rate limits, a small body cap. Supabase is in memory; the
+// shared limiter is mocked.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,13 +86,51 @@ beforeEach(() => {
 });
 
 describe("POST /api/certificates/verify", () => {
-  it("answers a valid, anchored certificate with its public facts, re-verified, and never the holder's personal data", async () => {
-    const row = await store({ revoke_reason: null });
+  /** What a number alone, or a wrong hash, must never carry (CERTIFICATE_HASH_HINT stands in for all of it). */
+  const DETAIL_FIELDS = [
+    "holder_wallet", "holding", "supply", "company", "asset", "share_class", "kind", "network", "issued_at", "signed_at",
+    "anchored", "signer", "signature", "signature_format", "signature_valid", "payload_sha256", "anchor",
+  ];
+  function expectSummaryOnly(res: Awaited<ReturnType<typeof verify>>, row: { signer: string; signature: string | null; payload_sha256: string }) {
+    const data = res.body.data!;
+    expect(Object.keys(data).sort()).toEqual(["details", "found", "hash_matches", "hint", "number", "revoked_at", "status"]);
+    for (const field of DETAIL_FIELDS) expect(data, field).not.toHaveProperty(field);
+    for (const secret of [HOLDER, row.signer, row.signature ?? "-", row.payload_sha256, EVIDENCE_TX, COMPANY.legal_name, "MANCI", "250", "2.5", NAME, ID_NUMBER]) {
+      expect(res.text, secret).not.toContain(secret);
+    }
+  }
+
+  it("answers a number alone with its existence and status only, and asks for the SHA-256", async () => {
+    const row = await store();
     const res = await verify({ number: "mc-2026-1" });
     expect(res.status).toBe(200);
     expect(res.cache).toBe("no-store");
+    expect(res.body.data).toEqual({
+      found: true,
+      details: false,
+      number: "MC-2026-0001",
+      status: "valid",
+      revoked_at: null,
+      hash_matches: null,
+      hint: "Enter the SHA-256 printed on the certificate, or choose its JSON file, to see what it states.",
+    });
+    expectSummaryOnly(res, row);
+  });
+
+  it("answers a hash that is not the certificate's like a number alone, with hash_matches false", async () => {
+    const row = await store();
+    const res = await verify({ number: "MC-2026-0001", sha256: "0".repeat(64) });
+    expect(res.body.data).toMatchObject({ found: true, details: false, status: "valid", hash_matches: false });
+    expectSummaryOnly(res, row);
+    expect((await verify({ number: "MC-2026-0001", sha256: "abc" })).status).toBe(400);
+  });
+
+  it("opens everything with the certificate's own hash (a shasum line too), re-verified, never the holder's personal data", async () => {
+    const row = await store({ revoke_reason: null });
+    const res = await verify({ number: "MC-2026-0001", sha256: `${row.payload_sha256.toUpperCase()}  MC-2026-0001.json` });
     expect(res.body.data).toMatchObject({
       found: true,
+      details: true,
       number: "MC-2026-0001",
       status: "valid",
       anchored: true,
@@ -107,56 +147,56 @@ describe("POST /api/certificates/verify", () => {
       signature_valid: true,
       payload_sha256: row.payload_sha256,
       anchor: { tx: EVIDENCE_TX, slot: 380_124_000 },
-      hash_matches: null,
+      hash_matches: true,
     });
     for (const secret of ["Petar", "Petrovi", ID_NUMBER, "statement", "salt", "created_by", "revoke_reason"]) {
       expect(res.text, secret).not.toContain(secret);
     }
   });
 
-  it("says whether a given hash matches, accepting a shasum line", async () => {
-    const row = await store();
-    const match = await verify({ number: "MC-2026-0001", sha256: `${row.payload_sha256.toUpperCase()}  MC-2026-0001.json` });
-    expect(match.body.data).toMatchObject({ found: true, hash_matches: true });
-    const other = await verify({ number: "MC-2026-0001", sha256: "0".repeat(64) });
-    expect(other.body.data).toMatchObject({ found: true, hash_matches: false });
-    expect((await verify({ number: "MC-2026-0001", sha256: "abc" })).status).toBe(400);
-  });
-
   it("answers not found for an unknown number, a draft, and a draft discarded before signing", async () => {
     expect((await verify({ number: "MC-2026-0009" })).body.data).toEqual({ found: false, number: "MC-2026-0009", hash_matches: null });
-    await store({ number: "MC-2026-0002", status: "draft", signature: null, signature_format: null, signed_at: null, anchor_tx: null, anchor_slot: null, anchor_block_time: null });
+    const draft = await store({ number: "MC-2026-0002", status: "draft", signature: null, signature_format: null, signed_at: null, anchor_tx: null, anchor_slot: null, anchor_block_time: null });
     expect((await verify({ number: "MC-2026-0002" })).body.data).toMatchObject({ found: false });
+    // Not even with its hash: a draft was never issued.
+    expect((await verify({ number: "MC-2026-0002", sha256: draft.payload_sha256 })).body.data).toMatchObject({ found: false });
     await store({ number: "MC-2026-0003", status: "revoked", signature: null, signature_format: null, signed_at: null, anchor_tx: null, revoked_at: "2026-11-09T08:00:00.000Z", revoke_reason: "Discarded draft" });
     const discarded = await verify({ number: "MC-2026-0003" });
     expect(discarded.body.data).toMatchObject({ found: false });
     expect(discarded.text).not.toContain("Discarded");
   });
 
-  it("answers revoked with the date for a signed certificate, without the reason", async () => {
-    await store({ status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z", revoked_by: HOLDER, revoke_reason: `Holder ${NAME} asked` });
+  it("answers revoked with the date for a signed certificate, by number alone, never the reason", async () => {
+    const row = await store({ status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z", revoked_by: HOLDER, revoke_reason: `Holder ${NAME} asked` });
     const res = await verify({ number: "MC-2026-0001" });
-    expect(res.body.data).toMatchObject({ found: true, status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z" });
+    expect(res.body.data).toMatchObject({ found: true, details: false, status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z" });
+    expectSummaryOnly(res, row);
     expect(res.text).not.toContain("asked");
-    expect(res.text).not.toContain("Petar");
+    const held = await verify({ number: "MC-2026-0001", sha256: row.payload_sha256 });
+    expect(held.body.data).toMatchObject({ details: true, status: "revoked", revoked_at: "2026-11-09T08:00:00.000Z" });
+    expect(held.text).not.toContain("asked");
+    expect(held.text).not.toContain("Petar");
   });
 
   it("answers invalid, never valid, when the stored hash or signature does not check out", async () => {
     const row = await store();
     row.payload_canonical = row.payload_canonical.replace('"units":"250"', '"units":"2500"');
-    expect((await verify({ number: "MC-2026-0001" })).body.data).toMatchObject({ found: true, status: "invalid" });
+    expect((await verify({ number: "MC-2026-0001" })).body.data).toMatchObject({ found: true, details: false, status: "invalid" });
     const other = await certificateSigner();
     const forged = await store({ number: "MC-2026-0004" });
     forged.signature = await other.sign("MC-2026-0004", forged.payload_sha256);
-    expect((await verify({ number: "MC-2026-0004" })).body.data).toMatchObject({ found: true, status: "invalid", signature_valid: false });
+    expect((await verify({ number: "MC-2026-0004" })).body.data).toMatchObject({ found: true, details: false, status: "invalid" });
+    expect((await verify({ number: "MC-2026-0004", sha256: forged.payload_sha256 })).body.data)
+      .toMatchObject({ found: true, details: true, status: "invalid", signature_valid: false });
   });
 
-  it("shows an issuance certificate's supply", async () => {
-    await store({ number: "MC-2026-0005" }, "issuance");
-    expect((await verify({ number: "MC-2026-0005" })).body.data).toMatchObject({
-      found: true, kind: "issuance", holder_wallet: null, holding: null,
+  it("shows an issuance certificate's supply to whoever holds its hash", async () => {
+    const row = await store({ number: "MC-2026-0005" }, "issuance");
+    expect((await verify({ number: "MC-2026-0005", sha256: row.payload_sha256 })).body.data).toMatchObject({
+      found: true, details: true, kind: "issuance", holder_wallet: null, holding: null,
       supply: { circulating: "250", lifetime_minted: "500", max_supply_percent: "17.5" },
     });
+    expect((await verify({ number: "MC-2026-0005" })).body.data).not.toHaveProperty("supply");
   });
 
   it("refuses a bad number, a non-JSON body and an oversized body before reading anything", async () => {

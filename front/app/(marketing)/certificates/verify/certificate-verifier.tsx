@@ -1,13 +1,15 @@
 "use client";
 
-// The public certificate check (/certificates/verify, ?number= from the
-// printed certificate's URL): the number, and optionally the SHA-256 printed
-// on the certificate or the certificate's JSON file. The file is read and
-// hashed in this browser and never uploaded: only its hash goes to the
-// server (POST /api/certificates/verify), which answers what the operator
-// issued and whether the hash matches. When the file's content matches, the
-// holder's name and ID number are shown from the file itself; the server
-// never returns them.
+// The public certificate check (/certificates/verify; the printed
+// certificate's URL carries ?number= and &sha256=): the number, and the
+// SHA-256 printed on the certificate or the certificate's JSON file. The file
+// is read and hashed in this browser and never uploaded: only its hash goes
+// to the server (POST /api/certificates/verify). A number alone, or with a
+// hash that is not the certificate's, is answered with whether it exists and
+// its status only, and the page asks for the hash; the certificate's own
+// hash opens what it states. When the file's content matches, the holder's
+// name and ID number are shown from the file itself; the server never
+// returns them.
 
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
@@ -17,6 +19,7 @@ import {
   formatUnits,
   normalizeCertificateNumber,
   normalizeCertificateSha256,
+  type PublicCertificateSummary,
   type PublicCertificateView,
 } from "@/lib/certificates/payload";
 import { explorerAddressUrl, explorerTxUrl, networkLabel, type Network } from "@/lib/network";
@@ -118,13 +121,13 @@ export function CertificateVerifier() {
         </label>
         <label className="block">
           <span className="text-sm font-medium text-slate-800">
-            SHA-256 printed on the certificate <span className="font-normal text-slate-500">(optional)</span>
+            SHA-256 printed on the certificate <span className="font-normal text-slate-500">(needed to see what it states)</span>
           </span>
           <input className={`${INPUT_CLASS} font-mono text-xs`} value={hash} onChange={(e) => setHash(e.target.value)} placeholder="64 hex characters" autoComplete="off" spellCheck={false} disabled={file !== null} />
         </label>
         <div>
           <span className="text-sm font-medium text-slate-800">
-            Or the certificate&apos;s JSON file <span className="font-normal text-slate-500">(optional; read in your browser, not uploaded)</span>
+            Or the certificate&apos;s JSON file <span className="font-normal text-slate-500">(read in your browser, not uploaded)</span>
           </span>
           <input
             ref={fileInput}
@@ -184,6 +187,38 @@ function AddressLink({ address, network }: { address: string; network: Network }
   );
 }
 
+function CertificateSummary({ view, file }: { view: PublicCertificateSummary; file: FileCheck | null }) {
+  // The hash given is not this certificate's (another network's certificate
+  // of the same number, a mistyped hash, a forged copy): say that first.
+  const banner =
+    view.hash_matches === false
+      ? {
+          tone: "border-red-300 bg-red-50 text-red-900",
+          title: "This is not the certificate you have",
+          text: `Certificate ${view.number} on this network has a different SHA-256 from ${file ? "your file" : "the one you entered"}. Check the number, the SHA-256 and the network printed on your certificate.`,
+        }
+      : view.status === "valid"
+        ? { tone: "border-emerald-300 bg-emerald-50 text-emerald-900", title: `Certificate ${view.number} exists and is valid`, text: "Its signature and its hash check out." }
+        : view.status === "revoked"
+          ? {
+              tone: "border-red-300 bg-red-50 text-red-900",
+              title: `Certificate ${view.number} was revoked on ${utc(view.revoked_at)}`,
+              text: "It no longer certifies anything. Contact the operator for details.",
+            }
+          : {
+              tone: "border-red-300 bg-red-50 text-red-900",
+              title: `Certificate ${view.number} did not pass the check`,
+              text: "Its stored signature or hash does not verify. Do not rely on it, and contact the operator.",
+            };
+  return (
+    <div className={`rounded-xl border px-5 py-4 ${banner.tone}`} role="status">
+      <p className="text-base font-semibold">{banner.title}</p>
+      <p className="mt-1 text-sm">{banner.text}</p>
+      <p className="mt-2 text-sm font-medium">{view.hint}</p>
+    </div>
+  );
+}
+
 function CertificateResult({ result }: { result: Result }) {
   const { view, file, pasted } = result;
   if (!view.found) {
@@ -198,19 +233,14 @@ function CertificateResult({ result }: { result: Result }) {
     );
   }
 
+  // Without the certificate's own SHA-256 the server tells only whether the
+  // number exists and its status (lib/certificates/payload.ts publicCertificateView).
+  if (!view.details) return <CertificateSummary view={view} file={file} />;
+
   const fileExact = file !== null && file.rawSha256 === view.payload_sha256;
   const fileSameContent = file !== null && !fileExact && file.canonicalSha256 === view.payload_sha256;
-  // The certificate in hand is not the one this number names here (another
-  // network's certificate of the same number, or a forged copy): say that
-  // first, whatever the found certificate's own status.
-  const mismatch = (file !== null && !fileExact && !fileSameContent) || (pasted && view.hash_matches === false);
-  const banner = mismatch
-    ? {
-        tone: "border-red-300 bg-red-50 text-red-900",
-        title: "This is not the certificate you have",
-        text: `Certificate ${view.number} on this network has a different SHA-256 from yours. Check the number and the network printed on your certificate; the facts below are of the certificate this site holds.`,
-      }
-    : view.status === "valid"
+  const banner =
+    view.status === "valid"
       ? {
           tone: "border-emerald-300 bg-emerald-50 text-emerald-900",
           title: "Valid certificate",
@@ -239,11 +269,7 @@ function CertificateResult({ result }: { result: Result }) {
                 : "Your file does NOT match this certificate."}
           </p>
         )}
-        {pasted && view.hash_matches !== null && (
-          <p className="mt-2 text-sm font-medium">
-            {view.hash_matches ? "The SHA-256 you entered matches this certificate." : "The SHA-256 you entered does NOT match this certificate."}
-          </p>
-        )}
+        {pasted && <p className="mt-2 text-sm font-medium">The SHA-256 you entered matches this certificate.</p>}
       </div>
 
       <div className="panel panel-pad">

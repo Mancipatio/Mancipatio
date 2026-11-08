@@ -65,8 +65,9 @@ export const CERTIFICATE_COLUMNS =
 /**
  * What the public route selects: no revocation reason, no creator or
  * revoker. It does read the payload, to project the public facts from it
+ * for a caller who gives the certificate's SHA-256
  * (lib/certificates/payload.ts publicCertificateView never copies the
- * holder's name or ID number).
+ * holder's name or ID number, and without the hash returns only the status).
  */
 export const PUBLIC_CERTIFICATE_COLUMNS =
   "number,network,kind,status,payload_canonical,payload_sha256,signer,signature,signature_format,signed_at," +
