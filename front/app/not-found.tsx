@@ -1,9 +1,15 @@
 import Link from "next/link";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
+import { SITE_OPEN_GRAPH } from "@/lib/site-url";
 
 export const metadata = {
   title: "Not found — Manci",
+  // A missing page names no canonical URL and no og:url: the root layout's
+  // "./" would name the address that was not found (or the prerendered
+  // /_not-found).
+  alternates: { canonical: null },
+  openGraph: SITE_OPEN_GRAPH,
 };
 
 export default function NotFound() {
