@@ -76,6 +76,10 @@ function publishRpc(args: Record<string, unknown>) {
   if (draft.status !== "draft" || draft.updated_at !== args.p_expected_updated_at) {
     throw Object.assign(new Error("This fee changed or is no longer a draft"), { code: "P0001" });
   }
+  const inForce = rows.some((r) => r.network === draft.network && r.kind === draft.kind && r.status === "published");
+  if (inForce && typeof draft.effective_from === "string" && Date.parse(draft.effective_from) > Date.now()) {
+    throw Object.assign(new Error("A replacement price takes effect when it is published"), { code: "MF001" });
+  }
   for (const r of rows) {
     if (r.network === draft.network && r.kind === draft.kind && r.status === "published") Object.assign(r, { status: "retired", retired_by: args.p_actor, retired_at: LATER });
   }
@@ -307,6 +311,17 @@ describe("publish and retire", () => {
       reason: "Fee published: Conversion into registered ownership (0.5 % of the conversion value, minimum EUR 150, paid by the holder); replaces 1 % of the conversion value, minimum EUR 150",
       metadata: expect.objectContaining({ replaced_fee_id: id(2), kind: "conversion", actor_verified: true }),
     })]);
+  });
+
+  it("refuses a future-dated replacement, keeping the price in force, but lets a first price be announced", async () => {
+    h.db!.rows(SCHEDULE).push(fee({ id: id(1), effective_from: FUTURE }), published({ id: id(2) }), fee({ id: id(3), kind: "otc", effective_from: FUTURE }));
+    expect(await call(publish, { id: id(1), expected_updated_at: NOW }))
+      .toMatchObject({ status: 409, body: { error: expect.stringMatching(/takes effect when it is published.*clear the planned date/) } });
+    expect(h.db!.rows(SCHEDULE).map((r) => r.status)).toEqual(["draft", "published", "draft"]);
+    const first = await call(publish, { id: id(3), expected_updated_at: NOW });
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ fee: { id: id(3), status: "published", effective_from: FUTURE }, replaced: null });
+    expect(audits()).toHaveLength(1);
   });
 
   it("maps a stale revision to 409, an unknown fee to 404 and a database without 0089 to 503", async () => {

@@ -121,10 +121,19 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0089 fee schedule
     expect(db.query("select retired_by||'|'||(retired_at is not null) from public.fee_schedule where id = :'id'", { id: first })).toBe("super-admin|true");
     expect(db.query("select count(*) from public.fee_schedule where kind = 'conversion' and status = 'published'")).toBe("1");
     expect(db.query("select indexdef from pg_indexes where indexname = 'fee_schedule_one_published'")).toContain("WHERE (status = 'published'::text)");
-    // A planned future date is kept.
+    // A kind's first price may be announced for later: its planned date is kept.
     const planned = draft("otc", { effective_from: "2099-01-01" });
     publish(planned);
     expect(db.query("select effective_from::date::text from public.fee_schedule where id = :'id'", { id: planned })).toBe("2099-01-01");
+    // A replacement dated in the future would retire the price in force before it applies: refused, nothing changes.
+    const later = draft("conversion", { effective_from: "2099-01-01", label: "Conversion v3" });
+    expect(() => publish(later)).toThrow(/takes effect when it is published/);
+    // The SQLSTATE the route maps to 409 (psql prints it in verbose mode).
+    expect(() => db.query(
+      "\\set VERBOSITY verbose\nset role service_role; select status from public.publish_fee_schedule(:'id'::uuid, 'devnet', 'super-admin', :'expected'::timestamptz)",
+      { id: later, expected: revision(later) },
+    )).toThrow(/MF001/);
+    expect([status(second), status(later)]).toEqual(["published", "draft"]);
   });
 
   it("never edits a published price, never changes a retired one, and deletes only drafts", () => {
@@ -241,6 +250,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0089 fee schedule
     const other = db.query("insert into public.clients(type) values ('investor') returning id");
     const id = charge(schedule, { payer: client });
     expect(() => db.query("set role service_role; update public.fee_charges set payer_client_id = :'other'::uuid where id = :'id'", { id, other }))
+      .toThrow(/payer is immutable/);
+    // A direct update cannot clear it either; only the foreign key's set null (a nested trigger) does.
+    expect(() => db.query("set role service_role; update public.fee_charges set payer_client_id = null where id = :'id'", { id }))
       .toThrow(/payer is immutable/);
     db.query("delete from public.clients where id = :'client'", { client });
     expect(db.query("select coalesce(payer_client_id::text, 'none')||'|'||status from public.fee_charges where id = :'id'", { id })).toBe("none|due");

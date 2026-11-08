@@ -4416,7 +4416,10 @@ changes, and `Platform.protocol_fee_bps` stays unused (0 on chain).
   publishes, and it retires the price in force for that kind in the same
   transaction: one published row per kind and network. A published row is
   never edited, only retired; a retired row never changes; only drafts are
-  deleted. A publication never takes effect in the past.
+  deleted. A publication never takes effect in the past, and a draft dated
+  in the future can only be a kind's first price: a replacement takes
+  effect when it is published (the function refuses it otherwise), so the
+  price in force is never retired before its successor applies.
 - `fee_charges`: one charge per fee owed for a reference (a conversion
   request, an application, an asset, a migration or another reference),
   priced by the server (`front/lib/fees/quote.ts` `quoteFee`: max(min,

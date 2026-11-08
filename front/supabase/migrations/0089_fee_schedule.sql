@@ -24,7 +24,9 @@
 --   * a charge can only be created against the PUBLISHED row of its kind on
 --     its network, once that row is in effect (effective_from <= now);
 --   * a published row cannot be edited, only retired (publishing a new
---     version of a kind retires the old one in the same transaction); a
+--     version of a kind retires the old one in the same transaction, and a
+--     version dated in the future can only be a kind's first price, so the
+--     price in force is never retired before its successor applies); a
 --     retired row is immutable; only drafts can be deleted;
 --   * a charge's kind, price, base, amount, reference and payer never change
 --     after it is created, it is never deleted (waive it instead), and its
@@ -180,12 +182,16 @@ create trigger fee_schedule_guard before insert or update or delete on public.fe
 
 -- Publish one draft: in the same transaction, the price in force for its
 -- kind on its network (if any) is retired, so /pricing never shows two
--- prices for one service and never shows a gap between them. The caller's
--- revision must match (compare-and-swap); concurrent publications of one
--- kind are serialized by a transaction lock, and the partial unique index
--- above is the backstop. Returns the published row. Errors:
+-- prices for one service and never a gap between them. A draft dated in the
+-- future can only be a kind's FIRST price: a replacement takes effect when
+-- it is published, so the price in force is never retired before its
+-- successor applies (no free period, no price missing from /pricing). The
+-- caller's revision must match (compare-and-swap); concurrent publications
+-- of one kind are serialized by a transaction lock, and the partial unique
+-- index above is the backstop. Returns the published row. Errors:
 --   P0002  no such fee on this network
 --   P0001  not a draft, or changed since the caller read it
+--   MF001  a future-dated draft would replace the price in force
 create or replace function public.publish_fee_schedule(
   p_id uuid,
   p_network text,
@@ -210,6 +216,13 @@ begin
     raise exception 'This fee changed or is no longer a draft' using errcode = 'P0001';
   end if;
   perform pg_catalog.pg_advisory_xact_lock(1296125507, pg_catalog.hashtext('fee_schedule:' || draft.network || ':' || draft.kind));
+  if draft.effective_from > pg_catalog.clock_timestamp() and exists (
+    select 1 from public.fee_schedule s
+    where s.network = draft.network and s.kind = draft.kind and s.status = 'published'
+  ) then
+    raise exception 'A replacement price takes effect when it is published; publish it on its effective date'
+      using errcode = 'MF001';
+  end if;
   update public.fee_schedule
     set status = 'retired', retired_by = p_actor, updated_by = p_actor
     where network = draft.network and kind = draft.kind and status = 'published';
@@ -289,9 +302,8 @@ grant select, insert, update on public.fee_charges to service_role;
 --   due      -> invoiced (invoice_ref set) | waived (waived_reason set)
 --   invoiced -> paid | waived
 --   paid / waived : terminal
--- The amount, its inputs, the reference and the creator never change; the
--- payer can only be cleared, as the clients foreign key's on delete set null
--- does (the routes never send it on an update).
+-- The amount, its inputs, the reference, the payer and the creator never
+-- change (the clients foreign key may still clear the payer).
 create or replace function public.fee_charges_guard()
 returns trigger language plpgsql set search_path = '' as $$
 declare
@@ -333,7 +345,11 @@ begin
       old.base_amount_eur, old.quantity, old.amount_eur, old.created_by, old.created_at) then
     raise exception 'A charge''s amount and reference are immutable' using errcode = '23514';
   end if;
-  if new.payer_client_id is distinct from old.payer_client_id and new.payer_client_id is not null then
+  -- The payer is cleared only by the clients foreign key's on delete set null,
+  -- which runs this trigger nested inside its own (depth 2); a direct update
+  -- (depth 1) can never change or clear it.
+  if new.payer_client_id is distinct from old.payer_client_id and
+     (new.payer_client_id is not null or pg_catalog.pg_trigger_depth() < 2) then
     raise exception 'A charge''s payer is immutable' using errcode = '23514';
   end if;
   if new.status is distinct from old.status and not (

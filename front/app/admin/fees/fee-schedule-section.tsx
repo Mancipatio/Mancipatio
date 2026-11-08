@@ -525,7 +525,10 @@ function PublishModal({
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const paidByClient = fee.payer !== "issuer";
-  const from = fee.effective_from && Date.parse(fee.effective_from) > readAt ? formatFeeDate(fee.effective_from) : "the moment it is published";
+  const planned = fee.effective_from && Date.parse(fee.effective_from) > readAt ? formatFeeDate(fee.effective_from) : null;
+  // A replacement takes effect when it is published (publish_fee_schedule refuses it, MF001):
+  // retiring the price in force before its successor applies would leave the service unpriced.
+  const blocked = planned !== null && replaces !== null;
   return (
     <ConfirmModal
       open
@@ -533,20 +536,26 @@ function PublishModal({
       title={`Publish ${fee.public_label}`}
       confirmLabel="Publish"
       requireReason={false}
-      confirmDisabled={!confirmed}
+      confirmDisabled={!confirmed || blocked}
       onClose={onClose}
       onConfirm={onConfirm}
       description={
         <div className="space-y-2">
           <p>
             <strong>{amountText(fee)}</strong>, paid by the {FEE_PAYER_LABEL[fee.payer].toLowerCase()}, becomes public
-            on <code>/pricing</code> and in the quote shown before a client commits. It applies from {from};
-            charges of this kind are then priced from it.
+            on <code>/pricing</code> and in the quote shown before a client commits. It applies from{" "}
+            {planned ?? "the moment it is published"}; charges of this kind are then priced from it.
           </p>
           {replaces && (
             <p>
               It replaces the published {FEE_KIND_LABEL[replaces.kind].toLowerCase()} fee ({amountText(replaces)}), which is
               retired in the same step.
+            </p>
+          )}
+          {blocked && (
+            <p className="font-medium">
+              This draft is dated {planned}. A replacement takes effect when it is published, so the current price
+              stays in force until then: publish it on that date, or clear the planned date to replace the price now.
             </p>
           )}
           {paidByClient ? (

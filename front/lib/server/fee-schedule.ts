@@ -190,8 +190,10 @@ export async function saveFeeDraft(params: Record<string, unknown>, wallet: stri
 
 /**
  * Publish a draft. publish_fee_schedule retires the price in force for the
- * same kind in the same transaction; `replaced` is that row as read just
- * before (informational: the audit row and the admin's confirmation).
+ * same kind in the same transaction, and refuses (409) a future-dated draft
+ * that would replace it. `replaced` is that row as read just before
+ * (informational: the audit row and the admin's confirmation; publishing is
+ * the Super Admin's alone, so no other publication races it in practice).
  */
 export async function publishFee(
   params: Record<string, unknown>,
@@ -210,6 +212,13 @@ export async function publishFee(
     }).abortSignal(signal);
     if (error) {
       if (error.code === "P0002") throw new SiwsError(404, "Fee not found");
+      // A future-dated draft would retire the price in force before it applies.
+      if (error.code === "MF001") {
+        throw new SiwsError(
+          409,
+          "A replacement price takes effect when it is published. Publish it on its effective date, or clear the planned date to replace the current price now.",
+        );
+      }
       if (error.code === "P0001" || error.code === "23505" || error.code === "23514") {
         throw new SiwsError(409, "This fee changed or is no longer a draft. Reload it before publishing.");
       }

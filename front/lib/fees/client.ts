@@ -1,7 +1,7 @@
 "use client";
 
 // Browser side of the fee schedule (migration 0089).
-//   fetchPublishedFees      — GET /api/fees/public (unsigned; the quote surfaces)
+//   fetchPublishedFees      — GET /api/fees/public (unsigned; the quote surfaces, shared for a minute)
 //   listFeeSchedule         — fees.scheduleList (session read; admin)
 //   saveFeeDraft            — fees.scheduleSave (admin)
 //   publishFeeDraft         — fees.schedulePublish (Super Admin)
@@ -28,16 +28,20 @@ import type { FeeQuote } from "@/lib/fees/quote";
 
 type Session = WalletSession | null | undefined;
 
-let published: Promise<PublicFee[]> | null = null;
+/** How long the quote surfaces of one tab share a read (client-side navigation keeps this module). */
+const PUBLISHED_TTL_MS = 60_000;
+let published: { promise: Promise<PublicFee[]>; at: number } | null = null;
 
 /**
- * The published fees (display order). One request per page load is shared
- * by every quote surface on it; a failed read is forgotten so the next
- * mount retries. THROWS on failure — never an empty list, so a caller can
- * tell "no fee published" from "could not load".
+ * The published fees (display order). One read is shared by every quote
+ * surface for up to a minute, then read again, so a price published or
+ * retired meanwhile shows without a reload; a failed read is forgotten so
+ * the next mount retries. THROWS on failure, never an empty list, so a
+ * caller can tell "no fee published" from "could not load".
  */
 export function fetchPublishedFees(): Promise<PublicFee[]> {
-  published ??= (async () => {
+  if (published && Date.now() - published.at < PUBLISHED_TTL_MS) return published.promise;
+  const read = (async () => {
     // Older browsers lack AbortSignal.timeout; the read then simply has no deadline.
     const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(10_000) : undefined;
     const res = await fetch("/api/fees/public", { cache: "no-store", signal });
@@ -47,10 +51,11 @@ export function fetchPublishedFees(): Promise<PublicFee[]> {
     if (fees.some((fee) => fee === null)) throw new Error("The published fees could not be read");
     return orderPublicFees(fees as PublicFee[]);
   })().catch((error: unknown) => {
-    published = null;
+    if (published?.promise === read) published = null;
     throw error;
   });
-  return published;
+  published = { promise: read, at: Date.now() };
+  return read;
 }
 
 export async function listFeeSchedule(session: Session): Promise<{ schedule: FeeScheduleRow[]; charges: FeeChargeRow[] }> {

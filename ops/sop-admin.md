@@ -276,7 +276,10 @@ tokens or money: fees are invoiced off-chain.
    Admin publishes or retires, and **only after the decision is recorded**
    (business and legal: the Terms and the pricing page's commitments,
    `ops/env-vars.md` "Fee schedule"). Publishing replaces the price in force
-   for that kind; retiring one leaves the service without a published fee.
+   for that kind; retiring one leaves the service without a published fee. A
+   new version replaces the current price when it is published, so publish it
+   on the day it should apply (a planned date in the future is accepted only
+   for a kind's first price).
 2. **Book a charge** when the fee becomes due (the "When it is invoiced"
    column of `/pricing`): *Charges* → *New charge*, choose the fee and the
    conversion request or application (or another reference), and enter the
