@@ -214,10 +214,12 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0090 issuer updat
       update public.issuer_updates set status='published',published_by='${WALLET}' where id='${UPDATE}';
       select pg_sleep(1); commit;`);
     await new Promise((resolve) => setTimeout(resolve, 300));
+    // Settled into a value at once: its refusal may arrive while the publication is still awaited.
     const attaching = db.queryAsync(`set role service_role; insert into public.issuer_update_documents(update_id,version_id,file_name,storage_path,sha256,size_bytes,content_type,created_by)
-      values ('${UPDATE}','${versionId(1)}','Late.pdf','${pathFor(1)}','${shaFor(1)}',1000,'application/pdf','${WALLET}')`);
+      values ('${UPDATE}','${versionId(1)}','Late.pdf','${pathFor(1)}','${shaFor(1)}',1000,'application/pdf','${WALLET}')`)
+      .then(() => null, (error: Error) => error);
     await publishing;
-    await expect(attaching).rejects.toThrow(/drafts only/);
+    expect((await attaching)?.message).toMatch(/drafts only/);
     expect(sql("select count(*) from public.issuer_update_documents")).toBe("0");
   });
 
