@@ -34,6 +34,12 @@ const MATRIX: Record<string, Gate> = {
   "compliance/list": "requireAdmin",
   "compliance/create": "requireAdmin",
   "compliance/resolve": "requireAdmin",
+  // The cap table: dossier links in the reconciliation, holder names in the
+  // personal-data export, and the register writes (0086).
+  "cap-table/admin-read": "requireAdmin",
+  "cap-table/export": "requireAdmin",
+  "cap-table/register-create": "requireAdmin",
+  "cap-table/register-void": "requireAdmin",
   // Super Admin only.
   "clients/anonymize": "requireSuperAdmin",
   // The passport write-back: the registry authority only.
