@@ -43,6 +43,9 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/kyc-provider-gate.test.ts",
   "tests/kyc-provider-routes.test.ts",
   "tests/route-guard-matrix.test.ts",
+  // The published price list (GET /api/fees/public, /pricing) and the fee admin.
+  "tests/fee-schedule-routes.test.ts",
+  "tests/pricing-page.test.ts",
   // Support.
   "tests/inquiries-create-route.test.ts",
   "tests/manci-assistant.test.ts",

@@ -107,6 +107,8 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "blocklist_authority_proposals", "blocklist_recoveries",
   // 0080 automatic EUR rate
   "fx_auto_rates", "fx_rate_observations", "fx_auto_runs",
+  // 0089 published fee schedule and the charges booked against it
+  "fee_schedule", "fee_charges",
   // 0090 investor relations: issuer updates and their documents
   "issuer_updates", "issuer_update_documents",
 ] as const;
