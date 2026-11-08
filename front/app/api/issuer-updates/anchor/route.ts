@@ -54,7 +54,7 @@ export async function POST(request: Request) {
     const signature = typeof params.signature === "string" ? params.signature : "";
     if (!isSignature(signature)) throw new SiwsError(400, "A valid transaction signature is required");
 
-    const sb = getSupabaseAdmin(AbortSignal.timeout(30_000));
+    const sb = getSupabaseAdmin(AbortSignal.timeout(8_000));
     const answer = (update: IssuerUpdateRecord, duplicate: boolean) =>
       NextResponse.json({ ok: true, data: { update, duplicate } }, { headers: { "Cache-Control": "private, no-store" } });
     const update = await loadUpdate(sb, id);
@@ -80,17 +80,19 @@ export async function POST(request: Request) {
     // A confirmed block can still be dropped on a minority fork: wait for finalized.
     if (read.commitment !== "finalized") throw anchorNotYetError(true);
 
-    const { data, error } = await sb.from(UPDATES_TABLE).update({ anchor_tx: signature })
+    // A fresh request budget: the chain reads above may have taken most of the first one.
+    const db = getSupabaseAdmin(AbortSignal.timeout(8_000));
+    const { data, error } = await db.from(UPDATES_TABLE).update({ anchor_tx: signature })
       .eq("network", detectNetwork()).eq("id", id).eq("status", "published").is("anchor_tx", null)
       .select("id").maybeSingle();
     if (error) unavailable();
     if (!data) {
       // Recorded (or withdrawn) by another request while the chain was read.
-      const now = await recordOf(sb, id);
+      const now = await recordOf(db, id);
       if (now.anchor_tx === signature) return answer(now, true);
       throw new SiwsError(409, now.anchor_tx ? "This update is already anchored by another transaction" : "This update is no longer published");
     }
-    return answer(await recordOf(sb, id), false);
+    return answer(await recordOf(db, id), false);
   } catch (err) {
     return siwsErrorResponse(err);
   } finally {
