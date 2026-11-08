@@ -44,11 +44,13 @@ day the site (<https://www.manci.io>) went public.
 The mainnet build left **KYC-only mode** on 2026-11-08 (owner decision;
 `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` in Vercel Production): besides sign-up
 and identity verification (KYC for people, KYB for companies), primary
-sales and issuance are open on the platform side, for equity only. Every
-pilot module (trading through Manci, conversion into shares, token
-migration, vesting, rights, distributions, governance, delivery) stays off
-until the Terms in force offer it, and the program's pause flags decide
-on-chain (payout modules, 0x40, stay paused). The lockdown of 2026-10-10
+sales and issuance are open on the platform side, for equity only, and so
+is conversion into company shares (switched on the same day: the Terms in
+force offer it once switched on, with identity verification). Every other
+pilot module (trading through Manci, token migration, vesting, rights,
+distributions, governance, delivery) stays off until the Terms in force
+offer it, and the program's pause flags decide on-chain (payout modules,
+0x40, stay paused). The lockdown of 2026-10-10
 (PR #78) returns by deleting that variable and redeploying
 ([`ops/env-vars.md`](ops/env-vars.md), "KYC-only mode and offered asset
 classes"; "Pilot scope" for the module switches). The site serves the

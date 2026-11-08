@@ -121,11 +121,17 @@ leave the mode first, with `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
 `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` unset, and set the flag only in
 runbook §20 step 1 for the release that carries the Terms; or leave the
 mode in that same release, with `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` set
-together with the flag in §20 step 1. State on 2026-10-18: Vercel Production
-has no module switch set (`NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` and
-`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` were deleted that day), and
-`NEXT_PUBLIC_FEATURE_KYC_ONLY` and `NEXT_PUBLIC_ASSET_CLASSES` are unset:
-the lockdown, equity only, with the chain at 0x7F.
+together with the flag in §20 step 1. State on 2026-11-08 (owner
+decision): Vercel Production has `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` (the
+mode was left that day) and `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true`
+(the Terms in force, clause 2, offer conversion once the Operator switches
+it on, with identity verification); `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING`
+and every other module switch stay unset until Terms that offer them (vD,
+PR #74) go live in the same build; `NEXT_PUBLIC_ASSET_CLASSES` is unset
+(equity only); `NEXT_PUBLIC_ALLOW_INDEXING=true` applies from the release
+that carries the corrected page metadata. The chain read 0x40 that day
+(payout modules paused; the owner cleared the other bits). Before that,
+from 2026-10-18: no module switch, KYC-only mode on, the chain at 0x7F.
 
 Switching a module off (rollback, incident) never waits for a Terms
 change: a module the Terms offer may have its flag off. To switch trading
