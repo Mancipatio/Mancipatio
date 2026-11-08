@@ -351,6 +351,11 @@ function applicationStep(input: JourneyInput): Draft {
   const app = input.application;
   const offChain = false;
   if (app === undefined) {
+    // Signed out, there is nothing to load yet: the step simply has not started.
+    if (you && input.verification === null) {
+      return { state: "not_started", actor: "issuer", offChain, link,
+        explanation: "After verification, submit the issuance application; a person at Manci reviews it." };
+    }
     return { state: "not_started", actor: "issuer", offChain, link, unknown: true,
       explanation: you ? "Your application status is not loaded; sign in with the wallet you applied with to see it." : "The application queue could not be read." };
   }

@@ -94,12 +94,20 @@ export function IssuerJourneyTracker({
       </div>
 
       {next ? (
-        <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700" data-journey-next={next.id}>
-          <span className="font-semibold text-slate-900">
-            Next: {ACTOR_LABEL[audience][next.actor]} · {next.title}.
-          </span>{" "}
-          {next.explanation}
-        </p>
+        // Who acts next and on what; the step itself, highlighted below, says what happens.
+        <div
+          className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+          data-journey-next={next.id}
+        >
+          <p className="font-semibold text-slate-900">
+            Next: {ACTOR_LABEL[audience][next.actor]} · {next.title}
+          </p>
+          {next.href && next.linkLabel && (
+            <Link href={next.href} className="text-xs font-semibold text-slate-900 underline decoration-slate-300 underline-offset-2 hover:decoration-slate-500">
+              {next.linkLabel} →
+            </Link>
+          )}
+        </div>
       ) : (
         <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
           Nothing is waiting on anyone right now.
@@ -132,7 +140,7 @@ export function IssuerJourneyTracker({
             data-step={step.id}
             data-state={step.state}
             aria-current={next?.id === step.id ? "step" : undefined}
-            className={`grid gap-x-3 gap-y-1 rounded-lg border px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] ${
+            className={`grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-lg border px-3 py-2.5 sm:grid-cols-[1.75rem_minmax(0,1fr)_auto] ${
               next?.id === step.id ? "border-slate-400 bg-slate-50/70" : "border-slate-100"
             }`}
           >
@@ -153,8 +161,9 @@ export function IssuerJourneyTracker({
                 <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATE_TONE[step.state]}`}>
                   {journeyStateLabel(step, audience)}
                 </span>
-                {step.state !== "done" && step.state !== "not_applicable" && (
-                  <span className="text-[11px] text-slate-500">{ACTOR_LABEL[audience][step.actor]}</span>
+                {/* A waiting state already names who acts ("Your turn", "Waiting on Manci"). */}
+                {(step.state === "in_progress" || step.state === "not_started") && (
+                  <span className="text-[11px] text-slate-500">Who acts: {ACTOR_LABEL[audience][step.actor]}</span>
                 )}
                 {step.offChain && (
                   <span className="rounded border border-slate-200 px-1.5 py-px text-[10px] uppercase tracking-wide text-slate-500" title="Part of this step happens outside the platform">
@@ -164,16 +173,15 @@ export function IssuerJourneyTracker({
               </div>
               <p className="mt-0.5 text-[13px] leading-relaxed text-slate-600">{step.explanation}</p>
             </div>
+            {/* Under the sentence on a phone, in its own column from sm up. */}
             {step.href && step.linkLabel ? (
               <Link
                 href={step.href}
-                className="self-center text-xs font-medium text-slate-800 underline decoration-slate-300 underline-offset-2 hover:text-slate-950 sm:justify-self-end"
+                className="col-start-2 justify-self-start text-xs font-medium text-slate-800 underline decoration-slate-300 underline-offset-2 hover:text-slate-950 sm:col-start-auto sm:self-center sm:justify-self-end"
               >
                 {step.linkLabel} →
               </Link>
-            ) : (
-              <span aria-hidden="true" />
-            )}
+            ) : null}
           </li>
         ))}
       </ol>

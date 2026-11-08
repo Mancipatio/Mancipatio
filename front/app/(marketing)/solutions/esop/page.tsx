@@ -91,7 +91,7 @@ export default function EsopGuidePage() {
             },
             {
               title: "Apply the ESOP preset",
-              body: `${ESOP_PRESET.label}. 25 % of the allocation unlocks ${ESOP_PRESET.cliffMonths} months after the vesting start, then 1/${ESOP_PRESET.totalMonths} unlocks every month until month ${ESOP_PRESET.totalMonths}. The amounts are exact: monthly tranches differ by at most one base unit, and the last one makes the total equal the allocation.`,
+              body: `The preset “${ESOP_PRESET.label}” unlocks 25 % of the allocation ${ESOP_PRESET.cliffMonths} months after the vesting start, then 1/${ESOP_PRESET.totalMonths} every month until month ${ESOP_PRESET.totalMonths}. The amounts are exact: monthly tranches differ by at most one base unit, and the last one makes the total equal the allocation.`,
             },
             {
               title: "Review every setting",

@@ -91,8 +91,16 @@ describe("issuer audience: from a first visit to holders", () => {
     expect(step(j, "kyb")).toMatchObject({ state: "waiting_on_you", actor: "issuer", href: "/issuer/verification", offChain: true });
     expect(j.next?.id).toBe("kyb");
     for (const id of ["documents", "on_chain", "minted", "placement", "holders"] as const) expect(step(j, id).state).toBe("not_started");
-    // The application cannot be read without a session: not loaded, never "none".
+    // Signed out there is nothing to load: the application has simply not started.
+    expect(step(j, "application")).toMatchObject({ state: "not_started", unknown: false });
+  });
+
+  it("signed in but the application unread: not loaded, never 'none'", () => {
+    const j = journey({ issuer: null, application: undefined });
     expect(step(j, "application")).toMatchObject({ state: "not_started", unknown: true });
+    expect(step(j, "application").explanation).toContain("sign in with the wallet you applied with");
+    // A verification still loading is not loaded either.
+    expect(step(journey({ verification: undefined, issuer: null, application: undefined }), "kyb")).toMatchObject({ unknown: true, state: "not_started" });
   });
 
   it("documents under review, then more requested", () => {
@@ -461,8 +469,12 @@ describe("the panel (components/issuer-journey.tsx)", () => {
     const html = render(j, "issuer", { companyName: "ACME d.o.o." });
     for (const title of Object.values(JOURNEY_STEP_TITLES)) expect(html).toContain(title.replace(/'/g, "&#x27;"));
     expect(html).toContain("ACME d.o.o.: from verification to holders");
-    expect(html).toContain("Next: Manci · Asset and share classes on-chain.");
+    expect(html).toContain("Next: Manci · Asset and share classes on-chain");
+    // The next step's page is offered from the banner too.
+    expect(html).toMatch(/data-journey-next="on_chain"[\s\S]*?href="\/issuer\/assets\/Asset1"/);
     expect(html).toContain("Waiting on Manci");
+    // Who acts is named where the badge does not say it.
+    expect(html).toContain("Who acts: Token holders");
     expect(html).toContain("Off-chain");
     expect(html).toContain('aria-current="step"');
     expect(html).toContain('href="/issuer/assets/Asset1"');
