@@ -132,12 +132,23 @@ export type PilotModules = {
   custodyConversion: boolean;
   /** Physical delivery of goods (custody entry). */
   custodyDelivery: boolean;
+  /**
+   * Token migration (V1, operator-delivered): holders of a company's existing
+   * Solana token deposit it during an opt-in window and receive units of the
+   * company's Manci share class (/portfolio/migration, /admin/migrations,
+   * /migrations). Off: the holder's precheck answers 403 and the admin
+   * cannot open a campaign; recording deposits that already landed, refunds,
+   * deliveries and the public proof pages stay. Deposits are plain SPL
+   * transfers: no program pause bit covers them (lib/token-migration/model.ts).
+   */
+  tokenMigration: boolean;
 };
 
 export type PilotModule = keyof PilotModules;
 
 export const PILOT_MODULES: readonly PilotModule[] = [
   "secondaryTrading", "governance", "vesting", "rights", "distributions", "custodyConversion", "custodyDelivery",
+  "tokenMigration",
 ];
 
 export const PILOT_MODULE_LABELS: Record<PilotModule, string> = {
@@ -148,6 +159,7 @@ export const PILOT_MODULE_LABELS: Record<PilotModule, string> = {
   distributions: "Distributions to holders",
   custodyConversion: "Conversion into company shares",
   custodyDelivery: "Physical delivery",
+  tokenMigration: "Token migration (exchange of an existing token for Manci units)",
 };
 
 /** The variable behind each module switch (ops/env-vars.md "Pilot scope"). */
@@ -159,6 +171,7 @@ export const PILOT_MODULE_ENV: Record<PilotModule, string> = {
   distributions: "NEXT_PUBLIC_FEATURE_DISTRIBUTIONS",
   custodyConversion: "NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION",
   custodyDelivery: "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
+  tokenMigration: "NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION",
 };
 
 /**
@@ -175,6 +188,7 @@ export function pilotModules(network: Network = detectNetwork()): PilotModules {
     distributions: process.env.NEXT_PUBLIC_FEATURE_DISTRIBUTIONS,
     custodyConversion: process.env.NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION,
     custodyDelivery: process.env.NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY,
+    tokenMigration: process.env.NEXT_PUBLIC_FEATURE_TOKEN_MIGRATION,
   };
   const on = (value: string | undefined) => (network === "mainnet" ? mainnetOptIn(value) : !killSwitchOff(value));
   return Object.fromEntries(PILOT_MODULES.map((name) => [name, on(raw[name])])) as PilotModules;

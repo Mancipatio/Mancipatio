@@ -70,6 +70,8 @@ export const MODULE_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/portfolio/rights", modules: ["rights", "distributions"], mode: "notice" },
   { prefix: "/portfolio/conversion", modules: ["custodyConversion"], mode: "notice" },
   { prefix: "/portfolio/delivery", modules: ["custodyDelivery"], mode: "notice" },
+  // Token migration: the page also records deposits that already landed ("Retry recording").
+  { prefix: "/portfolio/migration", modules: ["tokenMigration"], mode: "notice" },
   { prefix: "/issuer/vesting-series", modules: ["vesting"], mode: "notice" },
   // The Rights builder's vesting schedules (api/vesting/create is a rights entry).
   { prefix: "/issuer/vesting", modules: ["rights"], mode: "notice" },
@@ -81,6 +83,8 @@ export const MODULE_ROUTES: readonly ModuleRoute[] = [
   // Push distributions, payout schedules and yield routing.
   { prefix: "/admin/payouts", modules: ["distributions"], mode: "notice" },
   { prefix: "/admin/custody", modules: ["custodyConversion", "custodyDelivery"], mode: "notice" },
+  // Drafts, reconcile, deliveries, refunds and completion stay; opening a campaign is the entry.
+  { prefix: "/admin/migrations", modules: ["tokenMigration"], mode: "notice" },
 ];
 
 /**
@@ -179,6 +183,8 @@ export const NAV_ROUTES: readonly NavRoute[] = [
   { prefix: "/solutions/governance", modules: ["governance"], features: [] },
   { prefix: "/solutions/rights-vesting", modules: ["rights", "vesting", "distributions"], features: [] },
   { prefix: "/solutions/custody", modules: ["custodyConversion", "custodyDelivery"], features: [] },
+  // The public campaign pages carry their own notice (they stay reachable: the proof of a campaign is public).
+  { prefix: "/migrations", modules: ["tokenMigration"], features: [] },
 ];
 
 /**

@@ -148,6 +148,7 @@ export const GEOBLOCKED_API_ROUTES: readonly string[] = [
   "/api/conversion/create",
   "/api/delivery/create",
   "/api/vesting-series/create",
+  "/api/token-migrations/precheck",
   "/api/clients/accept-tos",
   "/api/tos/accept",
 ];

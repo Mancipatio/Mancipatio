@@ -15,8 +15,9 @@
 //
 // Accepted exceptions, each a record of evidence that grants nothing and
 // changes no business data, so that the caller is not asked to sign twice
-// for one step: compliance.screenWallet, compliance.screenRecipients and
-// compliance.distributionEvidence (screening records, see their entries), and
+// for one step: compliance.screenWallet, compliance.screenRecipients,
+// compliance.distributionEvidence and tokenMigration.precheck (screening
+// records or the alert of a hit, see their entries), and
 // admin.documentAnchorRecord, whose only write is the audit row of a document
 // anchor the server first re-reads from the chain and verifies: finalized,
 // signed by the session wallet alone, that wallet being Platform.admin
@@ -106,6 +107,17 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "spvs.capacity",
   "spvs.issuances",
   "storage.documents.list",
+  // Token migration (app/api/token-migrations): the admin's chain read of an
+  // old mint and its excluded wallets, and the campaigns with their deposits
+  // (every write needs a fresh signature).
+  "tokenMigration.adminInspect",
+  "tokenMigration.adminList",
+  // The holder's own pre-deposit check (module, window, cap, excluded wallet,
+  // its balance, the Terms), like compliance.screenWallet: its only write is
+  // the compliance alert of a sanctions hit on the caller's own wallet. The
+  // deposit itself is the holder's wallet transaction, and its record
+  // (tokenMigration.recordDeposit) needs a fresh signature.
+  "tokenMigration.precheck",
   // Signs ONE confidential document on click; its only write is the access-log row.
   "storage.documents.url",
   "vesting-series.admin-list",
