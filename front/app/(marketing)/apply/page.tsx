@@ -58,6 +58,8 @@ import {
 import { useToast } from "@/lib/toast";
 import { featureDisabledMessage, features } from "@/lib/features";
 import { FeeQuote } from "@/components/fee-quote";
+import { formationRequested, spvPathApplies } from "@/lib/apply-spv";
+import { SerbianSpvPanel } from "@/components/serbian-spv-panel";
 
 /**
  * "Apply to issue" — prototype `#page-apply`, on the live application wizard.
@@ -73,6 +75,9 @@ import { FeeQuote } from "@/components/fee-quote";
  *   EUR per SPV per year (it was written as a dollar figure elsewhere);
  * - the Serbian-entity question the prototype asks up front is folded into the
  *   existing incorporation field rather than added as a new stored field;
+ *   any other answer (and an individual applicant) gets the Serbian SPV panel
+ *   (lib/apply-spv.ts), whose explicit choice is stored in the existing
+ *   company_formation_requested column (0056);
  * - a data-handling line sits above the submit button.
  */
 
@@ -105,6 +110,8 @@ type Form = {
   stage: string; incorporation: string; valuation: string; annualRevenue: string; existingInvestors: string; problemOrWhy: string;
   raiseAmount: number; equityOffered: number; minTicket: string; raiseStructure: string; cliffMonths: number; vestingMonths: number;
   founderName: string; founderEmail: string; founderTwitter: string; founderLinkedin: string; founderWhy: string; pitchDeck: string;
+  /** "I want Manci to incorporate a Serbian SPV" (lib/apply-spv.ts); sent only while the panel applies. */
+  spvRequested: boolean;
 };
 
 const EMPTY: Form = {
@@ -112,6 +119,7 @@ const EMPTY: Form = {
   stage: "", incorporation: "Not yet", valuation: "", annualRevenue: "", existingInvestors: "", problemOrWhy: "",
   raiseAmount: 500000, equityOffered: 5, minTicket: "$500", raiseStructure: "", cliffMonths: 0, vestingMonths: 12,
   founderName: "", founderEmail: "", founderTwitter: "", founderLinkedin: "", founderWhy: "", pitchDeck: "",
+  spvRequested: false,
 };
 
 // The equity raise counts against the SPV's EUR 3M/year cap, so every money
@@ -149,6 +157,8 @@ const formFromApplication = (a: LaunchApplication): Form => ({
   founderLinkedin: a.founder_linkedin ?? "",
   founderWhy: a.founder_why ?? "",
   pitchDeck: a.pitch_deck ?? "",
+  // The resubmit route rewrites the request, so an edit keeps the stored choice.
+  spvRequested: a.company_formation_requested === true,
 });
 
 const EVENT_LABEL: Record<ApplicationEvent["action"], string> = {
@@ -572,18 +582,23 @@ export default function ApplyPage() {
       founder_why: form.founderWhy || null,
       pitch_deck: form.pitchDeck || null,
     };
+    // The Serbian SPV choice (lib/apply-spv.ts): a top-level signed param,
+    // stored in company_formation_requested (forced on for individuals).
+    const companyFormationRequested = formationRequested({
+      isIndividual, incorporation: payload.incorporation, spvChosen: form.spvRequested,
+    });
     try {
       if (editingApp) {
         // Edit & resubmit: the signed route updates the SAME application row
         // (status back to pending, revision_count bumped) and logs the
         // "resubmitted" event server-side.
-        await updateApplicationContent(conn.wallet, editingApp.id, payload);
+        await updateApplicationContent(conn.wallet, editingApp.id, payload, { companyFormationRequested });
         setIsResubmission(true);
         setDone(true);
       } else {
         // Signed route: server verifies the wallet signature, enforces the
         // KYC apply gate, stamps applicant_wallet, and logs "submitted".
-        await submitApplication(conn.wallet, payload);
+        await submitApplication(conn.wallet, payload, { companyFormationRequested });
         setDone(true);
       }
     } catch (e) {
@@ -622,6 +637,9 @@ export default function ApplyPage() {
                 label: isStartup ? "Payout" : "Disbursement",
                 value: isStartup ? "Vested monthly" : "Instant on close",
               },
+              ...(formationRequested({ isIndividual, incorporation: form.incorporation, spvChosen: form.spvRequested })
+                ? [{ label: "Serbian SPV", value: "Requested" }]
+                : []),
             ]}
           />
           <FootNote className="mt-4">
@@ -812,9 +830,10 @@ export default function ApplyPage() {
           title={STATUS_TITLE[status]}
           lede={lede}
         >
-          {latestApp.revision_count > 0 ? (
-            <p className="mt-5">
-              <Badge>Revision {latestApp.revision_count}</Badge>
+          {latestApp.revision_count > 0 || latestApp.company_formation_requested ? (
+            <p className="mt-5 flex flex-wrap gap-2">
+              {latestApp.revision_count > 0 ? <Badge>Revision {latestApp.revision_count}</Badge> : null}
+              {latestApp.company_formation_requested ? <Badge>Serbian SPV requested</Badge> : null}
             </p>
           ) : null}
           <ButtonRow>{actions}</ButtonRow>
@@ -1112,6 +1131,16 @@ export default function ApplyPage() {
                   ))}
                 </Select>
               </Field>
+
+              {spvPathApplies({ isIndividual, incorporation: form.incorporation }) && (
+                <SerbianSpvPanel
+                  className="mb-7"
+                  isIndividual={isIndividual}
+                  incorporation={isIndividual ? "Not yet" : form.incorporation}
+                  chosen={form.spvRequested}
+                  onChosenChange={(chosen) => set("spvRequested", chosen)}
+                />
+              )}
 
               <Field
                 id="valuation"
@@ -1535,7 +1564,15 @@ export default function ApplyPage() {
                   { label: "One-liner", value: form.oneLiner },
                   { label: "Category", value: form.category },
                   { label: "Stage", value: form.stage },
-                  { label: "Incorporation", value: form.incorporation },
+                  { label: "Incorporation", value: isIndividual ? "Not yet" : form.incorporation },
+                  ...(spvPathApplies({ isIndividual, incorporation: form.incorporation })
+                    ? [{
+                        label: "Serbian SPV",
+                        value: formationRequested({ isIndividual, incorporation: form.incorporation, spvChosen: form.spvRequested })
+                          ? "Requested: Manci incorporates it"
+                          : "Not requested",
+                      }]
+                    : []),
                   { label: "Valuation", value: form.valuation },
                   { label: "Raising", value: fmtM(form.raiseAmount) },
                   { label: "Equity", value: `${form.equityOffered}%` },

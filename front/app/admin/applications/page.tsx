@@ -194,6 +194,12 @@ function ApplicationsOps() {
                       <p className="mt-0.5 text-[11px] text-slate-500 line-clamp-1">
                         {app.one_liner}
                       </p>
+                      {/* The applicant asked Manci to incorporate a Serbian SPV (lib/apply-spv.ts; 0056 column). */}
+                      {app.company_formation_requested ? (
+                        <span className="mt-1 inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-800">
+                          SPV requested
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3 capitalize text-slate-700">
                       {app.raise_type}
@@ -383,7 +389,17 @@ function ApplicationDetail({
         <Field label="Cliff (months)" value={String(app.cliff_months)} />
         <Field label="Vesting (months)" value={String(app.vesting_months)} />
         <Field label="Applicant" value={app.applicant_kind === "individual" ? "Individual (KYC) — Manci opens the company" : app.applicant_kind === "company" ? "Company (KYB)" : "—"} />
-        {app.company_formation_requested ? <Field label="Company formation" value="Requested — Manci incorporates the SPV" /> : null}
+        {app.company_formation_requested ? <Field label="Company formation" value="SPV requested — Manci incorporates the Serbian SPV" /> : null}
+        {app.company_formation_requested ? (
+          <div>
+            <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">SPV registry</dt>
+            <dd className="mt-0.5 text-sm">
+              <Link href="/admin/spvs" className="font-medium text-slate-800 underline decoration-slate-300 underline-offset-2 hover:text-slate-950">
+                Open the SPV registry →
+              </Link>
+            </dd>
+          </div>
+        ) : null}
       </Section>
 
       {/* Case-by-case terms */}
