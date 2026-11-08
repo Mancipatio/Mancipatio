@@ -19,7 +19,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | Variable | Kind | Mainnet | Devnet | When unset | Read by |
 |---|---|---|---|---|---|
 | `NEXT_PUBLIC_NETWORK` | Public, build | `mainnet` (guard) | `devnet` | Vercel builds refuse; any production build refuses when the RPC URL names mainnet; locally sniffed from the RPC URL, else devnet | `lib/network.ts` |
-| `NEXT_PUBLIC_SITE_URL` | Public, build | `https://www.manci.io` (guard `site-url`: an https origin; `mainnet.siteOrigin` in `scripts/ops/targets.json`) | `https://devnet.manci.io` from the moment devnet releases `www.manci.io`, right before mainnet takes it (runbook §18 R; `https://www.manci.io` until then) | Email sign-in, account emails and links answer 503 in production | `lib/server/account-origin.ts`, alert links |
+| `NEXT_PUBLIC_SITE_URL` | Public, build | `https://www.manci.io` (guard `site-url`: an https origin; `mainnet.siteOrigin` in `scripts/ops/targets.json`) | `https://devnet.manci.io` from the moment devnet releases `www.manci.io`, right before mainnet takes it (runbook §18 R; `https://www.manci.io` until then) | Email sign-in, account emails and links answer 503 in production; canonical links, og:url, the share image URL and the sitemap use `https://www.manci.io` (also for a value that is not an https origin) | `lib/server/account-origin.ts`, alert links, `lib/site-url.ts` |
 | `NEXT_PUBLIC_SUPABASE_URL` | Public, build | `https://<mainnet ref>.supabase.co` (guard; ref recorded in `SUPABASE_PROJECT_REFS` and `scripts/ops/targets.json`) | devnet project | No database | `lib/supabase*.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public, build | `sb_publishable_…` (guard) | publishable key | No browser database reads | `lib/supabase.ts` |
 | `NEXT_PUBLIC_KYC_REGISTRY` | Public, build | platform KYC registry address (guard) | registry address | Mainnet and Vercel production refuse; else scan fallback | `lib/kyc-registry-pin.ts` |
@@ -27,7 +27,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_SOLANA_WS_URL` | Public, build | wss URL of the same provider, with the browser key (guard; the same server-key check) | optional | Derived from the RPC URL | `lib/network.ts` |
 | `NEXT_PUBLIC_SOLANA_GENESIS_HASH` | Public, build | leave unset | leave unset | Built-in cluster hashes (a conflicting value is refused); localnet requires it | `lib/network-identity.ts` |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public, build | Turnstile widget of the mainnet domain, never a Cloudflare test key (guard `turnstile`) | recommended | No bot check on email sign-in and the contact form | `lib/turnstile.ts` |
-| `NEXT_PUBLIC_ALLOW_INDEXING` | Public, build | `true` to be indexed (Vercel production only) | unset | `noindex` | `lib/indexing.ts` |
+| `NEXT_PUBLIC_ALLOW_INDEXING` | Public, build | `true` to be indexed (Vercel production only): robots.txt then allows crawling outside the signed-in and admin areas and names `/sitemap.xml` | unset | `noindex`, robots.txt `Disallow: /`, an empty sitemap | `lib/indexing.ts`, `lib/sitemap.ts` |
 | `NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
@@ -264,7 +264,7 @@ build guards read), and the two core areas without a switch of their own:
 | Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
 |---|---|---|---|
 | Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
-| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `archive/set` (an issuer's unarchive that would re-publish a profile; archiving stays open), `issuer-updates/save`, `attach`, `detach` and `publish` (an issuer's updates for its holders; discarding a draft, withdrawing an update and every read stay open) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts`, `/issuer/updates` (notice, entry buttons hidden) |
 
 Also refused before the wallet: `deposit_to_custody_vault` and the vesting
 series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
@@ -419,7 +419,7 @@ network selection and on-chain pause masks are unchanged by this feature.
 ## Fee schedule (pricing)
 
 No variable: the price list is data in the database (migration 0089,
-runbook §22), not configuration, so publishing or retiring a price needs no
+runbook §23), not configuration, so publishing or retiring a price needs no
 redeploy. `/pricing`, `GET /api/fees/public` and the fee shown on the
 conversion request form and the `/apply` review step
 (`components/fee-quote.tsx`) read the published rows on every request.

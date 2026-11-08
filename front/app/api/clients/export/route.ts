@@ -9,8 +9,9 @@
 // fresh signed URLs (KYC_EXPORT_URL_TTL_S; a pre-P1 file still in the old
 // public bucket gets the same short-lived link, marked `stored_in`),
 // kyc_requirements, client_notes, the linked account (profile + wallets),
-// raise-limit override, fee waivers, SPVs and vesting series linked to the
-// dossier, and — matched by the dossier
+// raise-limit override, fee waivers, SPVs, vesting series and company-register
+// entries (0086; none before the migration) linked to the dossier, and —
+// matched by the dossier
 // OR by any of the person's wallets (the dossier's wallet plus every wallet of
 // its account) — Terms acceptances (including archived duplicates), passport
 // requests, conversion and delivery requests. Plus the access log: when "kyc"
@@ -116,7 +117,7 @@ export async function POST(request: Request) {
     const tosFilter = ownerFilter(clientId, wallets, "wallet");
     const [
       details, documents, requirements, notes, tos, tosArchived, limits,
-      waivers, conversions, deliveries, accessLog, passports, profile, spvs, vestingSeries,
+      waivers, conversions, deliveries, accessLog, passports, profile, spvs, vestingSeries, registerEntries,
     ] = await Promise.all([
       sb.from("client_verification_details").select("*").eq("client_id", clientId),
       sb.from("client_documents").select("*").eq("client_id", clientId).order("created_at", { ascending: true }),
@@ -142,6 +143,8 @@ export async function POST(request: Request) {
       sb.from("spvs").select("*").eq("network", network).eq("client_id", clientId).order("created_at", { ascending: true }),
       sb.from("vesting_series").select("*").eq("network", network)
         .or(ownerFilter(clientId, wallets, "client_wallet")).order("created_at", { ascending: true }),
+      sb.from("register_entries").select("*").eq("network", network)
+        .eq("holder_client_id", clientId).order("created_at", { ascending: true }),
     ]);
 
     // Fresh short-lived URLs for the stored files (private bucket only).
@@ -216,6 +219,7 @@ export async function POST(request: Request) {
       delivery_requests: own(rows("delivery requests", deliveries)),
       spvs: own(rows("spvs", spvs)),
       vesting_series: own(rows("vesting series", vestingSeries)),
+      register_entries: own(rows("register entries", registerEntries, true)),
       // When the dossier's documents and data were opened or exported. Which
       // operator did it stays internal (it is in the audit log).
       access_log: (rows("access log", accessLog) as Row[]).map((e) => {

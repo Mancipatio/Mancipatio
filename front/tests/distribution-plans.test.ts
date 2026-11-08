@@ -120,4 +120,9 @@ it("supports the bounded 5000-recipient plan without quadratic proof rebuilds", 
   expect(plan.batch_count).toBe(834);
   expect(Math.max(...plan.batches.map((b) => b.proof.length))).toBe(10);
   expect(plan.allocated_amount).toBe("50000");
-}, 15_000);
+  // CPU-bound: 5000 ATA derivations plus the batch Merkle tree and proofs.
+  // About 2.5 s on a laptop, 8–15 s on a shared CI runner while the other
+  // suites run in parallel, which made a 15 s limit flaky. 60 s (as in
+  // distribution-transactions.test.ts) stops that without hiding a quadratic
+  // regression: the assertions above are unchanged.
+}, 60_000);

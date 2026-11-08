@@ -3,12 +3,21 @@ import { Body, Button, ButtonRow, H2, PageHeader, Section, TextLink } from "@/co
 import { SkeletonTable } from "@/components/skeleton";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { moduleRouteState } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 import { ResellBoard } from "./resell-board";
 import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
 
+// Secondary trading switched off (or paused by KYC-only mode): the page shows
+// the notice, the description says so, and where the build allows indexing it
+// is noindex, like the guide of a switched-off module (lib/indexing.ts).
+const resellOff = moduleRouteState("/markets/resell")?.disabled === true;
+
 export const metadata = {
   title: "Resell board · Manci",
-  description: "Holder listings and live OTC offers for tokenized assets on Manci.",
+  description: resellOff
+    ? "The resell board is not available at the moment."
+    : "Holder listings and live OTC offers for tokenized assets on Manci.",
+  ...(resellOff && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
 };
 
 export default function ResellPage() {

@@ -209,6 +209,7 @@ describe("pages while the mode is on (mainnet default)", () => {
       ["/issuer/share-classes", "gate"],
       ["/issuer/launchpad", "notice"],
       ["/issuer/payouts", "notice"],
+      ["/issuer/cap-table", "notice"],
     ];
     for (const [path, kind] of expected) {
       const state = moduleRouteState(path, "mainnet");

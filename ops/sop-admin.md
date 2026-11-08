@@ -267,7 +267,7 @@ the super admin key, and that its Memo instruction reads exactly
 
 ## Fees: price list and charges
 
-Page: `/admin/fees` (migration 0089, runbook §22). Nothing here moves
+Page: `/admin/fees` (migration 0089, runbook §23). Nothing here moves
 tokens or money: fees are invoiced off-chain.
 
 1. **Prices.** *Fee schedule* shows drafts (private), the price in force

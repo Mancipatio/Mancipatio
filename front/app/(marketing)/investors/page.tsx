@@ -15,10 +15,18 @@ import { features } from "@/lib/features";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
+// Only the screens this network shows (lib/pilot-scope.ts): KYC-only mode
+// pauses primary sales, and secondary trading has its own switch.
+const screens = [
+  ...(navHrefVisible("/marketplace/launchpad") ? ["sale"] : []),
+  ...(navHrefVisible("/marketplace/otc") ? ["OTC"] : []),
+  "portfolio",
+];
+
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
   description:
-    `Find an asset, review its documents, connect your wallet and use the sale${navHrefVisible("/marketplace/otc") ? ", OTC" : ""} and portfolio screens.`,
+    `Find an asset, review its documents, connect your wallet and use the ${screens.length > 1 ? `${screens.slice(0, -1).join(", ")} and ` : ""}${screens[screens.length - 1]} screens.`,
 };
 
 const STEPS = [

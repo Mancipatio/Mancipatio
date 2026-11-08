@@ -3064,11 +3064,28 @@ at most once per `interval_seconds`) gathers chain evidence, and
 `finish_indexer_job` and the reconcile take) moves `checked_at` only when the
 mirror is proven in sync, and only to the time the evidence covers: the
 block time of the finalized slot F the listings reach, minus 5 s, never
-later than the plan's database time (normally 15–20 s before it). A run it cannot prove
+later than the plan's database time (15–20 s before it while finality took
+about 13 s; on mainnet as observed on 2026-11-08, with F one or two slots
+behind the confirmed tip and the Clock within about a second of wall time,
+about 4–6 s before it). A run it cannot prove
 leaves `checked_at` alone: the mirror goes stale and the site reads the
 chain. The heartbeat never writes `status`, `last_slot` or `completed_at`,
 never throws, and never makes a retry run `partial` (its outcome is the
 response's `data.freshness`).
+
+Only mode `on` moves `checked_at`. In `observe` (the mode 0075 seeds, and
+the mainnet mode from launch step D7 until the D12 switch, §0A) a proven run
+records `would_bump` and `last_proven_at` and leaves `checked_at` alone, by
+design. On a quiet network the mirror is then fresh for 5 minutes after each
+job or reconcile and stale in between, while the `indexer-freshness` alarm,
+which judges the newer of `checked_at` and the last proof, stays quiet. To
+tell which case a stale mirror is: `/api/health` with the `HEALTH_TOKEN`
+bearer shows `checks.indexer.heartbeat` beside `fresh` (`mode`,
+`lastOutcome`, `lastReason`, the ages of the last attempt and the last
+proof; `null` before 0075 or when unreadable), or run the status script
+below. `observe` with steady `would_bump`: switch it on (Configuration);
+`on` with `declined`: `lastReason` is the first failing condition in the
+table below.
 
 Per run (quiet network, 4 RPC calls plus the genesis check of the server
 RPC, whose 30 s cache is cold at these intervals), first in parallel:
@@ -3204,9 +3221,10 @@ reconcile (the floor falls back to its `last_slot`).
    `UNDECODED_SIGNATURE` around activity, watermarks set, and
    `indexer-freshness` pass or low. No persistent `RPC_TIME_BEHIND` or
    `CLOCK_SKEW` (the provider's finalized block time against the database
-   clock), and `last_proven_at` about 15–20 s before `planned_at`. Make one
-   devnet transaction (e.g. a KYB step): the outcome is `would_bump` again
-   within one or two runs.
+   clock), and `last_proven_at` a few seconds before `planned_at` (about
+   5 s with near-instant finality; 15–20 s where finality takes about 13 s).
+   Make one devnet transaction (e.g. a KYB step): the outcome is
+   `would_bump` again within one or two runs.
 7. Switch on (the `update ... mode = 'on'` above). Within one interval
    `checked_at` is fresh and the four badges show numbers.
 
@@ -4358,14 +4376,28 @@ What the program does:
     `converted` with its outcome evidence; `/admin/audit` has the
     `open_custody_vault`, `conversion_deposit`, `realize_custody` and
     `document_anchor` rows.
+13. **Record the register entry** (any Admin; migration 0086), after the
+    registry decision and the realize: `/admin/cap-table` → the asset → the
+    converted request → *Record register entry*. Enter the units, the
+    percent, the registry, the decision reference (case number) and its date
+    exactly as the APR decision states them, and choose the decision
+    document (hashed in the browser, never uploaded) or paste its SHA-256;
+    the realize transaction and the holder's dossier come from the request.
+    An entry cannot be edited: a wrong one is voided with a reason and
+    recorded again. Read back: every check of the class shows *Pass*
+    (converted units equal registered units, issued minus burned equals
+    outstanding, within 100 %), and the asset page's *Supply and
+    conversions* lists the conversion with its date, units, percent,
+    registry, document SHA-256 and realize transaction, never the case
+    number or the holder.
 
 **Evidence** (in the case file; the personal data and the off-chain
 documents in the company's records, never in this repository): the KYC
 decision and its note; the signatures of the passport, of the 0x08 clear
 and re-set, of the open (with the vault PDA, the deadline and the
-attestation hash), the deposit, the realize and the anchor; the request ID;
-the transfer documents, the APR decision and the register extract; the
-read-back results.
+attestation hash), the deposit, the realize and the anchor; the request ID
+and the register entry ID; the transfer documents, the APR decision and the
+register extract; the read-back results.
 
 **While a conversion is open:**
 
@@ -4402,7 +4434,78 @@ read-back results.
   same, which is why the realize must never be late.
 - Realized: nothing on chain undoes a burn; a correction is off chain.
 
-## 22. Fee schedule and charges (0089)
+## 22. Investor relations: issuer updates (0090)
+
+An issuer's authority wallet publishes updates for the holders of its
+tokens on `/issuer/updates`: company updates, quarterly and annual
+reports, financial statements and notices, for one asset or for every
+asset of the issuer, each with up to ten documents. A **public** update
+shows on the asset page; a **holders only** update is served only to a
+wallet whose Token-2022 balance of one of the asset's classes the server
+reads above zero at that moment (for an issuer-wide update, of one of the
+issuer's assets), and is also listed on that holder's `/portfolio`.
+Drafts are private to the issuer. A published update cannot be edited:
+it can be anchored on chain once (a Memo v2 transaction its issuer key
+signs, `manci-update:<id> sha256:<digest of the published record>`) and
+withdrawn with a reason. A withdrawn update stays on record and is served
+to nobody but its issuer and the admins. No email is sent.
+
+Gating: composing (save, documents, publish) is issuance activity and
+pauses with it in KYC-only mode (`ops/env-vars.md`, "KYC-only mode");
+it also needs the issuer's KYB Verified on chain. Reading, discarding a
+draft, withdrawing and recording an anchor already on chain stay open.
+Attachments go to the private bucket `documents-confidential` under
+`issuer-updates/<issuer>/<network>/<sha256>/` (only that issuer's
+authority may upload there; the finalize route hashes the stored bytes),
+and every reader gets a short-lived signed URL (120 s) after the route
+checked the update's status, visibility and the reader's holding.
+
+**Apply 0090** (expand-only, before the front that uses it; without it
+the issuer page and the asset page's updates answer 503 and nothing else
+changes): devnet `bash scripts/ops/backup.sh devnet pre-0090`, then
+`MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0090_issuer_updates.sql`;
+check with `select relrowsecurity from pg_class where relname in
+('issuer_updates','issuer_update_documents');` (two `t`) and `select
+count(*) from pg_trigger where tgname in ('issuer_updates_guard',
+'issuer_update_documents_guard','manci_network_guard') and tgrelid in
+('public.issuer_updates'::regclass,'public.issuer_update_documents'::regclass);`
+(4). The mainnet project gets it with the rest of the chain, the same way
+after its own backup.
+
+**Moderation: withdrawing an update.** Any Admin, on `/admin/updates`
+(*On-chain → Issuer updates*): find the update (filter *Published*; open
+its documents from the card if needed), *Withdraw (moderation)*, give the
+reason (10–500 characters; the issuer sees it next to the update) and
+confirm with the wallet. What happens:
+
+- the row becomes `withdrawn` with `withdrawn_by` = the admin wallet,
+  `withdrawn_by_role` = `admin`, the reason and the time (0090 makes it
+  final: there is no "unwithdraw"; a corrected update is a new one);
+- an audit row `issuer_update_withdraw` (category *issuers*, target
+  `issuer-update:<id>`) is written; if the audit log is down the
+  withdrawal still stands (the row itself is the record);
+- the asset page, the holder read and every document link stop serving it
+  at once; a signed file URL handed out just before expires within 120 s.
+
+Withdraw when a published update must not stay in front of holders:
+statements that read as investment advice or promised returns, personal
+data, content for the wrong issuer or asset, or on a legal or authority
+request. Anything else (a typo, a late correction) is the issuer's to
+withdraw and republish. The files stay in the private bucket (document
+versions are immutable). When the bytes themselves must go (unlawful
+content, personal data), delete the object from `documents-confidential`
+in the Supabase dashboard after the withdrawal; the routes then answer
+"The document file is missing" for it, and the version row keeps its
+SHA-256 as the record. An update can also be checked for an anchor: the
+card links the transaction; the anchor proves only who published what and
+when, not that the content is accurate.
+
+**Rollback**: the front can roll back alone (the tables stay, unused). To
+remove the feature's data, export both tables first, then drop
+`issuer_update_documents` and `issuer_updates` and their guard functions,
+only with a front that no longer calls `/api/issuer-updates`.
+
+## 23. Fee schedule and charges (0089)
 
 `0089_fee_schedule.sql` adds the public price list and the ledger of what
 is billed against it. Collection is by invoice, off-chain; no program

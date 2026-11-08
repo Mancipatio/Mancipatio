@@ -51,6 +51,9 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/manci-assistant.test.ts",
   "tests/assistant-published-route.test.ts",
   "tests/assistant-knowledge-admin.test.ts",
+  // Read-only browsing (an asset's public supply figures), the admin
+  // console's cap table and an issuer's read of its own.
+  "tests/cap-table-routes.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",

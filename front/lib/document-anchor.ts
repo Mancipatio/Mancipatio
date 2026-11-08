@@ -299,6 +299,12 @@ export type DocumentAnchorExpectation = DocumentAnchor & {
   signature: string;
   /** The Super Admin wallet: the session's wallet, checked against Platform.admin by the route. */
   wallet: string;
+  /**
+   * How the refusals name `wallet`: "the Super Admin wallet" by default; an
+   * issuer update's anchor (app/api/issuer-updates/anchor) is signed by "the
+   * issuer authority wallet", which that route checks instead.
+   */
+  signerRole?: string;
 };
 
 export type DocumentAnchorEvidence = DocumentAnchor & {
@@ -333,15 +339,16 @@ function safeNumber(value: number | bigint, message: string): number {
  */
 export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentAnchorExpectation): DocumentAnchorEvidence {
   const expectedBytes = documentAnchorMemoBytes(expected);
+  const role = expected.signerRole ?? "the Super Admin wallet";
   prove(tx.meta && tx.meta.err === null, "The transaction did not complete successfully");
   const message = tx.transaction.message;
   prove(tx.transaction.signatures[0] === expected.signature, "The transaction signature does not match");
   const signerCount = Number(message.header.numRequiredSignatures);
   prove(
     signerCount === DOCUMENT_ANCHOR_SIGNATURES && tx.transaction.signatures.length === DOCUMENT_ANCHOR_SIGNATURES,
-    "An anchor is signed by the Super Admin wallet alone",
+    `An anchor is signed by ${role} alone`,
   );
-  prove(message.accountKeys[0] === expected.wallet, "The fee payer is not the Super Admin wallet");
+  prove(message.accountKeys[0] === expected.wallet, `The fee payer is not ${role}`);
   const keys = [
     ...message.accountKeys,
     ...(tx.meta.loadedAddresses?.writable ?? []),
@@ -421,7 +428,7 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
   const accounts = memoIx.accounts.map(keyAt);
   prove(
     accounts.length === 1 && accounts[0] === expected.wallet,
-    "The memo is not signed by the Super Admin wallet (it must be its only account)",
+    `The memo is not signed by ${role} (it must be its only account)`,
   );
   const data = bytesOf(memoIx.data, "memo");
   const sameText = data.length === expectedBytes.length && expectedBytes.every((b, i) => data[i] === b);

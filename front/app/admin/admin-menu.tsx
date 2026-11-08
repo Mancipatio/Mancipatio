@@ -62,11 +62,13 @@ export const ADMIN_MENU: AdminNavGroup[] = withRoles([
     label: "On-chain",
     items: [
       { href: "/admin/issuers", label: "Issuers", icon: <IconBuilding /> },
+      { href: "/admin/updates", label: "Issuer updates", icon: <IconFile /> },
       { href: "/admin/spvs", label: "SPVs", icon: <IconScale /> },
       { href: "/admin/applications", label: "Applications", icon: <IconClipboard /> },
       { href: "/admin/limits", label: "Raise limits", icon: <IconScale /> },
       { href: "/admin/assets", label: "Assets", icon: <IconBox /> },
       { href: "/admin/share-classes", label: "Share classes", icon: <IconLayers /> },
+      { href: "/admin/cap-table", label: "Cap table", icon: <IconChart /> },
       { href: "/admin/launchpad", label: "Launchpad", icon: <IconRocket /> },
       { href: "/admin/custody", label: "Custody", icon: <IconLock /> },
       { href: "/admin/otc", label: "OTC", icon: <IconRepeat /> },
