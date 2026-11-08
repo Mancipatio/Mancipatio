@@ -1098,10 +1098,10 @@ upgrade that carries it needs:
    `.github/workflows/verifiable-build.yml` (`hashes.txt`, `solana-verify`).
    `transfer_hook` is unchanged, so `CHAIN_SQUADS_OP=upgrade` takes only
    `buffers.assetRegistry` (the export accepts one buffer or both).
-2. **Capacity.** `asset_registry.so` grows from 2,217,968 B to 2,441,352 B.
+2. **Capacity.** `asset_registry.so` grows from 2,217,968 B to 2,440,760 B.
    Mainnet ProgramData holds 3,145,728 B (`--max-len`, §2) and devnet
    2,537,208 B (the program-ci budget): no `solana program extend` on
-   either (devnet headroom 95,856 B).
+   either (devnet headroom 96,448 B).
 3. **The Squads proposal.** Steps 1–5 above with the new Release: one vault
    transaction, buffer bytes checked against the Release by the export.
 4. **The IDL upgrade.** Step 6. The change is additive only: eleven
@@ -1115,8 +1115,10 @@ upgrade that carries it needs:
    `InstructionFallbackNotFound`). Upgrade and IDL first; only then release
    a front that builds V2 transactions. That front must also classify them
    in `lib/pause-gate.ts` (`MODULE_FLOWS` / `KYC_ONLY_FLOWS`), add
-   `deposit_migration`'s `holder_block_entry` to `lib/proceeds-gate.ts` and
-   decode the `Migration*` events in the indexer.
+   `deposit_migration`'s `holder_block_entry` to `lib/proceeds-gate.ts`,
+   append each deposit's mode proof (the share mint's meta list on an Open
+   class; its hook config, KYC registry and the holder's `KycEntry` on a
+   KycGated one) and decode the `Migration*` events in the indexer.
 7. **The pause bit.** Every V2 entry (create, fund, open, deposit, publish
    root) reads `PAUSE_CUSTODY_ENTRY` (0x08); its exits (cancel, refund,
    finalize, both claims, close) read no bit. On mainnet 0x08 stays set
