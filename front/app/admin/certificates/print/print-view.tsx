@@ -17,6 +17,7 @@ import { certificateVerifyPath, type CertificateDetail } from "@/lib/certificate
 import { CERTIFICATE_ID_PATTERN } from "@/lib/certificates/routes";
 import { WalletSessionRequiredError, type SignedFetchInteractive } from "@/lib/siws-client";
 import { detectNetwork } from "@/lib/network";
+import { siteHref, siteUrl } from "@/lib/site-url";
 import { CERTIFICATE_PRINT_CSS, CertificateSheet } from "../certificate-sheet";
 
 type Load = { state: "loading" } | { state: "signin" } | { state: "error"; text: string } | { state: "ready"; detail: CertificateDetail };
@@ -31,14 +32,15 @@ export function CertificatePrintView() {
   return <PrintBody key={`${detectNetwork()}:${wallet.account.address}:${id}`} session={wallet} id={id} />;
 }
 
-/** The public verification URL printed on the certificate (the site's canonical origin when the build has one). */
+/**
+ * The public verification URL printed on the certificate: on the site's
+ * canonical origin when this build sets one (lib/site-url.ts), else on the
+ * origin this page runs on. Not siteUrl()'s production fallback: a devnet
+ * certificate must point at the devnet site, which holds it.
+ */
 function verifyUrlFor(number: string): string {
-  const origin = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
-  try {
-    return new URL(certificateVerifyPath(number), origin).toString();
-  } catch {
-    return `${window.location.origin}${certificateVerifyPath(number)}`;
-  }
+  const origin = process.env.NEXT_PUBLIC_SITE_URL?.trim() ? siteUrl() : window.location.origin;
+  return siteHref(certificateVerifyPath(number), origin);
 }
 
 function PrintBody({ session, id }: { session: WalletSession; id: string }) {

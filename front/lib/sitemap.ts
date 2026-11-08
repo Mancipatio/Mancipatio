@@ -52,6 +52,7 @@ export const SITEMAP_PAGES: readonly SitemapPage[] = [
   page("/risks", "monthly", 0.5),
   page("/pricing", "monthly", 0.5),
   page("/contact", "yearly", 0.4),
+  page("/certificates/verify", "yearly", 0.3),
   page("/legal/company", "yearly", 0.3),
   page("/legal/terms", "yearly", 0.3),
   page("/legal/privacy", "yearly", 0.3),
