@@ -305,8 +305,11 @@ begin
     if new.status <> 'due' then
       raise exception 'A charge starts as due' using errcode = '23514';
     end if;
+    -- FOR SHARE: a concurrent retire or replacement of this price waits for
+    -- the charge, or the charge sees the price it left (and is refused).
     select s.network, s.kind, s.status, s.effective_from into price
-      from public.fee_schedule s where s.id = new.schedule_id;
+      from public.fee_schedule s where s.id = new.schedule_id
+      for share;
     if not found or price.status <> 'published' or price.network <> new.network or price.kind <> new.kind then
       raise exception 'A charge needs the published fee of its kind on its network' using errcode = '23514';
     end if;
