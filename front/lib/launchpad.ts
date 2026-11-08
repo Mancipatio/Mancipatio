@@ -362,16 +362,22 @@ export async function getPublicApplication(
   return rows[0] ?? null;
 }
 
-/** Admin lists the application queue (signed + on-chain admin gate). */
+/**
+ * Admin lists the application queue (signed + on-chain admin gate).
+ * `interactive: false`: within an existing session only (the admin issuer
+ * journey's background read), never a prompt.
+ */
 export async function listApplications(
   session: WalletSession | null | undefined,
   status?: ApplicationStatus,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<LaunchApplication[]> {
   const data = await signedFetch<{ applications: LaunchApplication[] }>(
     session,
     "/api/applications/admin-list",
     "applications.adminList",
     status ? { status } : {},
+    opts,
   );
   return data.applications ?? [];
 }
