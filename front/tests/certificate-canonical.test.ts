@@ -5,7 +5,7 @@
 // float, a non-NFC string, a control character, undefined) is refused rather
 // than repaired. The fixture's bytes and hash were produced by Python's
 // json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-// the check ops/runbook-mainnet.md §23 gives authorities.
+// the check ops/runbook-mainnet.md §24 gives authorities.
 import { describe, expect, it } from "vitest";
 import {
   CanonicalJsonError,

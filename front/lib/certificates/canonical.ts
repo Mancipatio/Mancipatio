@@ -23,7 +23,7 @@
 //     signed request params and would hide a missing field here.)
 // With these rules Python's
 //   json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-// gives the same bytes (ops/runbook-mainnet.md §23 shows the whole check).
+// gives the same bytes (ops/runbook-mainnet.md §24 shows the whole check).
 //
 // Pure, directive-free and dependency-free: the server builds and hashes
 // with it, the admin page and the public verification page re-check with it
