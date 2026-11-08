@@ -670,7 +670,10 @@ function placementStep(input: KnownInput, f: Facts, onChainDone: boolean): Draft
 function holdersStep(input: JourneyInput, f: Facts, env: JourneyEnvironment): Draft {
   const you = input.audience === "issuer";
   const offChain = true;
-  const link = you ? (["/solutions/custody", "Conversion guide"] as const) : (["/admin/custody", "Custody"] as const);
+  // The cap table reconciles units with the company register (issued, in
+  // escrow, burned, registered); the admin handles open conversions in Custody.
+  const link = you ? (["/issuer/cap-table", "Cap table"] as const) : (["/admin/cap-table", "Cap table"] as const);
+  const custody = ["/admin/custody", "Custody"] as const;
   const conversionLine = env.conversionOffered
     ? "a holder who wants registered ownership requests conversion, which requires KYC"
     : "conversion into registered ownership is not offered on this network yet";
@@ -699,10 +702,10 @@ function holdersStep(input: JourneyInput, f: Facts, env: JourneyEnvironment): Dr
           requested > 0 ? `${plural(requested, "request waits", "requests wait")} for Manci to open the conversion escrow` : null,
           deposited > 0 ? `${plural(deposited, "deposit waits", "deposits wait")} for the notary and business register (APR) filing before Manci confirms ${deposited === 1 ? "it" : "them"} on-chain` : null,
         ].filter((p): p is string => p !== null);
-        return { state: "waiting_on_manci", actor: "manci", offChain, link, explanation: `${parts.join("; ")}.` };
+        return { state: "waiting_on_manci", actor: "manci", offChain, link: custody, explanation: `${parts.join("; ")}.` };
       }
       if (vaultOpened > 0) {
-        return { state: "in_progress", actor: "holders", offChain, link,
+        return { state: "in_progress", actor: "holders", offChain, link: custody,
           explanation: `${plural(vaultOpened, "holder can", "holders can")} now deposit units into the conversion escrow.` };
       }
       return { state: "in_progress", actor: "holders", offChain, link,

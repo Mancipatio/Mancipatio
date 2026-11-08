@@ -291,7 +291,7 @@ describe("issuer audience: from a first visit to holders", () => {
 
   it("holders and conversions from the chain: burned units are named, never called registered", () => {
     const j = journey({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(10_000), circulatingSupply: BigInt(9_750), treasury: BigInt(0) })])] });
-    expect(step(j, "holders")).toMatchObject({ state: "in_progress", actor: "holders", offChain: true });
+    expect(step(j, "holders")).toMatchObject({ state: "in_progress", actor: "holders", offChain: true, href: "/issuer/cap-table" });
     expect(step(j, "holders").explanation).toBe(
       "9,750 units are with holders; 250 units have been burned on-chain (a completed conversion burns the escrowed units); a holder who wants registered ownership requests conversion, which requires KYC.",
     );
@@ -390,6 +390,9 @@ describe("admin audience", () => {
     expect(step(depositing, "holders")).toMatchObject({ state: "in_progress", actor: "holders" });
     const quiet = admin({ assets: [asset({}, [{ ...held, conversions: { requested: 0, vaultOpened: 0, deposited: 0, converted: 3 } }])] });
     expect(step(quiet, "holders").explanation).toBe("10,000 units are with holders; 3 conversions have been completed so far.");
+    // Nothing for Manci to do: the reconciliation with the register is the cap table.
+    expect(step(quiet, "holders").href).toBe("/admin/cap-table");
+    expect(step(depositing, "holders").href).toBe("/admin/custody");
   });
 
   it("no application linked to a verified issuer: not applicable, said in the admin's words", () => {
@@ -423,7 +426,7 @@ describe("KYC-only mode: read-only, every entry action hidden", () => {
     const active = issuerJourney(input({ assets: [asset()] }));
     for (const s of active.steps) {
       if (!s.href) continue;
-      for (const entry of ["/apply", "/issuer/onboarding", "/issuer/assets", "/issuer/launchpad", "/issuer/share-classes", "/solutions/serbian-spv", "/solutions/custody"]) {
+      for (const entry of ["/apply", "/issuer/onboarding", "/issuer/assets", "/issuer/launchpad", "/issuer/share-classes", "/issuer/cap-table", "/solutions/serbian-spv", "/solutions/custody"]) {
         expect(s.href.startsWith(entry), `${s.id} → ${s.href}`).toBe(false);
       }
     }
