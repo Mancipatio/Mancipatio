@@ -188,7 +188,10 @@ grant select, insert, update, delete on public.issuer_update_documents to servic
 -- SHA-256, size, type), in the private bucket and under this issuer's prefix
 -- on this network. Insert and delete take the parent row's lock, so an
 -- attachment cannot slip in while the draft is being published (or deleted),
--- and the 10-document cap holds under concurrency. Rows are immutable.
+-- and the 10-document cap holds under concurrency. Both also move the
+-- draft's updated_at: the publish route's compare-and-swap then covers the
+-- documents too (a document added in another tab is never published unseen).
+-- Rows are immutable.
 -- ---------------------------------------------------------------------------
 create or replace function public.issuer_update_documents_guard()
 returns trigger language plpgsql set search_path = '' as $$
@@ -206,6 +209,9 @@ begin
     -- draft can be deleted): no parent row means that cascade.
     if found and parent.status <> 'draft' then
       raise exception 'The documents of a published update cannot be removed' using errcode = '23514';
+    end if;
+    if found then
+      update public.issuer_updates set updated_at = pg_catalog.clock_timestamp() where id = old.update_id;
     end if;
     return old;
   end if;
@@ -228,6 +234,7 @@ begin
      or version.size_bytes is distinct from new.size_bytes or version.mime_type is distinct from new.content_type then
     raise exception 'The document must match a verified immutable version of this issuer' using errcode = '23514';
   end if;
+  update public.issuer_updates set updated_at = pg_catalog.clock_timestamp() where id = new.update_id;
   new.created_at := pg_catalog.clock_timestamp();
   return new;
 end;

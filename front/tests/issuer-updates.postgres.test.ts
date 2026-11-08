@@ -173,6 +173,20 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0090 issuer updat
     expect(() => service("update public.issuer_update_documents set file_name='renamed.pdf'")).toThrow(/immutable/);
   });
 
+  it("moves the draft's revision on every attach and detach, so a publish against the old revision matches nothing", () => {
+    draft();
+    version(1);
+    const before = sql(`select updated_at::text from public.issuer_updates`);
+    attach(1);
+    const attached = sql(`select updated_at::text from public.issuer_updates`);
+    expect(Date.parse(attached)).toBeGreaterThan(Date.parse(before));
+    expect(service(`update public.issuer_updates set status='published',published_by='${WALLET}'
+      where id='${UPDATE}' and updated_at='${before}' returning id`)).toBe("");
+    service("delete from public.issuer_update_documents");
+    expect(Date.parse(sql(`select updated_at::text from public.issuer_updates`))).toBeGreaterThan(Date.parse(attached));
+    expect(statusOf()).toBe("draft");
+  });
+
   it("keeps the documents of a published update; caps an update at ten; deleting a draft removes its documents", () => {
     draft();
     for (let n = 0; n < 10; n++) { version(n); attach(n); }
