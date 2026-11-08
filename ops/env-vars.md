@@ -44,7 +44,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry, alarm, sanctions and fx (automatic EUR rate, 0080) workers refuse every call | `lib/server/retry-worker.ts` |
 | `HELIUS_MAINNET_RPC` (or `SOLANA_MAINNET_RPC`) | Secret (key in the URL) | server key of the paid provider (guard) | — | Mainnet server fails closed | `lib/server/rpc.ts` |
 | `HELIUS_DEVNET_RPC` / `HELIUS_TESTNET_RPC` / `SOLANA_LOCALNET_RPC` | Secret | — | recommended (proves the Helius path before mainnet) | Public endpoint | `lib/server/rpc.ts` |
-| `COMPLIANCE_ALERT_EMAIL` | Public (addresses) | required (≤ 5 addresses) | `office@mancipatio.io` | `/api/health/alarms` 503 on mainnet | `lib/server/system-alerts.ts` |
+| `COMPLIANCE_ALERT_EMAIL` | Public (addresses) | required (≤ 5 addresses) | `office@mancipatio.io` | `/api/health/alarms` 503 on mainnet; no operator email for a new conversion request or a deposit ("Conversion emails") | `lib/server/system-alerts.ts`, `lib/server/notifications.ts` |
 | `ALERT_WEBHOOK_URL` | Secret (the URL is the credential) | https (guard `alert-webhook`) | recommended | Email is the only alert channel | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_TOKEN` | Secret | optional (bearer for ntfy or a relay) | optional | No Authorization header | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_MIN_SEVERITY` | Public | `high` (default) | default | `high`; without email the webhook takes every row | `lib/server/system-alerts.ts` |
@@ -415,6 +415,44 @@ return 503 rather than old seed answers. Quota-store failure uses published
 prepared answers without making paid requests. The existing server
 Supabase credential and canonical site origin are reused; feature flags,
 network selection and on-chain pause masks are unchanged by this feature.
+
+## Conversion emails (0088)
+
+No new variable. Each status change of a conversion request that goes
+through its routes (requested, escrow vault opened, deposited, converted,
+cancelled, returned) emails the holder once; a new request and a deposit
+also email `COMPLIANCE_ALERT_EMAIL`, the operational mailbox this table
+requires on mainnet and the team that handles a conversion's KYC and
+sanctions side (`CONTACT_NOTIFY_EMAIL` stays the contact form's). The
+transport is `SMTP_*` or `RESEND_API_KEY` with `EMAIL_FROM`; links use
+`NEXT_PUBLIC_SITE_URL` (https only, never a request's host).
+
+- Holder address, in this order: the account's confirmed email
+  (`account_profiles.email` with `email_verified_at`), the verified
+  dossier's email (`clients.email` of the request's `client_id`), the
+  request's contact when it is one plain address. None of them: skipped
+  (`NO_RECIPIENT`).
+- Content: the event, the request's short id, the asset label and units,
+  the next step with its typical duration, the outcome transaction and a
+  link to `/portfolio/conversion`. The operator email names only the event,
+  the short id and `/admin/custody`. Never KYC data, a wallet, the holder's
+  contact or note, or an admin note.
+- At most once per request, event and recipient: `public.notification_log`
+  (migration 0088) is claimed before sending and then records `sent`,
+  `failed` or `skipped` with an error class (`TIMEOUT`, `TRANSPORT`,
+  `REJECTED`, `NOT_CONFIGURED`, `NO_RECIPIENT`, `RESERVED_DOMAIN`,
+  `RESOLVE_FAILED`, `MESSAGE_FAILED`), never an address or a body. A failed
+  email is not retried; a row still `pending` means the outcome is unknown
+  (the send may have gone out).
+- Never in the way: the email runs after the response (Next `after()`),
+  with an 8 s send deadline and 4 s per database step; a failure is
+  recorded and swallowed. Without 0088 applied (or with the database
+  unreachable) nothing is sent and the routes behave as before.
+
+Apply 0088 to the target before (or with) the front that sends them.
+Read back one request's emails with `select event, recipient_role, status,
+error, recipient_source, created_at from public.notification_log where
+kind = 'conversion' and ref_id = '<request id>' order by id;`.
 
 ## Fee schedule (pricing)
 

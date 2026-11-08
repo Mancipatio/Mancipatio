@@ -4391,6 +4391,19 @@ What the program does:
     registry, document SHA-256 and realize transaction, never the case
     number or the holder.
 
+**Timeline and emails.** `/portfolio/conversion` shows the holder each
+request's step (requested, escrow open, units in escrow, notary and
+register filing, registered and burned), who acts next, the vault deadline
+and the typical duration of each step (`front/lib/conversion-timeline.ts`:
+review about 2 business days, deposit until the deadline, notary and filing
+5–10 business days, register decision about 5 business days after filing);
+`/admin/custody` mirrors it per row. Steps 4, 6, 7, 10 and their rollbacks
+each email the holder once, and steps 4 and 7 also email
+`COMPLIANCE_ALERT_EMAIL`, after the route has answered (`ops/env-vars.md`,
+"Conversion emails"; needs migration 0088). An email never blocks a step: a
+failed one is in `public.notification_log` with its error class and is not
+resent, so tell the holder yourself when it matters.
+
 **Evidence** (in the case file; the personal data and the off-chain
 documents in the company's records, never in this repository): the KYC
 decision and its note; the signatures of the passport, of the 0x08 clear

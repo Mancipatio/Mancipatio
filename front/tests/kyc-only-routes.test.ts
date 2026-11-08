@@ -427,6 +427,8 @@ describe("every API route is classified", () => {
     // The published price list (0089), like /pricing: readable before sign-in and in the mode.
     "fees/public": "read",
     "inquiries/create": "support",
+    // The holder's own records for the portfolio CSV export (read-only).
+    "portfolio/export": "read",
     // Investor relations (0090): published updates and their documents, a
     // holder's read (balances checked on chain), the issuer's own list.
     "issuer-updates/public": "read", "issuer-updates/document": "read", "issuer-updates/holder": "read",

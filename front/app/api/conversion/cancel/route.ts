@@ -8,6 +8,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { notifyConversionStatus } from "@/lib/server/conversion-notifications";
 
 export async function POST(request: Request) {
   try {
@@ -50,6 +51,8 @@ export async function POST(request: Request) {
     }
 
     if (!updated) throw new SiwsError(409, "Request changed; refresh before cancelling");
+    // The holder's confirmation email, after the response and at most once.
+    notifyConversionStatus(id, "cancelled");
     return NextResponse.json({ ok: true, data: { id, status: "cancelled" } });
   } catch (err) {
     return siwsErrorResponse(err);

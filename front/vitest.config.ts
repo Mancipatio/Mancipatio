@@ -8,7 +8,8 @@ import { defineConfig } from "vitest/config";
  * The suites of what KYC-only mode keeps open (lib/features.ts kycOnly):
  * sign-in, the account, the Terms, the verification (KYC and KYB) request, the
  * passport, the contact form, the admin console's KYC processing, purchase
- * recovery and the exits of existing positions. Run a second time with the
+ * recovery, the exits of existing positions and the holder's read-only
+ * portfolio records (the CSV export). Run a second time with the
  * mode ON (project "kyc-only-on"), as mainnet runs: a gate that lands on one
  * of these paths by mistake fails here, not on the mainnet deploy.
  * tests/kyc-only*.test.ts stub the mode themselves and run once.
@@ -60,6 +61,8 @@ const KYC_ONLY_OPEN_SUITES = [
   "tests/onchain-screening.test.ts",
   "tests/reclaim-rent.test.ts",
   "tests/reclaim-ui-gates.test.ts",
+  // Read-only portfolio features: the holder's own records (CSV export).
+  "tests/portfolio-export-route.test.ts",
 ];
 
 export default defineConfig({

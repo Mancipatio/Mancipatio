@@ -98,6 +98,7 @@ import { fromBytes32, toBytes32 } from "@/lib/format";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { findCustodyVaultPda, findShareClassPda } from "@/lib/pdas";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { ConversionTimelineCompact } from "@/components/conversion-timeline";
 import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
@@ -3550,6 +3551,14 @@ function ConversionRequestsSection({
                     >
                       {CONVERSION_STATUS_LABEL[r.status]}
                     </span>
+                    {/* Read-only: the holder's timeline in the operator's words. */}
+                    <ConversionTimelineCompact
+                      audience="operator"
+                      status={r.status}
+                      hasVault={r.vault_pda !== null}
+                      vaultDeadlineSec={rowLive ? info?.deadline : null}
+                      nowSec={nowSec}
+                    />
                     {r.status === "cancelled" && r.admin_note && (
                       <p className="mt-1 max-w-44 text-[11px] leading-snug text-slate-500">
                         {r.admin_note}
