@@ -40,6 +40,15 @@ const MATRIX: Record<string, Gate> = {
   "cap-table/export": "requireAdmin",
   "cap-table/register-create": "requireAdmin",
   "cap-table/register-void": "requireAdmin",
+  // Certificates of tokenized interest: Admin only (a payload may carry a
+  // holder's name and identification number).
+  "admin/certificates/list": "requireAdmin",
+  "admin/certificates/read": "requireAdmin",
+  "admin/certificates/preview": "requireAdmin",
+  "admin/certificates/create": "requireAdmin",
+  "admin/certificates/sign": "requireAdmin",
+  "admin/certificates/anchor": "requireAdmin",
+  "admin/certificates/revoke": "requireAdmin",
   // Super Admin only.
   "clients/anonymize": "requireSuperAdmin",
   // The passport write-back: the registry authority only.

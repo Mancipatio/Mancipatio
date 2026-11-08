@@ -47,6 +47,9 @@ const KYC_ONLY_OPEN_SUITES = [
   // The published price list (GET /api/fees/public, /pricing) and the fee admin.
   "tests/fee-schedule-routes.test.ts",
   "tests/pricing-page.test.ts",
+  // Certificates of tokenized interest: the admin's issuance and the public check.
+  "tests/certificate-routes.test.ts",
+  "tests/certificate-verify-route.test.ts",
   // Support.
   "tests/inquiries-create-route.test.ts",
   "tests/manci-assistant.test.ts",
