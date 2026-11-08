@@ -16,8 +16,9 @@
 // check fails (HTTP 503):
 //   indexer       ready → ok; warming / not initialized / degraded → warn
 //                 (the browser falls back to chain reads, see lib/indexer.ts).
-//                 `fresh` is what the browser decides (checked_at at most
-//                 5 minutes old); `heartbeat` says why it is not: the 0075
+//                 `fresh` is what the browser decides (lib/indexer-freshness.ts:
+//                 checked_at at most 5 minutes old and not more than 30 s
+//                 ahead); `heartbeat` says why it is not: the 0075
 //                 heartbeat's mode, last outcome and reason code (runbook §16).
 //                 In mode observe the heartbeat proves but never moves
 //                 checked_at, so a quiet network is fresh only for 5 minutes
@@ -80,6 +81,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { NetworkIdentityError } from "@/lib/network-identity";
 import { defaultPaymentMint } from "@/lib/payment-mints";
 import { fxRowFresh, resolveFxRate, type FxOrigin } from "@/lib/fx-effective";
+import { isIndexerStateFresh } from "@/lib/indexer-freshness";
 import { intervalSeconds } from "@/lib/pg-interval";
 import { readFxTables } from "@/lib/server/fx-rates";
 import { readMaintenance } from "@/lib/server/maintenance";
@@ -104,7 +106,7 @@ export type IndexerCheck = Check & {
   lastSlot: number | null;
   checkedAgeSeconds: number | null;
   completedAgeSeconds: number | null;
-  /** Whether browsers read the index right now (mirrors lib/indexer.ts). */
+  /** Whether browsers read the index right now (lib/indexer-freshness.ts, the rule lib/indexer.ts applies). */
   fresh: boolean;
   /** Why the index is (not) kept fresh on a quiet network; null when unreadable. */
   heartbeat: HeartbeatState | null;
@@ -151,8 +153,6 @@ export const QUEUE_WARN_SECONDS = 5 * 60;
 export const QUEUE_FAIL_SECONDS = 30 * 60;
 /** A rate row warns once this share of its max age has passed. */
 export const FX_WARN_FRACTION = 0.8;
-/** lib/indexer.ts stops trusting the index after this long without a check. */
-const INDEX_FRESH_SECONDS = 5 * 60;
 const CACHE_MS = 5_000;
 
 export const TIMEOUT = Symbol("timeout");
@@ -244,8 +244,11 @@ async function checkIndexer(sb: SupabaseClient | null, network: Network, now: nu
     const state: IndexerCheck["state"] = row.status === "ready" || row.status === "warming" || row.status === "degraded" ? row.status : null;
     const checkedAgeSeconds = ageSeconds(row.checked_at, now);
     const completedAgeSeconds = ageSeconds(row.completed_at, now);
-    const fresh = state === "ready" && completedAgeSeconds !== null
-      && checkedAgeSeconds !== null && checkedAgeSeconds <= INDEX_FRESH_SECONDS;
+    // The browser's own rule (lib/indexer-freshness.ts), so `fresh` cannot
+    // disagree with what the site does (a check stamped in the future, say).
+    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    const fresh = isIndexerStateFresh(
+      { status: text(row.status), checked_at: text(row.checked_at), completed_at: text(row.completed_at) }, now);
     const check = { state, lastSlot: safeInteger(row.last_slot), checkedAgeSeconds, completedAgeSeconds, fresh, heartbeat };
     if (state === "ready") return { status: "ok", ...check };
     return { status: "warn", reason: state ?? "unknown_state", ...check };

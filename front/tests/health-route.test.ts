@@ -507,6 +507,9 @@ describe("GET /api/health", () => {
     ["warming", { status: "warming", last_slot: null, checked_at: ago(5), completed_at: null }, { status: "warn", reason: "warming", state: "warming", fresh: false }],
     ["degraded", { status: "degraded", last_slot: 9, checked_at: ago(5), completed_at: ago(99) }, { status: "warn", reason: "degraded", state: "degraded", lastSlot: 9, fresh: false }],
     ["ready but idle", { status: "ready", last_slot: "77", checked_at: ago(600), completed_at: ago(900) }, { status: "ok", state: "ready", lastSlot: 77, checkedAgeSeconds: 600, fresh: false }],
+    // The browser's rule (lib/indexer-freshness.ts): a check stamped more than 30 s ahead is not trusted.
+    ["ready, checked in the future", { status: "ready", last_slot: 77, checked_at: ago(-60), completed_at: ago(900) }, { status: "ok", state: "ready", checkedAgeSeconds: 0, fresh: false }],
+    ["ready, checked a few seconds ahead", { status: "ready", last_slot: 77, checked_at: ago(-10), completed_at: ago(900) }, { status: "ok", state: "ready", checkedAgeSeconds: 0, fresh: true }],
   ])("reports an indexer that is %s without failing the deployment", async (_label, row, expected) => {
     m.replies.indexer_sync_state = { data: row, error: null };
     const { status, body } = await get();

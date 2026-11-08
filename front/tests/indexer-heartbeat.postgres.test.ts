@@ -458,7 +458,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
       th: Array.from({ length: 11 }, (_, i) => r(21_000 + i, FLOOR - 30 - i * 60)),
       finalized: tip + 299,
     });
-    /** The browser's and /api/health's rule (lib/indexer-freshness.ts) on the sync row, at the database's now. */
+    /** The freshness rule of the browser and of /api/health (lib/indexer-freshness.ts) on the sync row, at the database's now. */
     const fresh = () => isIndexerStateFresh(syncRow(), Date.parse(JSON.parse(sql("select to_json(now())"))));
     const reconciledAgo = (minutes: number) =>
       sql(`update public.indexer_sync_state set completed_at = now() - make_interval(mins => ${minutes}), checked_at = now() - make_interval(mins => ${minutes})`);
