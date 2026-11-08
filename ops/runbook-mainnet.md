@@ -3064,11 +3064,28 @@ at most once per `interval_seconds`) gathers chain evidence, and
 `finish_indexer_job` and the reconcile take) moves `checked_at` only when the
 mirror is proven in sync, and only to the time the evidence covers: the
 block time of the finalized slot F the listings reach, minus 5 s, never
-later than the plan's database time (normally 15–20 s before it). A run it cannot prove
+later than the plan's database time (15–20 s before it while finality took
+about 13 s; on mainnet as observed on 2026-11-08, with F one or two slots
+behind the confirmed tip and the Clock within about a second of wall time,
+about 4–6 s before it). A run it cannot prove
 leaves `checked_at` alone: the mirror goes stale and the site reads the
 chain. The heartbeat never writes `status`, `last_slot` or `completed_at`,
 never throws, and never makes a retry run `partial` (its outcome is the
 response's `data.freshness`).
+
+Only mode `on` moves `checked_at`. In `observe` (the mode 0075 seeds, and
+the mainnet mode from launch step D7 until the D12 switch, §0A) a proven run
+records `would_bump` and `last_proven_at` and leaves `checked_at` alone, by
+design. On a quiet network the mirror is then fresh for 5 minutes after each
+job or reconcile and stale in between, while the `indexer-freshness` alarm,
+which judges the newer of `checked_at` and the last proof, stays quiet. To
+tell which case a stale mirror is: `/api/health` with the `HEALTH_TOKEN`
+bearer shows `checks.indexer.heartbeat` beside `fresh` (`mode`,
+`lastOutcome`, `lastReason`, the ages of the last attempt and the last
+proof; `null` before 0075 or when unreadable), or run the status script
+below. `observe` with steady `would_bump`: switch it on (Configuration);
+`on` with `declined`: `lastReason` is the first failing condition in the
+table below.
 
 Per run (quiet network, 4 RPC calls plus the genesis check of the server
 RPC, whose 30 s cache is cold at these intervals), first in parallel:
@@ -3204,9 +3221,10 @@ reconcile (the floor falls back to its `last_slot`).
    `UNDECODED_SIGNATURE` around activity, watermarks set, and
    `indexer-freshness` pass or low. No persistent `RPC_TIME_BEHIND` or
    `CLOCK_SKEW` (the provider's finalized block time against the database
-   clock), and `last_proven_at` about 15–20 s before `planned_at`. Make one
-   devnet transaction (e.g. a KYB step): the outcome is `would_bump` again
-   within one or two runs.
+   clock), and `last_proven_at` a few seconds before `planned_at` (about
+   5 s with near-instant finality; 15–20 s where finality takes about 13 s).
+   Make one devnet transaction (e.g. a KYB step): the outcome is
+   `would_bump` again within one or two runs.
 7. Switch on (the `update ... mode = 'on'` above). Within one interval
    `checked_at` is fresh and the four badges show numbers.
 
