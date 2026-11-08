@@ -21,6 +21,7 @@
 
 import type { MetadataRoute } from "next";
 import { ASSET_CLASS_SLUGS } from "@/lib/asset-classes";
+import { geoblockKind } from "@/lib/geoblock";
 import { indexingAllowed, NON_INDEXED_PATHS } from "@/lib/indexing";
 import { detectNetwork, type Network } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
@@ -90,7 +91,7 @@ export function nonIndexedPath(path: string): boolean {
 /** The pages `network` shows and crawlers may fetch, fixed pages first. */
 export function sitemapPages(network: Network = detectNetwork()): SitemapPage[] {
   return [...SITEMAP_PAGES, ...Object.values(SITEMAP_FAMILIES).flat()]
-    .filter((entry) => !nonIndexedPath(entry.path) && navHrefVisible(entry.path, network));
+    .filter((entry) => !nonIndexedPath(entry.path) && geoblockKind(entry.path) === null && navHrefVisible(entry.path, network));
 }
 
 /** The sitemap of this deployment: empty unless it may be indexed. */

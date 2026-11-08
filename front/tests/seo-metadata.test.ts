@@ -261,6 +261,39 @@ describe("root layout metadata", () => {
   });
 });
 
+describe("public page descriptions follow the pilot scope", () => {
+  it("mainnet under KYC-only mode: nothing promises a paused module; paused pages are noindex where indexing is allowed", async () => {
+    indexedMainnet();
+    expect((await import("@/app/(marketing)/investors/page")).metadata.description)
+      .toBe("Find an asset, review its documents, connect your wallet and use the portfolio screens.");
+    expect((await import("@/app/docs/page")).metadata.description)
+      .toBe("Guides to Manci assets, issuance, controls and issuer disclosures.");
+    expect((await import("@/app/(marketing)/markets/resell/page")).metadata)
+      .toMatchObject({ description: "The resell board is not available at the moment.", robots: { index: false, follow: true } });
+    expect((await import("@/app/(marketing)/apply/layout")).metadata)
+      .toMatchObject({ title: "Apply to issue · Manci", description: "Applications to issue are not available at the moment.",
+        robots: { index: false, follow: true } });
+    const { generateMetadata } = await import("@/app/(marketing)/markets/[slug]/page");
+    expect((await generateMetadata({ params: Promise.resolve({ slug: "equity" }) })).title).toBe("Company ownership · Asset market · Manci");
+  });
+
+  it("a network with every module on keeps the full descriptions, without noindex", async () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+    vi.stubEnv(KYC_ONLY_ENV, "");
+    for (const name of Object.values(PILOT_MODULE_ENV)) vi.stubEnv(name, "");
+    expect((await import("@/app/(marketing)/investors/page")).metadata.description)
+      .toBe("Find an asset, review its documents, connect your wallet and use the sale, OTC and portfolio screens.");
+    expect((await import("@/app/docs/page")).metadata.description)
+      .toBe("Guides to Manci assets, issuance, trading, vesting, controls and issuer disclosures.");
+    const resell = (await import("@/app/(marketing)/markets/resell/page")).metadata;
+    expect(resell.description).toBe("Holder listings and live OTC offers for tokenized assets on Manci.");
+    expect(resell).not.toHaveProperty("robots");
+    const apply = (await import("@/app/(marketing)/apply/layout")).metadata;
+    expect(apply.description).toBe("Apply to issue company shares on Manci. A person reads every application and replies either way.");
+    expect(apply).not.toHaveProperty("robots");
+  });
+});
+
 describe("Organization JSON-LD (lib/structured-data.ts)", () => {
   it("mainnet: the operator record's entity, the site and the X account", () => {
     expect(organizationJsonLd(OPERATORS.mainnet, "https://www.manci.io")).toEqual({

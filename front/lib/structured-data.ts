@@ -39,7 +39,8 @@ export function organizationJsonLd(operator: Operator, origin: string): JsonLd {
 /**
  * The text of a `<script type="application/ld+json">`. JSON.stringify does
  * not escape "<", so a value containing "</script>" could end the element and
- * inject markup: every "<" becomes <, which JSON parsers read back as "<".
+ * inject markup: every "<" is written as its JSON unicode escape (a
+ * backslash, then u003c), which JSON parsers read back as "<".
  */
 export function jsonLdScript(data: JsonLd): string {
   return JSON.stringify(data).replace(/</g, "\\u003c");
