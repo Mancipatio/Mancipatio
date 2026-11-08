@@ -510,23 +510,51 @@ pub fn open_ix(admin: &Pubkey, m: &Mig) -> Instruction {
     )
 }
 
+/// A deposit into an Open class: the proof of the mode is the share mint's
+/// meta list (its Open shape).
 pub fn deposit_ix(holder: &Pubkey, m: &Mig, holder_old: &Pubkey, lots: u64) -> Instruction {
+    let proof = vec![ro(extra_metas_pda(&m.fx.mint))];
+    deposit_ix_with(holder, m, holder_old, lots, proof)
+}
+
+/// A deposit with an explicit mode proof (`kyc_proof` on a KycGated class,
+/// nothing to test `KycProofRequired`).
+pub fn deposit_ix_with(
+    holder: &Pubkey,
+    m: &Mig,
+    holder_old: &Pubkey,
+    lots: u64,
+    proof: Vec<AccountMeta>,
+) -> Instruction {
     ix(
         ixd::DepositMigration { lots }.data(),
-        acc::DepositMigration {
-            holder: *holder,
-            migration: m.migration,
-            migration_deposit: m.deposit(holder),
-            old_mint: m.old_mint,
-            migration_escrow: m.escrow(),
-            holder_token_account: *holder_old,
-            old_token_program: m.old_program,
-            system_program: system_program::ID,
-            platform: platform_pda(),
-            holder_block_entry: block_entry_pda(holder),
-        }
-        .to_account_metas(None),
+        with_tail(
+            acc::DepositMigration {
+                holder: *holder,
+                migration: m.migration,
+                migration_deposit: m.deposit(holder),
+                old_mint: m.old_mint,
+                migration_escrow: m.escrow(),
+                holder_token_account: *holder_old,
+                old_token_program: m.old_program,
+                system_program: system_program::ID,
+                platform: platform_pda(),
+                holder_block_entry: block_entry_pda(holder),
+            }
+            .to_account_metas(None),
+            proof,
+        ),
     )
+}
+
+/// The KycGated mode proof of a deposit: the share mint's hook config, its
+/// registry and the holder's entry.
+pub fn kyc_proof(mint: &Pubkey, registry: &Pubkey, holder: &Pubkey) -> Vec<AccountMeta> {
+    vec![
+        ro(hook_config_pda(mint)),
+        ro(*registry),
+        ro(kyc_entry_pda(registry, holder)),
+    ]
 }
 
 pub fn cancel_ix(admin: &Pubkey, m: &Mig) -> Instruction {

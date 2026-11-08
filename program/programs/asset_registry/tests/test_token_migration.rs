@@ -14,8 +14,12 @@
 //!   * the full lifecycle with an SPL Token old mint and with a Token-2022 old
 //!     mint (permitted extensions), including the Merkle path;
 //!   * a KycGated share class: the funding leg rides the vault's identity,
-//!     claims are KYC-checked, a raw push into the vault reaches `return_to`
-//!     only with its KYC (the escrow-release rule), the rest needs none;
+//!     deposits need the holder's KYC (and every deposit a mode proof),
+//!     claims are KYC-checked again, a raw push into the vault reaches
+//!     `return_to` only with its KYC (the escrow-release rule), the rest
+//!     needs none;
+//!   * the close survives an old mint closed by its close authority while
+//!     the escrow is empty;
 //!   * every gate: signers and the double gate, terms and window bounds, the
 //!     old-mint policy, the cap, whole lots, the window, the custody-entry
 //!     pause (exits stay open), the holder blocklist, double claims, double
@@ -62,6 +66,7 @@ const E_INVALID_MERKLE_PROOF: u32 = 6030;
 const E_OVERFLOW: u32 = 6035;
 const E_NOTHING_TO_CLAIM: u32 = 6047;
 const E_RECEIVER_NOT_APPROVED: u32 = 6069;
+const E_KYC_PROOF_REQUIRED: u32 = 6077;
 const E_INVALID_DEPOSIT_AMOUNT: u32 = 6085;
 const E_UNSUPPORTED_MINT_EXTENSION: u32 = 6115;
 const E_PARTY_BLOCKLISTED: u32 = 6144;
@@ -581,14 +586,34 @@ fn approve(s: &mut Setup, registry: &Pubkey, wallet: &Pubkey) {
     );
 }
 
+fn revoke(s: &mut Setup, registry: &Pubkey, wallet: &Pubkey) {
+    let a = admin(s);
+    s.w.send(
+        &[&a],
+        &[Instruction::new_with_bytes(
+            asset_registry::ID,
+            &asset_registry::instruction::RevokeHolder { holder: *wallet }.data(),
+            asset_registry::accounts::RevokeHolder {
+                authority: a.pubkey(),
+                kyc_registry: *registry,
+                kyc_entry: kyc_entry_pda(registry, wallet),
+            }
+            .to_account_metas(None),
+        )],
+        "revoke_holder",
+    );
+}
+
 /// A KycGated class: the funding leg is exempt through the vault's identity
-/// (the vault holds no KYC), a claim needs the holder's KYC (refused without
-/// it, paid once approved), and at the close the units `return_to` funded
-/// itself go back with no KYC while a unit somebody pushed into the vault
-/// raw is a delivery: the close fails with the KYC error until `return_to`
-/// is approved, then returns everything.
+/// (the vault holds no KYC); a deposit needs the holder's KYC up front (a
+/// holder who could never claim must not commit old tokens) and a proof of
+/// the mode at all (fail-closed); a claim checks again — refused once the
+/// entry is revoked, paid after re-approval; and at the close the units
+/// `return_to` funded itself go back with no KYC while a unit somebody
+/// pushed into the vault raw is a delivery: the close fails with the KYC
+/// error until `return_to` is approved, then returns everything.
 #[test]
-fn kyc_gated_class_claims_need_kyc_and_a_raw_surplus_needs_return_to_kyc() {
+fn kyc_gated_class_deposits_and_claims_need_kyc_and_a_raw_surplus_needs_return_to_kyc() {
     let mut s = setup();
     let registry = kyc_gate(&mut s);
     let old_mint = spl_mint(&mut s.w, 0);
@@ -602,15 +627,44 @@ fn kyc_gated_class_claims_need_kyc_and_a_raw_surplus_needs_return_to_kyc() {
     open(&mut s, &m);
 
     let approved = holder(&mut s, &m, 50);
-    let unapproved = holder(&mut s, &m, 50);
+    let late = holder(&mut s, &m, 50);
     approve(&mut s, &registry, &approved.key.pubkey());
-    // Depositing needs no KYC (holding needs none).
-    deposit(&mut s, &m, &approved, 50);
-    deposit(&mut s, &m, &unapproved, 20);
+    let mint = s.fx.mint;
+    let kyc_deposit = |h: &Holder, lots: u64| {
+        let proof = kyc_proof(&mint, &registry, &h.key.pubkey());
+        deposit_ix_with(&h.key.pubkey(), &m, &h.old, lots, proof)
+    };
+    // Without KYC the deposit is refused: the holder could never claim.
+    let ix = kyc_deposit(&late, 20);
+    let err = s.w.try_send(&[&late.key], &[ix]).unwrap_err();
+    assert!(
+        err.contains(&format!("Custom({E_RECEIVER_NOT_APPROVED})"))
+            && err.contains("ReceiverNotApproved"),
+        "a deposit without KYC on a KycGated class: {err}"
+    );
+    // No proof of the mode, or the Open-shape proof: fail-closed.
+    let ak = approved.key.insecure_clone();
+    let ix = deposit_ix_with(&ak.pubkey(), &m, &approved.old, 1, vec![]);
+    expect_code(&mut s, &[&ak], &[ix], E_KYC_PROOF_REQUIRED, "no mode proof");
+    let ix = deposit_ix(&ak.pubkey(), &m, &approved.old, 1);
+    expect_code(
+        &mut s,
+        &[&ak],
+        &[ix],
+        E_KYC_PROOF_REQUIRED,
+        "an Open proof on a KycGated class",
+    );
+    let ix = kyc_deposit(&approved, 50);
+    let (_, cu) = send_cu(&mut s.w, &[&ak], &[ix]).unwrap();
+    report("deposit_migration (KycGated class)", cu);
+    approve(&mut s, &registry, &late.key.pubkey());
+    let ix = kyc_deposit(&late, 20);
+    s.w.send(&[&late.key], &[ix], "deposit once approved");
+    // `late`'s entry is revoked after its deposit.
+    revoke(&mut s, &registry, &late.key.pubkey());
     s.w.warp_to(t.closes_at);
     s.w.send(&[], &[finalize_ix(&m)], "finalize_migration");
 
-    let mint = s.fx.mint;
     let kyc_claim = |h: &Holder| {
         let tail = kyc_tail(&mint, &registry, &m.migration, &h.key.pubkey());
         claim_ix(&h.key.pubkey(), &m, &h.share, tail)
@@ -619,18 +673,18 @@ fn kyc_gated_class_claims_need_kyc_and_a_raw_surplus_needs_return_to_kyc() {
     let (_, cu) = send_cu(&mut s.w, &[&approved.key], &[ix]).unwrap();
     report("claim_migration (KycGated class)", cu);
     assert_eq!(balance(&s.w, &approved.share), 50);
-    let ix = kyc_claim(&unapproved);
-    let err = s.w.try_send(&[&unapproved.key], &[ix]).unwrap_err();
+    let ix = kyc_claim(&late);
+    let err = s.w.try_send(&[&late.key], &[ix]).unwrap_err();
     assert!(
         err.contains(&format!("Custom({E_RECEIVER_NOT_APPROVED})"))
             && err.contains("ReceiverNotApproved"),
-        "the registry refuses a claimer without KYC: {err}"
+        "the registry refuses a claimer whose entry was revoked: {err}"
     );
-    assert_eq!(balance(&s.w, &unapproved.share), 0);
-    approve(&mut s, &registry, &unapproved.key.pubkey());
-    let ix = kyc_claim(&unapproved);
-    s.w.send(&[&unapproved.key], &[ix], "claim once approved");
-    assert_eq!(balance(&s.w, &unapproved.share), 20);
+    assert_eq!(balance(&s.w, &late.share), 0);
+    approve(&mut s, &registry, &late.key.pubkey());
+    let ix = kyc_claim(&late);
+    s.w.send(&[&late.key], &[ix], "claim once re-approved");
+    assert_eq!(balance(&s.w, &late.share), 20);
     assert_eq!(balance(&s.w, &m.vault()), 230);
 
     // A KYC'd holder pushes one unit into the vault with a raw transfer (the
@@ -806,6 +860,15 @@ fn create_refuses_bad_terms_and_windows() {
         claim_deadline: base.closes_at + 30 * DAY - 1,
         ..base
     };
+    // A deadline in milliseconds would lock the vault and escrow for good.
+    let far_claim = Terms {
+        claim_deadline: base.closes_at + 730 * DAY + 1,
+        ..base
+    };
+    let millis_claim = Terms {
+        claim_deadline: (base.closes_at + 30 * DAY) * 1_000,
+        ..base
+    };
     let cases = [
         (Terms { lot: 0, ..base }, E_TERMS, "lot 0"),
         (
@@ -843,6 +906,12 @@ fn create_refuses_bad_terms_and_windows() {
         (window(29), E_WINDOW, "29-day window"),
         (window(181), E_WINDOW, "181-day window"),
         (short_claim, E_WINDOW, "claim period under 30 days"),
+        (
+            far_claim,
+            E_WINDOW,
+            "claim deadline more than 2 years after the window",
+        ),
+        (millis_claim, E_WINDOW, "claim deadline in milliseconds"),
         (back, E_WINDOW, "opens more than a day ago"),
     ];
     for (t, code, what) in cases {
@@ -861,11 +930,18 @@ fn create_refuses_bad_terms_and_windows() {
             .get_account(&migration_pda(&s.fx.share_class, t.id))
             .is_none());
     }
-    // The bounds themselves pass: exactly 30 / 180 days, a day back, 30 days to claim.
+    // The bounds themselves pass: exactly 30 / 180 days, a day back, 30 days
+    // and exactly 2 years to claim.
     for (id, days) in [(11u64, 30i64), (12, 180)] {
         let t = Terms { id, ..window(days) };
         create(&mut s, &t, old_mint, SPL_TOKEN);
     }
+    let t = Terms {
+        id: 15,
+        claim_deadline: base.closes_at + 730 * DAY,
+        ..base
+    };
+    create(&mut s, &t, old_mint, SPL_TOKEN);
     let t = Terms {
         id: 13,
         opens_at: now - DAY,
@@ -1188,6 +1264,9 @@ fn deposit_gates_window_cap_lots_pause_and_blocklist() {
         E_UNAUTHORIZED,
         "another holder's account",
     );
+    // Every deposit proves the class's restriction mode (fail-closed).
+    let ix = deposit_ix_with(&hk.pubkey(), &m, &h.old, 1, vec![]);
+    expect_code(&mut s, &[&hk], &[ix], E_KYC_PROOF_REQUIRED, "no mode proof");
     // Custody entry paused.
     s.w.set_pause(asset_registry::PAUSE_CUSTODY_ENTRY, 0);
     expect_code(&mut s, &[&hk], &[dep(1)], E_PAUSED, "custody entry paused");
@@ -1597,6 +1676,33 @@ fn close_gates_deadline_admin_rent_recipient_and_return_to() {
     assert_eq!(balance(&s.w, &s.treasury), TREASURY - 2);
     let again = close_ix(&a.pubkey(), &m, &s.treasury, tail());
     assert!(s.w.try_send(&[&a], &[again]).is_err(), "close twice");
+}
+
+/// A Token-2022 old mint with a close authority can be closed once its supply
+/// is 0. With nothing in the escrow the close must not depend on it: a funded
+/// Draft whose old mint is gone is cancelled and closed, every funded unit
+/// back to `return_to`.
+#[test]
+fn close_survives_a_closed_old_mint_when_the_escrow_is_empty() {
+    let mut s = setup();
+    let old_mint = t22_mint(&mut s.w, 6, &[Ext::MintCloseAuthority]);
+    let t = Terms::standard(1, 1, 25, 0, s.issuer_key.pubkey());
+    let m = create(&mut s, &t, old_mint, TOKEN_2022);
+    fund(&mut s, &m, 25);
+    // Supply 0: the close authority (the fee payer) closes the old mint.
+    let fees = s.w.fees.pubkey();
+    let close_mint = token_ix::close_account(&TOKEN_2022, &old_mint, &fees, &fees, &[]).unwrap();
+    s.w.send(&[], &[close_mint], "close the old mint");
+    assert!(s.w.is_closed(&old_mint));
+    let a = admin(&s);
+    s.w.send(&[&a], &[cancel_ix(&a.pubkey(), &m)], "cancel");
+    let tail = open_tail(&s.fx.mint, &m.migration);
+    let ix = close_ix(&a.pubkey(), &m, &s.treasury, tail);
+    s.w.send(&[&a], &[ix], "close with the old mint gone");
+    assert_eq!(balance(&s.w, &s.treasury), TREASURY);
+    assert!(s.w.is_closed(&m.escrow()) && s.w.is_closed(&m.vault()));
+    assert!(s.w.is_closed(&m.identity()));
+    assert_eq!(state(&s, &m).status, MigrationStatus::Closed);
 }
 
 // ── The root ─────────────────────────────────────────────────────────────────
