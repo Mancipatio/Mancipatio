@@ -60,24 +60,20 @@ export function AssetUpdatesBlock({ assetPda, issuerPda }: { assetPda: string; i
 
   const holdersOnly = published && published !== "error" ? published.holders_only : 0;
   const holderKey = wallet && holdersOnly > 0 ? `${wallet}:${assetPda}` : null;
-  const [holderResult, setHolderResult] = useState<Keyed<HolderState>>(null);
+  // One answer per wallet and asset: a late answer for another wallet never overwrites this one's.
+  const [holderResults, setHolderResults] = useState<ReadonlyMap<string, HolderState>>(new Map());
+  const holderAnswer = (key: string, value: HolderState) => setHolderResults((prev) => new Map(prev).set(key, value));
   // No answer yet for this wallet: the background read below is on its way.
-  const holder: HolderState = !holderKey ? { state: "idle" } : holderResult?.key === holderKey ? holderResult.value : { state: "loading" };
+  const holder: HolderState = !holderKey ? { state: "idle" } : holderResults.get(holderKey) ?? { state: "loading" };
 
   const readHolder = useCallback((key: string, interactive: boolean) =>
     loadHolderIssuerUpdates(sessionRef.current, [assetPda], interactive).then(
-      (answer) => setHolderResult({
-        key,
-        value: answer.holder_assets.includes(assetPda)
-          ? { state: "ready", updates: answer.updates.filter((u) => u.via_asset === assetPda) }
-          : { state: "not-holder" },
-      }),
-      (err: unknown) => setHolderResult({
-        key,
-        value: err instanceof WalletSessionRequiredError
-          ? { state: "signin" }
-          : { state: "error", text: err instanceof Error ? err.message : "Holder updates could not be loaded." },
-      }),
+      (answer) => setHolderResults((prev) => new Map(prev).set(key, answer.holder_assets.includes(assetPda)
+        ? { state: "ready", updates: answer.updates.filter((u) => u.via_asset === assetPda) }
+        : { state: "not-holder" })),
+      (err: unknown) => setHolderResults((prev) => new Map(prev).set(key, err instanceof WalletSessionRequiredError
+        ? { state: "signin" }
+        : { state: "error", text: err instanceof Error ? err.message : "Holder updates could not be loaded." })),
     ), [assetPda]);
 
   // A wallet with a live session reads the holder updates without a prompt.
@@ -103,7 +99,7 @@ export function AssetUpdatesBlock({ assetPda, issuerPda }: { assetPda: string; i
 
   function signInAndRead() {
     if (!holderKey) return;
-    setHolderResult({ key: holderKey, value: { state: "loading" } });
+    holderAnswer(holderKey, { state: "loading" });
     void readHolder(holderKey, true);
   }
 

@@ -46,21 +46,20 @@ function Moderation({ session }: { session: WalletSession }) {
   const sessionRef = useRef(session);
   useEffect(() => { sessionRef.current = session; }, [session]);
   const [filter, setFilter] = useState<Filter>("published");
-  const [list, setList] = useState<{ key: Filter; value: List } | null>(null);
-  const current: List = list?.key === filter ? list.value : { state: "loading" };
+  // One answer per filter: a late answer for the previous filter never overwrites the current one's.
+  const [lists, setLists] = useState<ReadonlyMap<Filter, List>>(new Map());
+  const setList = (key: Filter, value: List) => setLists((prev) => new Map(prev).set(key, value));
+  const current: List = lists.get(filter) ?? { state: "loading" };
   const [target, setTarget] = useState<AdminIssuerUpdate | null>(null);
   const [busy, setBusy] = useState(false);
   const [opening, setOpening] = useState<string | null>(null);
 
   const load = useCallback((key: Filter, interactive: boolean) =>
     loadAdminIssuerUpdates(sessionRef.current, key, interactive).then(
-      (updates) => setList({ key, value: { state: "ready", updates } }),
-      (err: unknown) => setList({
-        key,
-        value: err instanceof WalletSessionRequiredError
-          ? { state: "signin" }
-          : { state: "error", text: err instanceof Error ? err.message : "The updates could not be loaded." },
-      }),
+      (updates) => setLists((prev) => new Map(prev).set(key, { state: "ready", updates })),
+      (err: unknown) => setLists((prev) => new Map(prev).set(key, err instanceof WalletSessionRequiredError
+        ? { state: "signin" }
+        : { state: "error", text: err instanceof Error ? err.message : "The updates could not be loaded." })),
     ), []);
 
   useEffect(() => { void load(filter, false); }, [filter, load]);
@@ -72,7 +71,8 @@ function Moderation({ session }: { session: WalletSession }) {
       await withdrawIssuerUpdate(sessionRef.current, target.id, reason);
       setTarget(null);
       toast.show({ kind: "success", title: "Update withdrawn", description: "Readers no longer see it; its issuer sees your reason." });
-      setList({ key: filter, value: { state: "loading" } });
+      // Every filter's list may hold the withdrawn update: reload them as they are opened.
+      setLists(new Map([[filter, { state: "loading" }]]));
       void load(filter, false);
     } catch (err) {
       toast.showError("The update was not withdrawn", err instanceof Error ? err.message : String(err));
@@ -108,7 +108,7 @@ function Moderation({ session }: { session: WalletSession }) {
       ) : current.state === "signin" || current.state === "error" ? (
         <div className="mt-6 rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600 shadow-card">
           <p>{current.state === "error" ? current.text : "Sign in with your admin wallet to load the updates."}</p>
-          <button type="button" className="btn-brand mt-3" onClick={() => { setList({ key: filter, value: { state: "loading" } }); void load(filter, true); }}>
+          <button type="button" className="btn-brand mt-3" onClick={() => { setList(filter, { state: "loading" }); void load(filter, true); }}>
             {current.state === "error" ? "Try again" : "Sign in"}
           </button>
         </div>

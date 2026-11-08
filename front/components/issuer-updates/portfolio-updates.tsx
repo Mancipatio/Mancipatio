@@ -37,21 +37,20 @@ export function PortfolioUpdates({ session, holdings }: {
   const assets = [...names.entries()].sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .slice(0, ISSUER_UPDATE_LIMITS.holderAssets).map(([pda]) => pda);
   const key = assets.join(",");
-  const [result, setResult] = useState<{ key: string; value: State } | null>(null);
-  const current: State = result?.key === key ? result.value : { state: "loading" };
+  // One answer per asset list: a late answer for a previous list never overwrites the current one's.
+  const [results, setResults] = useState<ReadonlyMap<string, State>>(new Map());
+  const answer = (forKey: string, value: State) => setResults((prev) => new Map(prev).set(forKey, value));
+  const current: State = results.get(key) ?? { state: "loading" };
   const [showAll, setShowAll] = useState(false);
   const [opening, setOpening] = useState<string | null>(null);
 
   const read = useCallback((forKey: string, interactive: boolean) => {
     const list = forKey.split(",");
     return loadHolderIssuerUpdates(sessionRef.current, list, interactive).then(
-      (answer) => setResult({ key: forKey, value: { state: "ready", updates: answer.updates } }),
-      (err: unknown) => setResult({
-        key: forKey,
-        value: err instanceof WalletSessionRequiredError
-          ? { state: "signin" }
-          : { state: "error", text: err instanceof Error ? err.message : "Updates could not be loaded." },
-      }),
+      (data) => setResults((prev) => new Map(prev).set(forKey, { state: "ready", updates: data.updates })),
+      (err: unknown) => setResults((prev) => new Map(prev).set(forKey, err instanceof WalletSessionRequiredError
+        ? { state: "signin" }
+        : { state: "error", text: err instanceof Error ? err.message : "Updates could not be loaded." })),
     );
   }, []);
 
@@ -73,7 +72,7 @@ export function PortfolioUpdates({ session, holdings }: {
   }
 
   function signIn() {
-    setResult({ key, value: { state: "loading" } });
+    answer(key, { state: "loading" });
     void read(key, true);
   }
 

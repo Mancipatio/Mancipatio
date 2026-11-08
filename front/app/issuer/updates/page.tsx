@@ -101,16 +101,21 @@ function IssuerUpdates({ session, wallet }: { session: WalletSession; wallet: st
   }, [issuerPda, load]);
 
   const updates = current.state === "ready" ? current.updates : NO_UPDATES;
+  // Functional updates: an upload or an anchor can finish long after it began,
+  // and must not put back the list (or the editor) as it was then.
   const replace = (next: IssuerUpdateRecord) => {
     if (!issuerPda) return;
-    const rest = updates.filter((u) => u.id !== next.id);
-    setRecords({ key: issuerPda, value: { state: "ready", updates: [next, ...rest] } });
-    if (editing && editing.id === null && next.status === "draft") setEditing({ id: next.id });
+    setRecords((prev) => prev?.key === issuerPda && prev.value.state === "ready"
+      ? { key: issuerPda, value: { state: "ready", updates: [next, ...prev.value.updates.filter((u) => u.id !== next.id)] } }
+      : prev);
+    setEditing((prev) => (prev && prev.id === null && next.status === "draft" ? { id: next.id } : prev));
   };
   const drop = (id: string) => {
     if (!issuerPda) return;
-    setRecords({ key: issuerPda, value: { state: "ready", updates: updates.filter((u) => u.id !== id) } });
-    setEditing(null);
+    setRecords((prev) => prev?.key === issuerPda && prev.value.state === "ready"
+      ? { key: issuerPda, value: { state: "ready", updates: prev.value.updates.filter((u) => u.id !== id) } }
+      : prev);
+    setEditing((prev) => (prev?.id === id ? null : prev));
   };
 
   async function openDocument(documentId: string) {
@@ -158,6 +163,8 @@ function IssuerUpdates({ session, wallet }: { session: WalletSession; wallet: st
   const canCompose = verified && issuanceOn;
   const assetLabel = (pda: string | null) => (pda ? chain.assets.find((a) => a.pda === pda)?.name ?? `${pda.slice(0, 6)}…` : "Every asset of your issuer");
   const editingRecord = editing?.id ? updates.find((u) => u.id === editing.id) ?? null : null;
+  // The editor is open only for a new draft or a draft still in the list (one discarded elsewhere closes it).
+  const editorOpen = editing !== null && (editing.id === null || editingRecord !== null);
   const groups: Array<[string, IssuerUpdateRecord[]]> = [
     ["Drafts", updates.filter((u) => u.status === "draft")],
     ["Published", updates.filter((u) => u.status === "published")],
@@ -168,7 +175,7 @@ function IssuerUpdates({ session, wallet }: { session: WalletSession; wallet: st
     <main className="min-w-0 flex-1">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>{header}</div>
-        {canCompose && current.state === "ready" && !editing && (
+        {canCompose && current.state === "ready" && !editorOpen && (
           <button type="button" className="btn-brand" onClick={() => setEditing({ id: null })}>New update</button>
         )}
       </div>
@@ -179,7 +186,7 @@ function IssuerUpdates({ session, wallet }: { session: WalletSession; wallet: st
         </p>
       )}
 
-      {editing && (editing.id === null || editingRecord) && (
+      {editing && editorOpen && (
         <div className="mt-6">
           <DraftEditor
             key={editing.id ?? "new"}
@@ -207,7 +214,7 @@ function IssuerUpdates({ session, wallet }: { session: WalletSession; wallet: st
             {current.state === "error" ? "Try again" : "Sign in"}
           </button>
         </div>
-      ) : updates.length === 0 && !editing ? (
+      ) : updates.length === 0 && !editorOpen ? (
         <p className="mt-6 text-sm text-slate-500">
           {canCompose ? "No updates yet. Start with “New update”." : "No updates yet."}
         </p>
