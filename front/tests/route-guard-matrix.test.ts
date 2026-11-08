@@ -41,13 +41,14 @@ const MATRIX: Record<string, Gate> = {
   "cap-table/register-create": "requireAdmin",
   "cap-table/register-void": "requireAdmin",
   // Certificates of tokenized interest: Admin only (a payload may carry a
-  // holder's name and identification number).
+  // holder's name and identification number); creating, signing and
+  // anchoring one is the operator's act, the Super Admin's alone.
   "admin/certificates/list": "requireAdmin",
   "admin/certificates/read": "requireAdmin",
   "admin/certificates/preview": "requireAdmin",
-  "admin/certificates/create": "requireAdmin",
-  "admin/certificates/sign": "requireAdmin",
-  "admin/certificates/anchor": "requireAdmin",
+  "admin/certificates/create": "requireSuperAdmin",
+  "admin/certificates/sign": "requireSuperAdmin",
+  "admin/certificates/anchor": "requireSuperAdmin",
   "admin/certificates/revoke": "requireAdmin",
   // Super Admin only.
   "clients/anonymize": "requireSuperAdmin",

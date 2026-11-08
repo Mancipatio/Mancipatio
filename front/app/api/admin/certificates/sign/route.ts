@@ -17,9 +17,10 @@
 // lib/siws-session.ts): its only write is the signature, and only after the
 // server verified that the session wallet itself signed exactly this
 // certificate, so holding the session cookie lets one record nothing that
-// wallet did not sign. requireAdmin, and the session wallet must be the
-// signer the draft names (its creator). Refused during maintenance
-// (lib/maintenance.ts): the page posts the same signature again afterwards.
+// wallet did not sign. requireSuperAdmin (signing is the operator's act, as
+// creating is), and the session wallet must be the signer the draft names
+// (its creator). Refused during maintenance (lib/maintenance.ts): the Super
+// Admin signs again afterwards (the same message gives the same signature).
 //
 // params: { id, signature (base58, 64 bytes), signature_format? (a hint:
 //           "raw" | "offchain-v0" | "offchain-v0-legacy"; every accepted
@@ -27,7 +28,7 @@
 // Idempotent: posting the stored signature again answers the certificate.
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireSuperAdmin } from "@/lib/server/admin-gate";
 import {
   auditCertificate,
   certificateDetail,
@@ -46,7 +47,7 @@ import { detectNetwork } from "@/lib/network";
 export async function POST(request: Request) {
   try {
     const { wallet, params, via } = await verifySigned(request, CERTIFICATE_ACTIONS.sign);
-    await requireAdmin(wallet);
+    await requireSuperAdmin(wallet);
     const id = certificateIdParam(params);
     const signature = typeof params.signature === "string" ? params.signature.trim() : "";
     if (!signatureFromBase58(signature)) throw new SiwsError(400, "A 64-byte Ed25519 signature in base58 is required");

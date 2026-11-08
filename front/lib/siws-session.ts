@@ -36,8 +36,9 @@
 // stored payload, the draft naming that wallet as signer), and
 // certificates.anchor, whose only write is the anchor transaction of a
 // signed certificate, taken only from an anchor the record route above
-// already verified on chain for that number and hash. Both are refused
-// during maintenance all the same (lib/maintenance.ts). Any new exception
+// already verified on chain for that number and hash. Both are the Super
+// Admin's alone (requireSuperAdmin) and refused during maintenance all the
+// same (lib/maintenance.ts). Any new exception
 // must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";

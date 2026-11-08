@@ -16,8 +16,9 @@
 // Signed "certificates.anchor", a session action (an accepted exception in
 // lib/siws-session.ts): its only write is the anchor, which the chain
 // already shows and the record route already verified; holding the session
-// cookie lets one attach nothing else. requireAdmin. Refused during
-// maintenance (lib/maintenance.ts).
+// cookie lets one attach nothing else. requireSuperAdmin: the Super Admin
+// sends the memo, and anchoring stays the operator's act end to end, like
+// creating and signing. Refused during maintenance (lib/maintenance.ts).
 //
 // params: { id, signature? } — the anchor transaction; without it, the first
 // recorded anchor of the number and hash is taken.
@@ -25,7 +26,7 @@
 import { NextResponse } from "next/server";
 import { isSignature } from "@solana/kit";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireSuperAdmin } from "@/lib/server/admin-gate";
 import {
   auditCertificate,
   certificateDetail,
@@ -42,7 +43,7 @@ import { detectNetwork } from "@/lib/network";
 export async function POST(request: Request) {
   try {
     const { wallet, params, via } = await verifySigned(request, CERTIFICATE_ACTIONS.anchor);
-    await requireAdmin(wallet);
+    await requireSuperAdmin(wallet);
     const id = certificateIdParam(params);
     const given = typeof params.signature === "string" ? params.signature.trim() : "";
     if (given !== "" && !isSignature(given)) throw new SiwsError(400, "Enter the anchor transaction's signature (base58)");

@@ -1,5 +1,6 @@
 // app/api/admin/certificates/*: admin only (on-chain Admin record after the
-// SIWS check, before any read), each route on its own signed action (list,
+// SIWS check, before any read; create, sign and anchor the Super Admin's
+// alone, Platform.admin), each route on its own signed action (list,
 // read, preview, sign and anchor as session actions, create and revoke with
 // a fresh signature; sign and anchor still wait out maintenance). Create
 // reads the chain, validates everything before it spends a number, and stores
@@ -43,6 +44,8 @@ const state = vi.hoisted(() => ({
   via: "signature" as "signature" | "session",
   actions: [] as string[],
   admins: new Set<string>(),
+  /** Platform.admin: the operator key that creates, signs and anchors. */
+  superAdmins: new Set<string>(),
   accounts: new Map<string, { owner: string; data: Uint8Array }>(),
   /** owner → token accounts */
   tokens: new Map<string, Array<{ mint: string; amount: string; decimals: number; program?: string }>>(),
@@ -66,10 +69,14 @@ vi.mock("@/lib/server/siws", async (importOriginal) => ({
 }));
 vi.mock("@/lib/server/admin-gate", async () => {
   const { SiwsError } = await import("@/lib/server/siws-error");
-  const gate = async (wallet: string) => {
-    if (!state.admins.has(wallet)) throw new SiwsError(403, "Admin privileges required");
+  return {
+    requireAdmin: vi.fn(async (wallet: string) => {
+      if (!state.admins.has(wallet) && !state.superAdmins.has(wallet)) throw new SiwsError(403, "Admin privileges required");
+    }),
+    requireSuperAdmin: vi.fn(async (wallet: string) => {
+      if (!state.superAdmins.has(wallet)) throw new SiwsError(403, "Super admin privileges required");
+    }),
   };
-  return { requireAdmin: vi.fn(gate), requireSuperAdmin: vi.fn(gate) };
 });
 vi.mock("@/lib/server/rpc", () => {
   const call = <T>(name: string, answer: () => T) => ({
@@ -131,6 +138,7 @@ type Body = { ok: boolean; data?: Record<string, unknown> & { payload?: Record<s
 const ADMIN = fixedAddress(31);
 const OTHER_ADMIN = fixedAddress(32);
 const STRANGER = fixedAddress(33);
+const SUPER = fixedAddress(34);
 const ANCHOR_SIG = "3vSXmWYxioJaTwCRytEr7xHDKinyJ35UMYie4mNdMceH8ncu2V3qCQ8VexzhMbLV3KUv1s7jhAdHR8YBdVEV5YUJ";
 const YEAR = new Date().getUTCFullYear();
 
@@ -227,6 +235,7 @@ beforeEach(() => {
     return `MC-${String(args.p_year)}-${String(counter).padStart(4, "0")}`;
   };
   state.admins = new Set([ADMIN, OTHER_ADMIN]);
+  state.superAdmins = new Set([SUPER]);
   state.actions = [];
   state.accounts.clear();
   state.tokens.clear();
@@ -238,7 +247,7 @@ beforeEach(() => {
 });
 
 /** A stored draft created through the route by `wallet` (the signer it names). */
-async function draft(wallet = ADMIN, params: Record<string, unknown> = holdingParams()) {
+async function draft(wallet = SUPER, params: Record<string, unknown> = holdingParams()) {
   const res = await call(createRoute, wallet, params);
   expect(res.status).toBe(200);
   return res.body.data as Record<string, unknown> & { id: string; number: string; payload_sha256: string };
@@ -262,6 +271,28 @@ describe("gates and actions", () => {
     expect(state.rpcCalls).toEqual([]);
     expect(state.allocations).toEqual([]);
     expect(rows()).toHaveLength(0);
+  });
+
+  it("create, sign and anchor are the Super Admin's: an Admin is refused before any read; preview, list, read and revoke stay open to it", async () => {
+    const created = await draft(SUPER);
+    state.rpcCalls = [];
+    const allocated = state.allocations.length;
+    for (const [route, params] of [
+      [createRoute, holdingParams()],
+      [signRoute, { id: created.id, signature: ANCHOR_SIG }],
+      [anchorRoute, { id: created.id }],
+    ] as Array<[Route, Record<string, unknown>]>) {
+      const res = await call(route, ADMIN, params, "session");
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/Super admin/);
+    }
+    expect(state.rpcCalls).toEqual([]);
+    expect(state.allocations).toHaveLength(allocated);
+    expect(rows()[0].status).toBe("draft");
+    expect((await call(previewRoute, ADMIN, holdingParams(), "session")).status).toBe(200);
+    expect((await call(listRoute, ADMIN, {}, "session")).status).toBe(200);
+    expect((await call(readRoute, ADMIN, { id: created.id }, "session")).status).toBe(200);
+    expect((await call(revokeRoute, ADMIN, { id: created.id, reason: "Discarded by an admin" })).status).toBe(200);
   });
 
   it("reads and the two evidence records are session actions; create and revoke need a signature; maintenance stops every write", () => {
@@ -328,7 +359,7 @@ describe("preview", () => {
     const preview = await call(previewRoute, ADMIN, holdingParams(), "session");
     expect(preview.status).toBe(200);
     expect(preview.body.data).toMatchObject({ payload: null, problem: expect.stringMatching(/asset's name on chain contains an invisible/) });
-    const created = await call(createRoute, ADMIN, holdingParams());
+    const created = await call(createRoute, SUPER, holdingParams());
     expect(created.status).toBe(400);
     expect(state.allocations).toEqual([]);
   });
@@ -345,8 +376,8 @@ describe("preview", () => {
 describe("create", () => {
   it("stores the canonical payload and its hash under the next number, naming the session wallet as signer", async () => {
     state.statuses.set(EVIDENCE_TX, { slot: BigInt(370_000_000), err: null, confirmationStatus: "finalized" });
-    const created = await draft(ADMIN, holdingParams({ evidence: [{ signature: EVIDENCE_TX, note: "Transfer of 500 units" }] }));
-    expect(created).toMatchObject({ number: `MC-${YEAR}-0001`, status: "draft", kind: "holding", signer: ADMIN, created_by: ADMIN, holder_wallet: HOLDER });
+    const created = await draft(SUPER, holdingParams({ evidence: [{ signature: EVIDENCE_TX, note: "Transfer of 500 units" }] }));
+    expect(created).toMatchObject({ number: `MC-${YEAR}-0001`, status: "draft", kind: "holding", signer: SUPER, created_by: SUPER, holder_wallet: HOLDER });
     expect(state.allocations).toEqual([YEAR]);
     const row = rows()[0];
     expect(await sha256HexOfText(String(row.payload_canonical))).toBe(row.payload_sha256);
@@ -354,7 +385,7 @@ describe("create", () => {
     expect(payload).toMatchObject({
       number: `MC-${YEAR}-0001`,
       network: "devnet",
-      signer: { public_key: ADMIN },
+      signer: { public_key: SUPER },
       holder: { wallet: HOLDER, name: "Petar Petrović", id_number: "ID-TEST-0001" },
       holding: { units: "250", percent_of_company: "2.5", slot: "380123456" },
       chain_evidence: { transactions: [{ signature: EVIDENCE_TX, slot: "370000000", note: "Transfer of 500 units" }] },
@@ -362,7 +393,7 @@ describe("create", () => {
     expect(payload.salt).toMatch(/^[0-9a-f]{32}$/);
     // The audit row is the server's, without the holder's name or ID number.
     expect(audits()).toHaveLength(1);
-    expect(audits()[0]).toMatchObject({ category: "operator", ix_name: "certificate_create", actor_wallet: ADMIN, target_label: `MC-${YEAR}-0001` });
+    expect(audits()[0]).toMatchObject({ category: "operator", ix_name: "certificate_create", actor_wallet: SUPER, target_label: `MC-${YEAR}-0001` });
     expect(JSON.stringify(audits()[0])).not.toMatch(/Petar|ID-TEST-0001/);
     // The next draft takes the next number, with its own salt.
     const second = await draft();
@@ -372,7 +403,7 @@ describe("create", () => {
 
   it("spends no number on a wrong input, an empty holding, a missing evidence transaction or an unreadable chain", async () => {
     const refused = async (params: Record<string, unknown>, status: number, error?: RegExp) => {
-      const res = await call(createRoute, ADMIN, params);
+      const res = await call(createRoute, SUPER, params);
       expect(res.status, JSON.stringify(params)).toBe(status);
       if (error) expect(res.body.error).toMatch(error);
     };
@@ -394,7 +425,7 @@ describe("create", () => {
   });
 
   it("creates an issuance certificate from the mint's supply", async () => {
-    const created = await draft(ADMIN, { kind: "issuance", share_class: SHARE_CLASS, company: COMPANY, units_for_100_percent: "10000" });
+    const created = await draft(SUPER, { kind: "issuance", share_class: SHARE_CLASS, company: COMPANY, units_for_100_percent: "10000" });
     expect(created).toMatchObject({ kind: "issuance", holder_wallet: null });
     expect(created.payload).toMatchObject({ supply: { circulating: "250", lifetime_minted: "500", max_supply_percent: "17.5" }, holder: null });
   });
@@ -403,7 +434,7 @@ describe("create", () => {
 describe("sign", () => {
   it("stores the draft signer's verified signature of exactly this certificate", async () => {
     const wallet = await certificateSigner();
-    state.admins.add(wallet.address);
+    state.superAdmins.add(wallet.address);
     const created = await draft(wallet.address);
     const signature = await wallet.sign(created.number, created.payload_sha256);
     const res = await call(signRoute, wallet.address, { id: created.id, signature }, "session");
@@ -418,7 +449,7 @@ describe("sign", () => {
 
   it("accepts a Ledger's off-chain envelope and records that format", async () => {
     const wallet = await certificateSigner();
-    state.admins.add(wallet.address);
+    state.superAdmins.add(wallet.address);
     const created = await draft(wallet.address);
     const signature = await wallet.sign(created.number, created.payload_sha256, "offchain-v0");
     const res = await call(signRoute, wallet.address, { id: created.id, signature, signature_format: "offchain-v0" }, "session");
@@ -428,8 +459,8 @@ describe("sign", () => {
   it("refuses another admin, a signature of something else and a malformed one, leaving the draft a draft", async () => {
     const wallet = await certificateSigner();
     const other = await certificateSigner();
-    state.admins.add(wallet.address);
-    state.admins.add(other.address);
+    state.superAdmins.add(wallet.address);
+    state.superAdmins.add(other.address);
     const created = await draft(wallet.address);
     const byOther = await call(signRoute, other.address, { id: created.id, signature: await other.sign(created.number, created.payload_sha256) }, "session");
     expect(byOther.status).toBe(403);
@@ -451,7 +482,7 @@ describe("sign", () => {
 
   it("refuses to sign a revoked draft", async () => {
     const wallet = await certificateSigner();
-    state.admins.add(wallet.address);
+    state.superAdmins.add(wallet.address);
     const created = await draft(wallet.address);
     expect((await call(revokeRoute, wallet.address, { id: created.id, reason: "Discarded draft" })).status).toBe(200);
     const res = await call(signRoute, wallet.address, { id: created.id, signature: await wallet.sign(created.number, created.payload_sha256) }, "session");
@@ -462,7 +493,7 @@ describe("sign", () => {
 describe("anchor", () => {
   async function signed() {
     const wallet = await certificateSigner();
-    state.admins.add(wallet.address);
+    state.superAdmins.add(wallet.address);
     const created = await draft(wallet.address);
     expect((await call(signRoute, wallet.address, { id: created.id, signature: await wallet.sign(created.number, created.payload_sha256) }, "session")).status).toBe(200);
     return created;
@@ -485,21 +516,21 @@ describe("anchor", () => {
   it("takes the recorded anchor of the certificate's number and hash, by signature or by looking it up", async () => {
     const created = await signed();
     recordedAnchor(ANCHOR_SIG, created.number, created.payload_sha256);
-    const res = await call(anchorRoute, ADMIN, { id: created.id }, "session");
+    const res = await call(anchorRoute, SUPER, { id: created.id }, "session");
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ status: "anchored", anchor_tx: ANCHOR_SIG, anchor_slot: 380_124_000, anchor_block_time: "2025-11-08T10:20:00.000Z" });
     expect(audits().some((a) => a.ix_name === "certificate_anchor" && a.tx_signature === ANCHOR_SIG)).toBe(true);
     // Again, with the signature: answered as it is.
-    expect((await call(anchorRoute, ADMIN, { id: created.id, signature: ANCHOR_SIG }, "session")).status).toBe(200);
+    expect((await call(anchorRoute, SUPER, { id: created.id, signature: ANCHOR_SIG }, "session")).status).toBe(200);
   });
 
   it("refuses an anchor of another hash, one that is not recorded, and an unsigned draft", async () => {
     const created = await signed();
     recordedAnchor(ANCHOR_SIG, created.number, "0".repeat(64));
-    const other = await call(anchorRoute, ADMIN, { id: created.id, signature: ANCHOR_SIG }, "session");
+    const other = await call(anchorRoute, SUPER, { id: created.id, signature: ANCHOR_SIG }, "session");
     expect(other.status).toBe(400);
-    expect((await call(anchorRoute, ADMIN, { id: created.id }, "session")).status).toBe(404);
-    const unrecorded = await call(anchorRoute, ADMIN, { id: created.id, signature: EVIDENCE_TX }, "session");
+    expect((await call(anchorRoute, SUPER, { id: created.id }, "session")).status).toBe(404);
+    const unrecorded = await call(anchorRoute, SUPER, { id: created.id, signature: EVIDENCE_TX }, "session");
     expect(unrecorded.status).toBe(409);
     expect(unrecorded.body.error).toMatch(/not recorded/);
     // A row that merely looks like an anchor (another id than the record route's) does not count.
@@ -508,9 +539,9 @@ describe("anchor", () => {
       target_label: created.number, status: "success", actor_wallet: fixedAddress(41),
       metadata: { reference: created.number, sha256: created.payload_sha256, commitment: "finalized" },
     });
-    expect((await call(anchorRoute, ADMIN, { id: created.id }, "session")).status).toBe(404);
+    expect((await call(anchorRoute, SUPER, { id: created.id }, "session")).status).toBe(404);
     const plain = await draft();
-    expect((await call(anchorRoute, ADMIN, { id: plain.id }, "session")).status).toBe(409);
+    expect((await call(anchorRoute, SUPER, { id: plain.id }, "session")).status).toBe(409);
     expect(rows().filter((r) => r.status === "anchored")).toHaveLength(0);
   });
 });

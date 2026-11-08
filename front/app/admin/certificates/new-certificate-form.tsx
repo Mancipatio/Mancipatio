@@ -8,7 +8,9 @@
 // (a fresh wallet signature: it spends the next number). Create is offered
 // only for exactly what was last previewed, so the admin has seen the
 // statement the draft will carry; the server reads the chain again at
-// creation and states the slot it read.
+// creation and states the slot it read. Creating (and signing) is the
+// operator's act: only the Super Admin's wallet may (the routes check
+// Platform.admin); another admin previews, and the page says why Create is off.
 
 import { useEffect, useState } from "react";
 import type { WalletSession } from "@solana/client";
@@ -18,6 +20,7 @@ import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findShareClassPda } from "@/lib/pdas";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { useRole } from "@/lib/auth";
 import { createCertificate, previewCertificate } from "@/lib/certificates-client";
 import { certificateTokenSymbol, formatUnits, type CertificateDetail, type CertificatePreview } from "@/lib/certificates/payload";
 import {
@@ -64,6 +67,8 @@ const formKey = (form: CertificateForm) => JSON.stringify(certificateFormParams(
 
 export function NewCertificateForm({ session, onCreated }: { session: WalletSession; onCreated: (detail: CertificateDetail) => void }) {
   const client = useSolanaClient();
+  const role = useRole();
+  const superAdmin = role.isSuperAdmin && role.walletAddress === session.account.address.toString();
   const [options, setOptions] = useState<ClassOption[] | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [form, setForm] = useState<CertificateForm>(EMPTY_CERTIFICATE_FORM);
@@ -121,7 +126,7 @@ export function NewCertificateForm({ session, onCreated }: { session: WalletSess
   }
 
   async function create() {
-    if (busy || !current?.payload) return;
+    if (busy || !current?.payload || !superAdmin) return;
     setBusy("create");
     setError(null);
     try {
@@ -263,10 +268,16 @@ export function NewCertificateForm({ session, onCreated }: { session: WalletSess
           <button type="submit" className={current ? "btn-ghost" : "btn-brand"} disabled={busy !== null || !form.shareClass}>
             {busy === "preview" ? "Reading the chain…" : current ? "Preview again" : "Preview"}
           </button>
-          <button type="button" className="btn-brand disabled:cursor-not-allowed disabled:opacity-50" disabled={busy !== null || !current?.payload} onClick={() => setConfirmOpen(true)}>
+          <button type="button" className="btn-brand disabled:cursor-not-allowed disabled:opacity-50" disabled={busy !== null || !current?.payload || !superAdmin} onClick={() => setConfirmOpen(true)}>
             Create draft
           </button>
         </div>
+        {!superAdmin && (
+          <p className="text-xs text-amber-800">
+            Only the Super Admin can create and sign certificates: issuing one is the operator&apos;s act, signed with the
+            platform&apos;s Super Admin key. You can preview here, and list, print and download existing certificates.
+          </p>
+        )}
         <p className="text-[11px] text-slate-500">
           {preview && !current ? "The form changed since the preview: preview again before you create the draft. " : ""}
           Creating a draft asks your wallet to sign the request and takes the next certificate number. Nothing is public until the

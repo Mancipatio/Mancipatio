@@ -6,7 +6,9 @@
 //
 // Signed "certificates.create" with a FRESH wallet signature (a write: it
 // spends a number and names the session wallet as the certificate's signer)
-// + requireAdmin.
+// + requireSuperAdmin: issuing an official certificate is the operator's act,
+// so only the Super Admin (Platform.admin) creates and signs one; any Admin
+// may list, preview, download and revoke.
 //
 // params: { kind: "holding" | "issuance", share_class, wallet (holding only),
 //           company: { legal_name, registration_number, address },
@@ -22,7 +24,7 @@
 // year of its number come from the same server clock reading.
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireSuperAdmin } from "@/lib/server/admin-gate";
 import {
   allocateCertificateNumber,
   auditCertificate,
@@ -55,7 +57,7 @@ const NUMBER_GROWTH = 2;
 export async function POST(request: Request) {
   try {
     const { wallet, params, via } = await verifySigned(request, CERTIFICATE_ACTIONS.create);
-    await requireAdmin(wallet);
+    await requireSuperAdmin(wallet);
     let input: CertificateRequest;
     try {
       input = parseCertificateRequest(params, true);

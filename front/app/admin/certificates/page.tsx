@@ -9,8 +9,9 @@ export default function CertificatesPage() {
       <h1 className="page-title">Certificates</h1>
       <p className="page-sub">
         Issue numbered certificates of tokenized interest for authorities and holders: a holding (the units a wallet holds)
-        or an issuance (a share class as issued). The signer&apos;s wallet signs each one, the Super Admin anchors its hash on
-        chain, and anyone can check it on the{" "}
+        or an issuance (a share class as issued). The Super Admin creates and signs each one with the operator&apos;s key and
+        anchors its hash on chain; any admin can preview, print, download and revoke; and whoever holds a certificate can
+        check it on the{" "}
         <Link className="underline" href="/certificates/verify">
           public verification page
         </Link>

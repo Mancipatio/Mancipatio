@@ -1,13 +1,13 @@
 "use client";
 
 // One certificate on /admin/certificates: its facts and the step it waits for.
-//   * draft: its signer signs it (the wallet signs the certificate's message,
-//     lib/certificates-client.ts signCertificate), or an admin discards it;
+//   * draft: its signer, the Super Admin who created it, signs it (the wallet
+//     signs the certificate's message, lib/certificates-client.ts
+//     signCertificate), or an admin discards it;
 //   * signed: the Super Admin anchors "<number> sha256:<hash>" on chain with
 //     the document-anchor panel (the same send and record as Admin →
-//     Platform), and the recorded anchor is attached here; another admin
-//     sees the memo to give the Super Admin, and attaches the anchor once it
-//     is recorded;
+//     Platform), and the recorded anchor is attached here, also by the Super
+//     Admin; another admin sees the memo and why it cannot act;
 //   * signed or anchored: any admin may revoke it, with a reason.
 // Always: the printable view, the JSON download (the exact signed bytes)
 // and the public verification link.
@@ -71,6 +71,7 @@ export function CertificateDetailPanel({
   const [anchorSignature, setAnchorSignature] = useState("");
   const [revokeOpen, setRevokeOpen] = useState(false);
   const wallet = session.account.address.toString();
+  const superAdmin = role.isSuperAdmin && role.walletAddress === wallet;
   const p = detail.payload;
   const memo = documentAnchorMemoText({ reference: detail.number, sha256: detail.payload_sha256 });
 
@@ -182,7 +183,12 @@ export function CertificateDetailPanel({
               Your wallet signs a three-line message: &quot;Manci certificate v1&quot;, the number and the SHA-256 above. The
               server checks the signature before it records it; from then on the certificate is public on the verification page.
             </p>
-            {wallet === detail.signer ? (
+            {!superAdmin ? (
+              <p className="mt-2 text-xs text-amber-800">
+                Only the Super Admin can sign certificates: signing is the operator&apos;s act, with the platform&apos;s Super
+                Admin key.
+              </p>
+            ) : wallet === detail.signer ? (
               <button type="button" className="btn-brand mt-3" disabled={busy !== null} onClick={() => void sign()}>
                 {busy === "sign" ? "Waiting for the wallet…" : "Sign with your wallet"}
               </button>
@@ -203,27 +209,29 @@ export function CertificateDetailPanel({
               attached to the certificate.
             </p>
             <code className="block break-all rounded-md border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs text-slate-900">{memo}</code>
-            {role.isSuperAdmin && role.walletAddress === wallet ? (
+            {superAdmin ? (
               <DocumentAnchorPanel
                 superAdmin={wallet}
                 preset={{ reference: detail.number, sha256: detail.payload_sha256 }}
                 onRecorded={(record) => void link(record.signature)}
               />
             ) : (
-              <p className="text-xs text-slate-600">
-                Only the Super Admin can send it: from this page, or from Admin → Platform → Anchor a document with the reference{" "}
-                <span className="font-mono">{detail.number}</span> and the SHA-256 above.
+              <p className="text-xs text-amber-800">
+                Only the Super Admin can anchor a certificate: from this page, or from Admin → Platform → Anchor a document with
+                the reference <span className="font-mono">{detail.number}</span> and the SHA-256 above, then attach it here.
               </p>
             )}
-            <div className="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-3">
-              <label className="min-w-0 flex-1">
-                <span className="mb-1 block text-xs font-medium text-slate-700">Recorded anchor (optional transaction signature)</span>
-                <input className="input-base w-full font-mono text-xs" value={anchorSignature} onChange={(event) => setAnchorSignature(event.target.value)} placeholder="Leave empty to find it by number and hash" spellCheck={false} autoComplete="off" />
-              </label>
-              <button type="button" className="btn-ghost" disabled={busy !== null} onClick={() => void link(anchorSignature.trim() || undefined)}>
-                {busy === "anchor" ? "Attaching…" : "Attach recorded anchor"}
-              </button>
-            </div>
+            {superAdmin && (
+              <div className="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-3">
+                <label className="min-w-0 flex-1">
+                  <span className="mb-1 block text-xs font-medium text-slate-700">Recorded anchor (optional transaction signature)</span>
+                  <input className="input-base w-full font-mono text-xs" value={anchorSignature} onChange={(event) => setAnchorSignature(event.target.value)} placeholder="Leave empty to find it by number and hash" spellCheck={false} autoComplete="off" />
+                </label>
+                <button type="button" className="btn-ghost" disabled={busy !== null} onClick={() => void link(anchorSignature.trim() || undefined)}>
+                  {busy === "anchor" ? "Attaching…" : "Attach recorded anchor"}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

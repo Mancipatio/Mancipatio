@@ -4599,13 +4599,13 @@ billing history): retire prices and waive charges instead.
 ## 24. Certificates for authorities
 
 The product version of the confirmation made by hand on 2026-10-04
-(`MANCI-2026-0001`, a PDF signed with the operator's key): an admin issues a
-numbered certificate of tokenized interest, the signer's wallet signs it,
-the Super Admin anchors its hash on chain, and anyone checks it by number on
-`/certificates/verify`. Two kinds: **holding** (the units of one share class
-a wallet holds, and the share of the company they stand for) and
-**issuance** (a share class as issued: maximum supply, units issued to date,
-units in circulation). Numbers run per network and year: `MC-2026-0001`,
+(`MANCI-2026-0001`, a PDF signed with the operator's key): the Super Admin
+creates a numbered certificate of tokenized interest, signs it with the
+operator's key and anchors its hash on chain, and whoever holds the
+certificate checks it on `/certificates/verify` with its number and SHA-256.
+Two kinds: **holding** (the units of one share class a wallet holds, and the
+share of the company they stand for) and **issuance** (a share class as
+issued: maximum supply, units issued to date, units in circulation). Numbers run per network and year: `MC-2026-0001`,
 `MC-2026-0002`, … (the 2026-10-04 confirmation keeps its own reference and
 anchor). Code: `front/lib/certificates/`, `front/app/api/admin/certificates/`,
 `front/app/admin/certificates/`, `front/app/(marketing)/certificates/verify/`.
@@ -4632,8 +4632,11 @@ always the SHA-256 of the stored canonical text, and the row's columns
 payload's. No browser role can read either table; the counter is written
 only by the allocator.
 
-**Issuing one** (`/admin/certificates`, any admin; the anchor needs the
-Super Admin):
+**Issuing one** (`/admin/certificates`): any admin lists, previews, prints,
+downloads and revokes; only the Super Admin creates, signs and anchors
+(issuing an official certificate is the operator's act; the routes check
+`Platform.admin`, and another admin sees on the page why those buttons are
+off):
 
 1. *New certificate*: the kind, the share class and, for a holding, the
    holder's wallet. *Preview* reads the chain (finalized) and fills in the
@@ -4645,32 +4648,33 @@ Super Admin):
    personal data: fill them in only when the certificate must name the
    holder. Evidence transactions (optional, up to 10) must be finalized and
    successful. Read the statement in the preview.
-2. *Create draft* (the wallet signs the request). The server reads the chain
-   again, takes the next number and stores the canonical payload with a
-   random salt; the draft names the creating wallet as its signer. A draft is
-   not public. A wrong draft is *Discarded* (its number stays on record as
-   discarded, so the series has no silent gaps; only a failed insert right
-   after the allocation can skip a number).
-3. *Sign with your wallet* (the draft's signer). The wallet signs three lines,
-   `Manci certificate v1` / `Number: …` / `SHA-256: …`; a Ledger behind
-   Phantom or Solflare signs them inside a Solana off-chain message, which is
-   accepted and recorded as such. The server verifies the Ed25519 signature
+2. *Create draft* (the Super Admin's wallet signs the request). The server
+   reads the chain again, takes the next number and stores the canonical
+   payload with a random salt; the draft names the creating wallet as its
+   signer. A draft is not public. A wrong draft is *Discarded* (its number
+   stays on record as discarded, so the series has no silent gaps; only a
+   failed insert right after the allocation can skip a number).
+3. *Sign with your wallet* (the Super Admin who created the draft, its
+   signer). The wallet signs three lines, `Manci certificate v1` /
+   `Number: …` / `SHA-256: …`; a Ledger behind Phantom or Solflare signs
+   them inside a Solana off-chain message, which is accepted and recorded as
+   such. The server verifies the Ed25519 signature
    against the stored row before it records it. From now on the public page
    answers "valid".
 4. *Anchor on chain*: with the Super Admin's wallet connected, the certificate
    panel sends the memo `MC-… sha256:<hash>` through the document-anchor
    flow (`ops/sop-admin.md` "Document anchors": the same send, finalized
-   check and audit row) and attaches the anchor once it is recorded. Another
-   admin gives the Super Admin the memo shown on the panel (or the Super
-   Admin uses Admin → Platform → *Anchor a document* with the number as the
-   reference and the certificate's SHA-256), then clicks *Attach recorded
-   anchor*. As for every document anchor: record it before the Super Admin
-   key is rotated.
+   check and audit row) and attaches the anchor once it is recorded. If the
+   memo was sent elsewhere (Admin → Platform → *Anchor a document* with the
+   number as the reference and the certificate's SHA-256), the Super Admin
+   clicks *Attach recorded anchor*. As for every document anchor: record it
+   before the Super Admin key is rotated.
 5. *Print view* → *Print or save as PDF* (A4; the PDF takes the number as its
    file name). *Download JSON* saves the exact signed bytes for the holder;
    their SHA-256 is the certificate's. Give the authority the PDF (and the
    JSON when it wants to check the holder's details) and the link printed on
-   it, `/certificates/verify?number=MC-…`.
+   it, `/certificates/verify?number=MC-…&sha256=…`: the link carries the
+   certificate's hash, which is what opens its contents on the public page.
 
 **Revoking**: *Revoke certificate* with a reason (a fresh wallet signature).
 The public page then answers "revoked" with the date; the reason stays
@@ -4679,14 +4683,26 @@ Signing and attaching an anchor wait out maintenance mode; creating and
 revoking need a fresh signature and are refused during maintenance like any
 write.
 
-**What the public page shows**: valid / revoked / not found (a draft, or a
-draft discarded before signing, was never issued), the kind, issue date,
-company, asset and share class, units and percentages, the holder's wallet,
-the signer, the signature (re-verified on every check), the SHA-256 and the
-anchor transaction. Never the holder's name or ID number, the statement that
-repeats them, or the revocation reason. Numbers are sequential, so the route
-is rate-limited per client address (a burst limit per instance and a shared
-limit of 60 checks per 10 minutes).
+**What the public page shows**: numbers are sequential, so a number alone
+must not list who obtained certificates. With the number only, or with a
+SHA-256 that is not the certificate's, the page (and `POST
+/api/certificates/verify`) answers only whether the certificate exists and
+its status: valid, revoked with the date, or invalid (its stored hash or
+signature fails the re-check); not found for a draft or a draft discarded
+before signing (never issued); and asks for the SHA-256 printed on the
+certificate (or its JSON file, hashed in the browser). No wallet, units,
+percentages, company, asset or class, signer, signature or anchor. With the
+number and the certificate's own SHA-256 (the printed link carries it) it
+shows everything the certificate states: the kind, issue date, company,
+asset and share class, units and percentages, the holder's wallet, the
+signer, the signature (re-verified on every check) and the anchor
+transaction. Never the holder's name or ID number, the statement that
+repeats them, or the revocation reason. The route stays rate-limited per
+client address (a burst limit per instance and a shared limit of 60 checks
+per 10 minutes). Limit: an anchored certificate's memo publishes its number
+and hash on chain, so whoever reads the Super Admin key's memos can open
+anchored certificates one at a time; the units and wallets they show are on
+chain anyway.
 
 **Checking a certificate without the site** (for an authority's own
 script): the hash is SHA-256 over the canonical JSON in UTF-8; the encoding

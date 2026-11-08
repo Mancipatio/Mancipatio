@@ -35,8 +35,10 @@
 -- The payload may hold personal data (a holder's name and identification
 -- number, typed by the admin for one certificate): RLS on and no grant to
 -- anon or authenticated. The service role reads and writes the rows through
--- the admin routes (requireAdmin); the public route selects the columns it
--- needs and returns a projection without them (lib/certificates/payload.ts
+-- the admin routes (requireAdmin; creating, signing and anchoring
+-- requireSuperAdmin); the public route selects the columns it needs and
+-- returns a projection without them, and only the status unless the caller
+-- gives the certificate's SHA-256 (lib/certificates/payload.ts
 -- publicCertificateView).
 --
 -- certificate_counters: the per-network yearly counter, written only by the
