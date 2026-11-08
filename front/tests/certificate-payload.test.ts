@@ -143,6 +143,22 @@ describe("the payload", () => {
     refuse({ kind: "issuance", holder: { wallet: HOLDER, name: null, idNumber: null } }, /names no holder/);
   });
 
+  it("states the chain's names in NFC and refuses one with an invisible or control character", () => {
+    const named = (name: string) => buildInput({ chain: { ...chainFacts("holding"), asset: { ...chainFacts("holding").asset, name } } });
+    // Decomposed "ć" on chain: stated as the same text in NFC.
+    expect(buildCertificatePayload(named("Kafić c\u0301 17.5%")).asset.name).toBe("Kafić ć 17.5%");
+    // A bidi override in an issuer-chosen name would make the printout read differently from what is signed.
+    expect(() => buildCertificatePayload(named("MANCI\u202e%5.71"))).toThrow(/asset's name on chain contains an invisible or control character/);
+    expect(() => buildCertificatePayload(named("MANCI\t17.5%"))).toThrow(/invisible or control character/);
+  });
+
+  it("refuses an uncapped class with more units in circulation than the scale", () => {
+    const uncapped = (circulating: number) =>
+      buildInput({ kind: "issuance", chain: chainFacts("issuance", { maxSupply: null, circulating: BigInt(circulating) }) });
+    expect(() => buildCertificatePayload(uncapped(50_000))).toThrow(/More units are in circulation than the scale/);
+    expect(buildCertificatePayload(uncapped(10_000)).supply).toMatchObject({ circulating_percent: "100" });
+  });
+
   it("records each evidence transaction with its slot and note", async () => {
     const { payload } = await fixturePayload({ evidence: [{ signature: EVIDENCE_TX, slot: "370000000", note: "Transfer of 500 units" }] });
     expect(payload.chain_evidence.transactions).toEqual([{ signature: EVIDENCE_TX, slot: "370000000", note: "Transfer of 500 units" }]);
@@ -157,6 +173,9 @@ describe("the admin's input", () => {
     expect(() => certificateText("x", "Name", 2, 200)).toThrow(/at least 2/);
     expect(() => certificateText("y".repeat(201), "Name", 2, 200)).toThrow(/at most 200/);
     expect(() => certificateText(5, "Name", 2, 200)).toThrow(/required/);
+    // Characters, as the database counts them, not UTF-16 units: two emoji are two characters.
+    expect(() => certificateText("\u{1F600}\u{1F600}", "The reason", 4, 500)).toThrow(/at least 4/);
+    expect(certificateText("\u{1F600}".repeat(4), "The reason", 4, 4)).toBe("\u{1F600}".repeat(4));
   });
 
   it("narrows a create request field by field", () => {
@@ -230,6 +249,8 @@ describe("the admin's input", () => {
     expect(normalizeCertificateNumber("MC-2026-12345")).toBe("MC-2026-12345");
     for (const bad of ["MC-2026-0", "MANCI-2026-0001", "MC-26-0001", "MC-2026-1234567", ""]) expect(normalizeCertificateNumber(bad), bad).toBeNull();
     expect(certificateVerifyPath("MC-2026-0001")).toBe("/certificates/verify?number=MC-2026-0001");
+    // The printed link carries the hash: numbers restart on every network.
+    expect(certificateVerifyPath("MC-2026-0001", "ab".repeat(32))).toBe(`/certificates/verify?number=MC-2026-0001&sha256=${"ab".repeat(32)}`);
   });
 });
 

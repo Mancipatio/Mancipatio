@@ -179,6 +179,12 @@ export type BuildCertificateInput = {
   signer: string;
 };
 
+/** Format (bidi controls, zero-width characters) and control characters: never in a certificate's text. */
+const INVISIBLE = /[\p{Cc}\p{Cf}]/u;
+
+/** Length in characters (code points), as Postgres counts it, not UTF-16 units. */
+const characters = (value: string) => Array.from(value).length;
+
 export class CertificateInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -230,6 +236,21 @@ export function certificateTokenSymbol(symbolPrefix: string, classIndex: number)
     used += bytes;
   }
   return out;
+}
+
+/**
+ * A string read from the chain (the asset's name and ID, the symbol prefix),
+ * as a certificate states it: NFC (the same text to a reader), and refused
+ * when it holds a control or format character, which the issuer could have
+ * written on chain but a signed, printed statement must not carry (a bidi
+ * override would make the printout read differently from what is signed).
+ */
+export function certificateChainText(value: string, label: string): string {
+  const text = value.normalize("NFC");
+  if (INVISIBLE.test(text) || canonicalStringProblem(text)) {
+    throw new CertificateInputError(`${label} on chain contains an invisible or control character, which a certificate cannot state.`);
+  }
+  return text;
 }
 
 /** The operator's name as a certificate states it. */
@@ -307,8 +328,9 @@ export function certificateStatement(payload: Omit<CertificatePayload, "statemen
 
 /**
  * The payload of one certificate. Throws CertificateInputError when the facts
- * do not make a certificate (a holding without units, more units than the
- * scale, a class larger than the whole company, an invalid field).
+ * do not make a certificate (a holding without units, more units held or in
+ * circulation than the scale, a class larger than the whole company, an
+ * on-chain name with invisible characters, an invalid field).
  */
 export function buildCertificatePayload(input: BuildCertificateInput): CertificatePayload {
   if (!CERTIFICATE_NUMBER_PATTERN.test(input.number)) throw new CertificateInputError("Invalid certificate number.");
@@ -345,6 +367,9 @@ export function buildCertificatePayload(input: BuildCertificateInput): Certifica
   } else {
     if (input.holder) throw new CertificateInputError("An issuance certificate names no holder.");
     if (!chain.supply) throw new CertificateInputError("An issuance certificate needs the class's supply.");
+    if (chain.supply.circulating > scale) {
+      throw new CertificateInputError("More units are in circulation than the scale counts for 100 %: check the scale.");
+    }
     const max = chain.shareClass.maxSupply === null ? null : percentOf(chain.shareClass.maxSupply, scale);
     const circulating = percentOf(chain.supply.circulating, scale);
     supply = {
@@ -375,9 +400,9 @@ export function buildCertificatePayload(input: BuildCertificateInput): Certifica
     },
     company: input.company,
     asset: {
-      asset_id: chain.asset.assetId,
-      name: chain.asset.name,
-      symbol: certificateTokenSymbol(chain.asset.symbolPrefix, chain.shareClass.classIndex),
+      asset_id: certificateChainText(chain.asset.assetId, "The asset ID"),
+      name: certificateChainText(chain.asset.name, "The asset's name"),
+      symbol: certificateChainText(certificateTokenSymbol(chain.asset.symbolPrefix, chain.shareClass.classIndex), "The token symbol"),
       asset_pda: chain.asset.address,
       issuer_pda: chain.asset.issuer,
       legal_doc_hash: chain.asset.legalDocHash,
@@ -437,9 +462,6 @@ export function normalizeCertificateSha256(raw: string): string | null {
 
 // ── The admin's input ───────────────────────────────────────────────────────
 
-/** Format (bidi controls, zero-width characters) and control characters: never in a certificate's text. */
-const INVISIBLE = /[\p{Cc}\p{Cf}]/u;
-
 /**
  * A text field as a certificate stores it: NFC, runs of whitespace as one
  * space, trimmed; refused with a sentence naming `label` when it is shorter
@@ -450,8 +472,8 @@ const INVISIBLE = /[\p{Cc}\p{Cf}]/u;
 export function certificateText(raw: unknown, label: string, min: number, max: number): string {
   if (typeof raw !== "string") throw new CertificateInputError(`${label} is required.`);
   const value = raw.normalize("NFC").replace(/\s+/g, " ").trim();
-  if (value.length < min) throw new CertificateInputError(value === "" || min <= 1 ? `${label} is required.` : `${label} needs at least ${min} characters.`);
-  if (value.length > max) throw new CertificateInputError(`${label} is at most ${max} characters.`);
+  if (characters(value) < min) throw new CertificateInputError(value === "" || min <= 1 ? `${label} is required.` : `${label} needs at least ${min} characters.`);
+  if (characters(value) > max) throw new CertificateInputError(`${label} is at most ${max} characters.`);
   if (INVISIBLE.test(value) || canonicalStringProblem(value)) {
     throw new CertificateInputError(`${label} contains an invisible or control character; type it again.`);
   }
@@ -855,7 +877,13 @@ export function previewCertificateNumber(issuedAt: Date): string {
   return `MC-${issuedAt.getUTCFullYear()}-0000`;
 }
 
-/** The path of the public verification page for `number` (the printed certificate carries the full URL). */
-export function certificateVerifyPath(number: string): string {
-  return `/certificates/verify?number=${encodeURIComponent(number)}`;
+/**
+ * The path of the public verification page for `number` (the printed
+ * certificate carries the full URL). With `sha256` the page checks that hash
+ * too: numbers restart on every network, so a number alone could name
+ * another network's certificate on the site the link opens.
+ */
+export function certificateVerifyPath(number: string, sha256?: string): string {
+  const query = `number=${encodeURIComponent(number)}${sha256 ? `&sha256=${encodeURIComponent(sha256)}` : ""}`;
+  return `/certificates/verify?${query}`;
 }

@@ -14,8 +14,8 @@
 // mint with decimals is refused rather than rounded).
 //
 // The prefill is a convenience only and never fails a request: the company
-// details and the scale of the last certificate of the same asset (an
-// admin's earlier corrections), else the tokenization record
+// details and the scale of the last certificate of the same asset that was
+// not revoked (an admin's earlier corrections), else the tokenization record
 // (asset_profiles.fields.tokenize: the company name and the token size), the
 // issuer's profile and the asset's SPV. The admin confirms or corrects every
 // field before a draft is created.
@@ -246,11 +246,13 @@ export async function readCertificatePrefill(
     units_for_100_percent: null,
     scale_source: null,
   };
+  // A revoked certificate may have been revoked for wrong company details.
   const last = await sb
     .from("certificates")
     .select("payload_canonical")
     .eq("network", network)
     .eq("asset_pda", chain.asset.address)
+    .neq("status", "revoked")
     .order("created_at", { ascending: false })
     .limit(1);
   const lastText = (last.data as Array<{ payload_canonical?: unknown }> | null)?.[0]?.payload_canonical;

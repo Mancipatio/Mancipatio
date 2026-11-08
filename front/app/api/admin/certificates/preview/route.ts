@@ -28,6 +28,7 @@ import {
   type CertificatePreview,
   type CertificateRequest,
 } from "@/lib/certificates/payload";
+import { CanonicalJsonError, canonicalJson } from "@/lib/certificates/canonical";
 import { CERTIFICATE_ACTIONS } from "@/lib/certificates/routes";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
@@ -76,9 +77,13 @@ export async function POST(request: Request) {
         chain,
         signer: wallet,
       });
+      // What create will hash must encode: say so here rather than at creation.
+      canonicalJson(payload);
     } catch (err) {
-      if (!(err instanceof CertificateInputError)) throw err;
-      problem = err.message;
+      if (err instanceof CertificateInputError) problem = err.message;
+      else if (err instanceof CanonicalJsonError) problem = `This certificate cannot be encoded: ${err.message}`;
+      else throw err;
+      payload = null;
     }
 
     const data: CertificatePreview = {

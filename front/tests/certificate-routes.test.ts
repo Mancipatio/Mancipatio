@@ -14,6 +14,7 @@ import {
   AssetStatus,
   AssetType,
   ShareClassType,
+  getAssetDecoder,
   getAssetEncoder,
   getShareClassEncoder,
 } from "@/lib/generated/asset_registry";
@@ -311,10 +312,25 @@ describe("preview", () => {
     expect(complete.body.data).toMatchObject({ problem: null, payload: { holding: { units: "250", percent_of_company: "2.5" }, number: `MC-${YEAR}-0000` } });
   });
 
-  it("prefills from the last certificate of the asset first (an admin's earlier corrections)", async () => {
-    await draft();
+  it("prefills from the last certificate of the asset first (an admin's earlier corrections), never from a revoked one", async () => {
+    const first = await draft();
     const res = await call(previewRoute, ADMIN, { kind: "issuance", share_class: SHARE_CLASS }, "session");
     expect(res.body.data).toMatchObject({ prefill: { company: COMPANY, company_source: "certificate", units_for_100_percent: "10000" } });
+    expect((await call(revokeRoute, ADMIN, { id: first.id, reason: "Wrong company details" })).status).toBe(200);
+    const after = await call(previewRoute, ADMIN, { kind: "issuance", share_class: SHARE_CLASS }, "session");
+    expect(after.body.data).toMatchObject({ prefill: { company_source: null, units_for_100_percent: null } });
+  });
+
+  it("reports an on-chain name a certificate cannot state, and create spends no number on it", async () => {
+    const asset = state.accounts.get(ASSET)!;
+    const decoded = getAssetDecoder().decode(asset.data);
+    state.accounts.set(ASSET, { ...asset, data: Uint8Array.from(getAssetEncoder().encode({ ...decoded, name: "MANCI\u202e%5.71" })) });
+    const preview = await call(previewRoute, ADMIN, holdingParams(), "session");
+    expect(preview.status).toBe(200);
+    expect(preview.body.data).toMatchObject({ payload: null, problem: expect.stringMatching(/asset's name on chain contains an invisible/) });
+    const created = await call(createRoute, ADMIN, holdingParams());
+    expect(created.status).toBe(400);
+    expect(state.allocations).toEqual([]);
   });
 
   it("refuses an address that is not a share class (404 / 400) and answers 503 when the chain cannot be read", async () => {

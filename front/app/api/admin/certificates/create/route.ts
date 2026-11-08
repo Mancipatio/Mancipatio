@@ -32,7 +32,7 @@ import {
   readCertificateChainFacts,
   readCertificateEvidence,
 } from "@/lib/server/certificates";
-import { canonicalDigest, canonicalJson } from "@/lib/certificates/canonical";
+import { CanonicalJsonError, canonicalDigest, canonicalJson } from "@/lib/certificates/canonical";
 import {
   CERTIFICATE_MAX_PAYLOAD_CHARS,
   CertificateInputError,
@@ -94,6 +94,9 @@ export async function POST(request: Request) {
       }
     } catch (err) {
       if (err instanceof CertificateInputError) throw new SiwsError(400, err.message);
+      // A value the canonical form refuses (lib/certificates/canonical.ts):
+      // the inputs are cleaned first, so this names a fact that cannot be stated.
+      if (err instanceof CanonicalJsonError) throw new SiwsError(400, `This certificate cannot be encoded: ${err.message}`);
       throw err;
     }
 
