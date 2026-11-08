@@ -36,9 +36,13 @@ function utc(iso: string | null): string {
 const units = (value: string) => `${formatUnits(BigInt(value))} ${value === "1" ? "unit" : "units"}`;
 
 export function CertificateVerifier() {
-  const initial = useSearchParams().get("number") ?? "";
+  const params = useSearchParams();
+  const initial = params.get("number") ?? "";
+  // The printed URL carries the certificate's hash too: numbers restart on
+  // every network, so the check is of THIS certificate, not just its number.
+  const initialHash = params.get("sha256") ?? "";
   const [number, setNumber] = useState(initial);
-  const [hash, setHash] = useState("");
+  const [hash, setHash] = useState(initialHash);
   const [file, setFile] = useState<FileCheck | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,7 +60,7 @@ export function CertificateVerifier() {
       return;
     }
     let pasted: string | null = null;
-    if (typedHash.trim()) {
+    if (!chosen && typedHash.trim()) {
       pasted = normalizeCertificateSha256(typedHash);
       if (!pasted) {
         setResult(null);
@@ -82,12 +86,13 @@ export function CertificateVerifier() {
   useEffect(() => {
     if (ran.current || !initial) return;
     ran.current = true;
-    void check(initial, "", null);
-  }, [initial]);
+    void check(initial, initialHash, null);
+  }, [initial, initialHash]);
 
   async function onFile(chosen: File | undefined) {
     setFileError(null);
     setFile(null);
+    setResult(null);
     if (!chosen) return;
     try {
       const read = await readCertificateFile(chosen);
@@ -193,8 +198,19 @@ function CertificateResult({ result }: { result: Result }) {
     );
   }
 
-  const banner =
-    view.status === "valid"
+  const fileExact = file !== null && file.rawSha256 === view.payload_sha256;
+  const fileSameContent = file !== null && !fileExact && file.canonicalSha256 === view.payload_sha256;
+  // The certificate in hand is not the one this number names here (another
+  // network's certificate of the same number, or a forged copy): say that
+  // first, whatever the found certificate's own status.
+  const mismatch = (file !== null && !fileExact && !fileSameContent) || (pasted && view.hash_matches === false);
+  const banner = mismatch
+    ? {
+        tone: "border-red-300 bg-red-50 text-red-900",
+        title: "This is not the certificate you have",
+        text: `Certificate ${view.number} on this network has a different SHA-256 from yours. Check the number and the network printed on your certificate; the facts below are of the certificate this site holds.`,
+      }
+    : view.status === "valid"
       ? {
           tone: "border-emerald-300 bg-emerald-50 text-emerald-900",
           title: "Valid certificate",
@@ -203,8 +219,6 @@ function CertificateResult({ result }: { result: Result }) {
       : view.status === "revoked"
         ? { tone: "border-red-300 bg-red-50 text-red-900", title: `Revoked on ${utc(view.revoked_at)}`, text: "The operator revoked this certificate: it no longer certifies anything. Contact the operator for details." }
         : { tone: "border-red-300 bg-red-50 text-red-900", title: "This certificate did not pass the check", text: "Its stored signature or hash does not verify. Do not rely on it, and contact the operator." };
-  const fileExact = file !== null && file.rawSha256 === view.payload_sha256;
-  const fileSameContent = file !== null && !fileExact && file.canonicalSha256 === view.payload_sha256;
   const holderFromFile =
     (fileExact || fileSameContent) && file?.payload && typeof file.payload.holder === "object" && file.payload.holder !== null
       ? (file.payload.holder as { name?: unknown; id_number?: unknown })

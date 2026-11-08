@@ -25,6 +25,7 @@ import {
   certificateFormParams,
   prefillSourceLabel,
   withPrefill,
+  withShareClass,
   type CertificateForm,
 } from "./certificate-form";
 
@@ -32,7 +33,7 @@ const inputClass = "input-base w-full";
 const labelClass = "mb-1.5 block text-xs font-medium text-slate-700";
 const hintClass = "mt-1 block text-[11px] text-slate-500";
 
-type ClassOption = { pda: string; label: string };
+type ClassOption = { pda: string; label: string; asset: string };
 type Rpc = ReturnType<typeof useSolanaClient>["runtime"]["rpc"];
 
 /** Every share class with a mint, labelled "<asset> · <symbol> · class <n>". */
@@ -50,6 +51,7 @@ async function loadClassOptions(rpc: Rpc): Promise<ClassOption[]> {
     const pda = await findShareClassPda(shareClass.asset, shareClass.classIndex);
     options.push({
       pda: pda.toString(),
+      asset: shareClass.asset.toString(),
       label: asset
         ? `${asset.name} · ${certificateTokenSymbol(asset.symbolPrefix, shareClass.classIndex)} · class ${shareClass.classIndex} (${asset.assetId})`
         : `Class ${shareClass.classIndex} of ${shareClass.asset.toString()}`,
@@ -87,6 +89,13 @@ export function NewCertificateForm({ session, onCreated }: { session: WalletSess
 
   const update = (patch: Partial<CertificateForm>) => {
     setForm((current) => ({ ...current, ...patch }));
+    setError(null);
+  };
+  /** Another class: the company's details and the scale go when it is another asset's. */
+  const changeShareClass = (shareClass: string) => {
+    const assetOf = (pda: string) => options?.find((option) => option.pda === pda)?.asset ?? null;
+    const previous = assetOf(form.shareClass);
+    setForm((current) => withShareClass(current, shareClass, previous !== null && previous === assetOf(shareClass)));
     setError(null);
   };
   const current = preview && preview.key === formKey(form) ? preview.data : null;
@@ -156,7 +165,7 @@ export function NewCertificateForm({ session, onCreated }: { session: WalletSess
 
         <label className="block">
           <span className={labelClass}>Share class</span>
-          <select className={inputClass} value={form.shareClass} onChange={(event) => update({ shareClass: event.target.value })} required>
+          <select className={inputClass} value={form.shareClass} onChange={(event) => changeShareClass(event.target.value)} required>
             <option value="">{options === null ? (optionsError ? "Could not load the share classes" : "Loading share classes…") : "Choose a share class"}</option>
             {(options ?? []).map((option) => (
               <option key={option.pda} value={option.pda}>

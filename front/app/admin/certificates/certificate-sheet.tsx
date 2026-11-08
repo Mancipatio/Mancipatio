@@ -177,7 +177,13 @@ export function CertificateSheet({ detail, verifyUrl }: { detail: CertificateDet
         <Row label="SHA-256 of the payload" mono>{detail.payload_sha256}</Row>
         <Row label="Signer (public key)" mono>{detail.signer}</Row>
         <Row label="Signature (base58)" mono>{detail.signature ?? "Not signed"}</Row>
-        {detail.signature_format && <Row label="Signed bytes">{detail.signature_format === "raw" ? "the message below, as UTF-8 text" : `a Solana off-chain message (${detail.signature_format}) around the message below`}</Row>}
+        {detail.signature_format && (
+          <Row label="Signed bytes">
+            {detail.signature_format === "raw"
+              ? "the message below, as UTF-8 text"
+              : `a Solana off-chain message (${detail.signature_format}: version 0, application domain of zero bytes, restricted-ASCII format) whose text is the message below with its line breaks written as \\u000a`}
+          </Row>
+        )}
         <Row label="Signed message" mono>
           <span className="whitespace-pre-line">{message}</span>
         </Row>

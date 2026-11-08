@@ -163,7 +163,7 @@ export function CertificateDetailPanel({
             Download JSON
           </button>
           {detail.status !== "draft" && (
-            <Link className="btn-ghost" href={certificateVerifyPath(detail.number)} target="_blank" rel="noreferrer">
+            <Link className="btn-ghost" href={certificateVerifyPath(detail.number, detail.payload_sha256)} target="_blank" rel="noreferrer">
               Public check
             </Link>
           )}

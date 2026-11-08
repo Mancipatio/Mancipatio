@@ -9,6 +9,7 @@ import {
   evidenceFromText,
   prefillSourceLabel,
   withPrefill,
+  withShareClass,
 } from "@/app/admin/certificates/certificate-form";
 import { parseCertificateRequest } from "@/lib/certificates/payload";
 import { COMPANY, EVIDENCE_TX, HOLDER, SHARE_CLASS } from "./helpers/certificate-fixtures";
@@ -49,6 +50,23 @@ describe("certificate form", () => {
     expect(issuance).not.toHaveProperty("wallet");
     expect(issuance).not.toHaveProperty("holder_name");
     expect(parseCertificateRequest(issuance as unknown as Record<string, unknown>, true)).toMatchObject({ kind: "issuance", wallet: null });
+  });
+
+  it("clears the company's details and the scale when the class belongs to another asset", () => {
+    const filled = {
+      ...EMPTY_CERTIFICATE_FORM,
+      shareClass: "class-of-asset-a",
+      legalName: "Asset A d.o.o.",
+      registrationNumber: "111",
+      address: "Street 1",
+      unitsFor100Percent: "10000",
+      holderName: "Petar Petrović",
+    };
+    expect(withShareClass(filled, "class-of-asset-b", false)).toEqual({
+      ...filled, shareClass: "class-of-asset-b", legalName: "", registrationNumber: "", address: "", unitsFor100Percent: "",
+    });
+    // Another class of the same asset keeps them (the company is the same).
+    expect(withShareClass(filled, "other-class-of-asset-a", true)).toEqual({ ...filled, shareClass: "other-class-of-asset-a" });
   });
 
   it("fills only the fields the admin left empty from the preview's prefill", () => {

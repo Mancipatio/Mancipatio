@@ -38,9 +38,9 @@ export function CertificatePrintView() {
  * origin this page runs on. Not siteUrl()'s production fallback: a devnet
  * certificate must point at the devnet site, which holds it.
  */
-function verifyUrlFor(number: string): string {
+function verifyUrlFor(number: string, sha256: string): string {
   const origin = process.env.NEXT_PUBLIC_SITE_URL?.trim() ? siteUrl() : window.location.origin;
-  return siteHref(certificateVerifyPath(number), origin);
+  return siteHref(certificateVerifyPath(number, sha256), origin);
 }
 
 function PrintBody({ session, id }: { session: WalletSession; id: string }) {
@@ -83,7 +83,8 @@ function PrintBody({ session, id }: { session: WalletSession; id: string }) {
       document.title = previous;
     };
   }, [number]);
-  const verifyUrl = useMemo(() => (number ? verifyUrlFor(number) : ""), [number]);
+  const sha256 = load.state === "ready" ? load.detail.payload_sha256 : null;
+  const verifyUrl = useMemo(() => (number && sha256 ? verifyUrlFor(number, sha256) : ""), [number, sha256]);
 
   if (load.state === "loading") return <p role="status" className="panel panel-pad text-sm text-slate-500">Loading the certificate…</p>;
   if (load.state === "signin") {

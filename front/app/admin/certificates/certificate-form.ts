@@ -66,6 +66,17 @@ export function certificateFormParams(form: CertificateForm): CertificateFormPar
   return evidence.length > 0 ? { ...params, evidence } : params;
 }
 
+/**
+ * The form with another share class. The company's details and the scale
+ * belong to the asset: a class of another asset clears them, so the next
+ * preview fills them in for that asset instead of carrying the previous
+ * one's onto a certificate it does not concern.
+ */
+export function withShareClass(form: CertificateForm, shareClass: string, sameAsset: boolean): CertificateForm {
+  if (sameAsset) return { ...form, shareClass };
+  return { ...form, shareClass, legalName: "", registrationNumber: "", address: "", unitsFor100Percent: "" };
+}
+
 /** The form with the preview's prefill in every field the admin has not typed yet. */
 export function withPrefill(form: CertificateForm, prefill: CertificatePrefill): CertificateForm {
   const fill = (typed: string, value: string) => (typed.trim() ? typed : value);

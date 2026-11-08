@@ -36,6 +36,9 @@ function WalletCertificatesConsole({ session }: { session: WalletSession }) {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const generation = useRef(0);
+  // The latest detail asked for: an earlier answer arriving late must not
+  // replace a newer selection or close the new-certificate form.
+  const detailRequest = useRef(0);
 
   const load = useCallback(
     async (interactive: SignedFetchInteractive) => {
@@ -68,16 +71,20 @@ function WalletCertificatesConsole({ session }: { session: WalletSession }) {
   }, [session]);
 
   async function open(item: CertificateListItem) {
+    const request = ++detailRequest.current;
     setDetailError(null);
     try {
-      setSelected(await readCertificate(session, item.id));
+      const detail = await readCertificate(session, item.id);
+      if (request !== detailRequest.current) return;
+      setSelected(detail);
       setCreating(false);
     } catch (err) {
-      setDetailError(err instanceof Error ? err.message : String(err));
+      if (request === detailRequest.current) setDetailError(err instanceof Error ? err.message : String(err));
     }
   }
 
   function changed(detail: CertificateDetail) {
+    detailRequest.current += 1;
     setSelected(detail);
     setCreating(false);
     void load(false);
@@ -95,6 +102,8 @@ function WalletCertificatesConsole({ session }: { session: WalletSession }) {
             type="button"
             className="btn-brand"
             onClick={() => {
+              detailRequest.current += 1;
+              setDetailError(null);
               setCreating(true);
               setSelected(null);
             }}
