@@ -177,6 +177,21 @@ export async function checkApplyEligibility(
   }
 }
 
+/** Options of a submission that are not content columns of the application. */
+export type ApplicationSubmitOptions = {
+  /**
+   * The applicant asks Manci to incorporate a Serbian SPV (lib/apply-spv.ts).
+   * Sent as the top-level signed param `company_formation_requested`, the one
+   * the routes read (the content narrowing ignores it inside `application`);
+   * the server forces it for an individual applicant.
+   */
+  companyFormationRequested?: boolean;
+};
+
+function submitParams(payload: NewApplication, opts: ApplicationSubmitOptions): Record<string, unknown> {
+  return { application: payload, ...(opts.companyFormationRequested ? { company_formation_requested: true } : {}) };
+}
+
 /**
  * Submit a new launch application via the signed route. The server stamps
  * `applicant_wallet` from the SIWS-verified wallet and enforces the KYC apply
@@ -187,12 +202,13 @@ export async function checkApplyEligibility(
 export async function submitApplication(
   session: WalletSession | null | undefined,
   payload: NewApplication,
+  opts: ApplicationSubmitOptions = {},
 ): Promise<string> {
   const { id } = await signedFetch<{ id: string }>(
     session,
     "/api/applications/submit",
     "applications.submit",
-    { application: payload },
+    submitParams(payload, opts),
   );
   return id;
 }
@@ -232,14 +248,22 @@ export type PublicApplication = Pick<
   | "submitted_at"
 >;
 
-/** Applicant reads their OWN applications (signed; bound to the signer). */
+/**
+ * Applicant reads their OWN applications (signed; bound to the signer).
+ * `interactive: false` reads within an existing wallet session only (the
+ * issuer journey's background read): no prompt, WalletSessionRequiredError
+ * instead.
+ */
 export async function listMyApplications(
   session: WalletSession | null | undefined,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<LaunchApplication[]> {
   const data = await signedFetch<{ applications: LaunchApplication[] }>(
     session,
     "/api/applications/mine",
     "applications.mine",
+    {},
+    opts,
   );
   return data.applications ?? [];
 }
@@ -274,15 +298,15 @@ export async function updateApplicationContent(
   session: WalletSession | null | undefined,
   id: string,
   payload: NewApplication,
+  opts: ApplicationSubmitOptions = {},
 ): Promise<void> {
   await signedFetch(
     session,
     "/api/applications/resubmit",
     "applications.resubmit",
-    {
-      id,
-      application: payload,
-    },
+    // The route rewrites company_formation_requested on every resubmission,
+    // so the choice is sent again each time (lib/apply-spv.ts).
+    { id, ...submitParams(payload, opts) },
   );
 }
 
@@ -338,16 +362,22 @@ export async function getPublicApplication(
   return rows[0] ?? null;
 }
 
-/** Admin lists the application queue (signed + on-chain admin gate). */
+/**
+ * Admin lists the application queue (signed + on-chain admin gate).
+ * `interactive: false`: within an existing session only (the admin issuer
+ * journey's background read), never a prompt.
+ */
 export async function listApplications(
   session: WalletSession | null | undefined,
   status?: ApplicationStatus,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<LaunchApplication[]> {
   const data = await signedFetch<{ applications: LaunchApplication[] }>(
     session,
     "/api/applications/admin-list",
     "applications.adminList",
     status ? { status } : {},
+    opts,
   );
   return data.applications ?? [];
 }

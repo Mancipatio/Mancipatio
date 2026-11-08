@@ -48,6 +48,9 @@ export const SITEMAP_PAGES: readonly SitemapPage[] = [
   page("/markets/whitepapers", "weekly", 0.6),
   page("/markets/resell", "weekly", 0.5),
   page("/legal-structure", "monthly", 0.5),
+  // Guides outside /solutions/[slug]; each leaves the list when its scope is off (navHrefVisible).
+  page("/solutions/serbian-spv", "monthly", 0.5),
+  page("/solutions/esop", "monthly", 0.5),
   page("/security", "monthly", 0.5),
   page("/risks", "monthly", 0.5),
   page("/pricing", "monthly", 0.5),

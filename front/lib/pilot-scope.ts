@@ -120,6 +120,8 @@ export const KYC_ONLY_ROUTES: readonly ModuleRoute[] = [
 /** KYC-only mode: guides of what it pauses leave every menu (the pages stay, without a notice). */
 export const KYC_ONLY_NAV_PREFIXES: readonly string[] = [
   "/solutions/issuer-registry", "/solutions/tokenization", "/solutions/share-classes", "/solutions/launchpad",
+  // Issuing through a Serbian SPV; the guide carries the notice itself while the mode is on.
+  "/solutions/serbian-spv",
 ];
 
 function matches(path: string, prefix: string): boolean {
@@ -182,6 +184,8 @@ export const NAV_ROUTES: readonly NavRoute[] = [
   { prefix: "/solutions/otc", modules: ["secondaryTrading"], features: [] },
   { prefix: "/solutions/governance", modules: ["governance"], features: [] },
   { prefix: "/solutions/rights-vesting", modules: ["rights", "vesting", "distributions"], features: [] },
+  // The ESOP guide carries the module notice itself while vesting is off (app/(marketing)/solutions/esop).
+  { prefix: "/solutions/esop", modules: ["vesting"], features: [] },
   { prefix: "/solutions/custody", modules: ["custodyConversion", "custodyDelivery"], features: [] },
 ];
 
