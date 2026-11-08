@@ -209,7 +209,8 @@ export function CertificateSheet({ detail, verifyUrl }: { detail: CertificateDet
         <ol className="mt-2 list-decimal space-y-1 pl-5">
           <li>
             Open <span className="break-all font-mono">{verifyUrl}</span>: it shows whether certificate {detail.number} is valid or
-            revoked and what it states. It never shows the holder&apos;s name or identification number.
+            revoked and what it states. Entered by hand, the page needs the number and the SHA-256 above; the number alone shows
+            only whether the certificate is valid or revoked. It never shows the holder&apos;s name or identification number.
           </li>
           <li>The SHA-256 above is the hash of the payload printed at the end, exactly as signed (canonical JSON, UTF-8).</li>
           <li>The signature is an Ed25519 signature by the signer&apos;s public key over the signed message above.</li>

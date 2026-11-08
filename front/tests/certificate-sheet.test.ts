@@ -48,7 +48,7 @@ async function detail(over: Partial<CertificateDetail> = {}, network: "devnet" |
   };
 }
 
-const VERIFY_URL = "https://www.manci.io/certificates/verify?number=MC-2026-0001";
+const VERIFY_URL = "https://www.manci.io/certificates/verify?number=MC-2026-0001&sha256=" + "ab".repeat(32);
 const render = (d: CertificateDetail) => renderToStaticMarkup(createElement(CertificateSheet, { detail: d, verifyUrl: VERIFY_URL }));
 const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 
@@ -70,7 +70,9 @@ describe("the printable certificate", () => {
     expect(page).toContain(d.signature!);
     expect(page).toContain(EVIDENCE_TX);
     expect(page).toContain(`MC-2026-0001 sha256:${d.payload_sha256}`);
+    // The printed link carries the hash, which opens the contents on the public page.
     expect(page).toContain(VERIFY_URL);
+    expect(page).toContain("the number alone shows only whether the certificate is valid or revoked");
     // The signed bytes are printed as they were hashed.
     const escaped = d.payload_canonical.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;").replace(/</g, "&lt;");
     expect(render(d)).toContain(escaped);
