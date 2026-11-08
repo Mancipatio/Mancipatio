@@ -61,7 +61,10 @@ export async function POST(request: Request) {
 
     const left = BigInt(migration.units_cap) - unitsTaken(await readDeposits(sb, [migration.id]));
     if (left <= BigInt(0)) throw new SiwsError(409, "Every unit of this campaign is already claimed");
-    if (lots > left) throw new SiwsError(409, `Only ${formatUnits(left)} units are left in this campaign; deposit at most ${formatUnits(left)} lots`);
+    if (lots > left) {
+      const one = left === BigInt(1);
+      throw new SiwsError(409, `Only ${formatUnits(left)} ${one ? "unit is" : "units are"} left in this campaign; deposit at most ${formatUnits(left)} ${one ? "lot" : "lots"}`);
+    }
 
     const balance = await readHolderBalance({ holder: wallet, oldMint: migration.old_mint, program: migration.old_token_program });
     if (balance.frozen) throw new SiwsError(409, `Your ${symbol} token account is frozen, so it cannot send a deposit`);
