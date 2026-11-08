@@ -34,6 +34,7 @@ import {
   parseCancelIssuerAuthorityTransferInstruction,
   parseCancelIssuerRecoveryInstruction,
   parseCancelKycRegistryAuthorityTransferInstruction,
+  parseCancelMigrationInstruction,
   parseCancelOfferInstruction,
   parseCancelOtcDealInstruction,
   parseCancelPlatformAdminTransferInstruction,
@@ -43,21 +44,26 @@ import {
   parseCastVoteInstruction,
   parseClaimFounderYieldInstruction,
   parseClaimInvestorYieldInstruction,
+  parseClaimMigrationInstruction,
+  parseClaimMigrationProofInstruction,
   parseClaimMilestoneInstruction,
   parseClaimRefundInstruction,
   parseClaimVestedInstruction,
   parseClawbackBlocklistedHolderInstruction,
   parseClawbackFromHolderInstruction,
   parseCloseDistributionInstruction,
+  parseCloseMigrationInstruction,
   parseCloseSaleInstruction,
   parseCreateAssetInstruction,
   parseCreateDistributionInstruction,
   parseCreateKycRegistryInstruction,
+  parseCreateMigrationInstruction,
   parseCreateOfferInstruction,
   parseCreateOtcDealInstruction,
   parseCreateProposalInstruction,
   parseCreateRightsIssuanceInstruction,
   parseCreateVestingSeriesInstruction,
+  parseDepositMigrationInstruction,
   parseDepositOtcAssetInstruction,
   parseDepositOtcPaymentInstruction,
   parseDepositToCustodyVaultInstruction,
@@ -69,16 +75,19 @@ import {
   parseExecutePlatformRecoveryInstruction,
   parseExpireOfferInstruction,
   parseExpireOtcDealInstruction,
+  parseFinalizeMigrationInstruction,
   parseFinalizeProposalInstruction,
   parseFinalizeVaultVoteInstruction,
   parseFinalizeVestingSeriesInstruction,
   parseFreezeIssuerProceedsInstruction,
   parseFreezeVaultInstruction,
+  parseFundMigrationInstruction,
   parseInitializePlatformInstruction,
   parseInitializeShareClassMintInstruction,
   parseLockSupplyInstruction,
   parseMintToTreasuryInstruction,
   parseOpenCustodyVaultInstruction,
+  parseOpenMigrationInstruction,
   parseOpenPayoutVaultInstruction,
   parseOpenSaleInstruction,
   parseOpenVaultVoteInstruction,
@@ -90,12 +99,14 @@ import {
   parseProposeKycRegistryAuthorityInstruction,
   parseProposePlatformAdminInstruction,
   parseProposePlatformRecoveryInstruction,
+  parsePublishMigrationRootInstruction,
   parsePublishMilestoneInstruction,
   parsePushVestedInstruction,
   parseRealizeCustodyVaultInstruction,
   parseReclaimRentInstruction,
   parseRecoverIssuerRegistrationInstruction,
   parseRecoverVestingPositionInstruction,
+  parseRefundMigrationDepositInstruction,
   parseRegisterIssuerInstruction,
   parseReleasePayoutInstruction,
   parseRemoveAdminInstruction,
@@ -136,6 +147,7 @@ import {
   type ParsedCancelIssuerAuthorityTransferInstruction,
   type ParsedCancelIssuerRecoveryInstruction,
   type ParsedCancelKycRegistryAuthorityTransferInstruction,
+  type ParsedCancelMigrationInstruction,
   type ParsedCancelOfferInstruction,
   type ParsedCancelOtcDealInstruction,
   type ParsedCancelPlatformAdminTransferInstruction,
@@ -145,21 +157,26 @@ import {
   type ParsedCastVoteInstruction,
   type ParsedClaimFounderYieldInstruction,
   type ParsedClaimInvestorYieldInstruction,
+  type ParsedClaimMigrationInstruction,
+  type ParsedClaimMigrationProofInstruction,
   type ParsedClaimMilestoneInstruction,
   type ParsedClaimRefundInstruction,
   type ParsedClaimVestedInstruction,
   type ParsedClawbackBlocklistedHolderInstruction,
   type ParsedClawbackFromHolderInstruction,
   type ParsedCloseDistributionInstruction,
+  type ParsedCloseMigrationInstruction,
   type ParsedCloseSaleInstruction,
   type ParsedCreateAssetInstruction,
   type ParsedCreateDistributionInstruction,
   type ParsedCreateKycRegistryInstruction,
+  type ParsedCreateMigrationInstruction,
   type ParsedCreateOfferInstruction,
   type ParsedCreateOtcDealInstruction,
   type ParsedCreateProposalInstruction,
   type ParsedCreateRightsIssuanceInstruction,
   type ParsedCreateVestingSeriesInstruction,
+  type ParsedDepositMigrationInstruction,
   type ParsedDepositOtcAssetInstruction,
   type ParsedDepositOtcPaymentInstruction,
   type ParsedDepositToCustodyVaultInstruction,
@@ -171,16 +188,19 @@ import {
   type ParsedExecutePlatformRecoveryInstruction,
   type ParsedExpireOfferInstruction,
   type ParsedExpireOtcDealInstruction,
+  type ParsedFinalizeMigrationInstruction,
   type ParsedFinalizeProposalInstruction,
   type ParsedFinalizeVaultVoteInstruction,
   type ParsedFinalizeVestingSeriesInstruction,
   type ParsedFreezeIssuerProceedsInstruction,
   type ParsedFreezeVaultInstruction,
+  type ParsedFundMigrationInstruction,
   type ParsedInitializePlatformInstruction,
   type ParsedInitializeShareClassMintInstruction,
   type ParsedLockSupplyInstruction,
   type ParsedMintToTreasuryInstruction,
   type ParsedOpenCustodyVaultInstruction,
+  type ParsedOpenMigrationInstruction,
   type ParsedOpenPayoutVaultInstruction,
   type ParsedOpenSaleInstruction,
   type ParsedOpenVaultVoteInstruction,
@@ -192,12 +212,14 @@ import {
   type ParsedProposeKycRegistryAuthorityInstruction,
   type ParsedProposePlatformAdminInstruction,
   type ParsedProposePlatformRecoveryInstruction,
+  type ParsedPublishMigrationRootInstruction,
   type ParsedPublishMilestoneInstruction,
   type ParsedPushVestedInstruction,
   type ParsedRealizeCustodyVaultInstruction,
   type ParsedReclaimRentInstruction,
   type ParsedRecoverIssuerRegistrationInstruction,
   type ParsedRecoverVestingPositionInstruction,
+  type ParsedRefundMigrationDepositInstruction,
   type ParsedRegisterIssuerInstruction,
   type ParsedReleasePayoutInstruction,
   type ParsedRemoveAdminInstruction,
@@ -243,6 +265,9 @@ export enum AssetRegistryAccount {
   IssuerRecovery,
   KycEntry,
   KycRegistry,
+  Migration,
+  MigrationDeposit,
+  MigrationProofClaim,
   MilestoneClaim,
   Offer,
   OtcDeal,
@@ -442,6 +467,39 @@ export function identifyAssetRegistryAccount(
     )
   ) {
     return AssetRegistryAccount.KycRegistry;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([128, 26, 74, 51, 44, 114, 19, 223]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.Migration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([152, 166, 54, 28, 173, 222, 163, 91]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.MigrationDeposit;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([24, 67, 65, 214, 38, 52, 51, 252]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.MigrationProofClaim;
   }
   if (
     containsBytes(
@@ -664,6 +722,7 @@ export enum AssetRegistryInstruction {
   CancelIssuerAuthorityTransfer,
   CancelIssuerRecovery,
   CancelKycRegistryAuthorityTransfer,
+  CancelMigration,
   CancelOffer,
   CancelOtcDeal,
   CancelPlatformAdminTransfer,
@@ -673,21 +732,26 @@ export enum AssetRegistryInstruction {
   CastVote,
   ClaimFounderYield,
   ClaimInvestorYield,
+  ClaimMigration,
+  ClaimMigrationProof,
   ClaimMilestone,
   ClaimRefund,
   ClaimVested,
   ClawbackBlocklistedHolder,
   ClawbackFromHolder,
   CloseDistribution,
+  CloseMigration,
   CloseSale,
   CreateAsset,
   CreateDistribution,
   CreateKycRegistry,
+  CreateMigration,
   CreateOffer,
   CreateOtcDeal,
   CreateProposal,
   CreateRightsIssuance,
   CreateVestingSeries,
+  DepositMigration,
   DepositOtcAsset,
   DepositOtcPayment,
   DepositToCustodyVault,
@@ -699,16 +763,19 @@ export enum AssetRegistryInstruction {
   ExecutePlatformRecovery,
   ExpireOffer,
   ExpireOtcDeal,
+  FinalizeMigration,
   FinalizeProposal,
   FinalizeVaultVote,
   FinalizeVestingSeries,
   FreezeIssuerProceeds,
   FreezeVault,
+  FundMigration,
   InitializePlatform,
   InitializeShareClassMint,
   LockSupply,
   MintToTreasury,
   OpenCustodyVault,
+  OpenMigration,
   OpenPayoutVault,
   OpenSale,
   OpenVaultVote,
@@ -720,12 +787,14 @@ export enum AssetRegistryInstruction {
   ProposeKycRegistryAuthority,
   ProposePlatformAdmin,
   ProposePlatformRecovery,
+  PublishMigrationRoot,
   PublishMilestone,
   PushVested,
   RealizeCustodyVault,
   ReclaimRent,
   RecoverIssuerRegistration,
   RecoverVestingPosition,
+  RefundMigrationDeposit,
   RegisterIssuer,
   ReleasePayout,
   RemoveAdmin,
@@ -946,6 +1015,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([88, 255, 119, 245, 65, 15, 188, 223]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelMigration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([92, 203, 223, 40, 92, 89, 53, 119]),
       ),
       0,
@@ -1045,6 +1125,28 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([40, 53, 196, 35, 178, 97, 119, 204]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ClaimMigration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([43, 105, 214, 90, 177, 73, 86, 244]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ClaimMigrationProof;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([211, 134, 152, 37, 3, 82, 214, 189]),
       ),
       0,
@@ -1111,6 +1213,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([114, 232, 214, 71, 57, 139, 177, 143]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CloseMigration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([124, 201, 1, 146, 231, 103, 193, 152]),
       ),
       0,
@@ -1150,6 +1263,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.CreateKycRegistry;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([21, 141, 1, 60, 77, 47, 20, 100]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CreateMigration;
   }
   if (
     containsBytes(
@@ -1205,6 +1329,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.CreateVestingSeries;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([68, 176, 220, 173, 143, 249, 250, 101]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.DepositMigration;
   }
   if (
     containsBytes(
@@ -1331,6 +1466,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([34, 232, 228, 252, 159, 14, 96, 203]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.FinalizeMigration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([23, 68, 51, 167, 109, 173, 187, 164]),
       ),
       0,
@@ -1386,6 +1532,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([128, 94, 3, 7, 224, 221, 30, 177]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.FundMigration;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([119, 201, 101, 45, 75, 122, 89, 3]),
       ),
       0,
@@ -1436,6 +1593,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.OpenCustodyVault;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([18, 210, 250, 139, 188, 232, 212, 153]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.OpenMigration;
   }
   if (
     containsBytes(
@@ -1562,6 +1730,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([45, 244, 202, 94, 26, 87, 17, 58]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.PublishMigrationRoot;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([224, 187, 210, 241, 161, 63, 149, 203]),
       ),
       0,
@@ -1623,6 +1802,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.RecoverVestingPosition;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([20, 97, 4, 249, 34, 232, 54, 33]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.RefundMigrationDeposit;
   }
   if (
     containsBytes(
@@ -1937,6 +2127,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.CancelKycRegistryAuthorityTransfer;
     } & ParsedCancelKycRegistryAuthorityTransferInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.CancelMigration;
+    } & ParsedCancelMigrationInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.CancelOffer;
     } & ParsedCancelOfferInstruction<TProgram>)
   | ({
@@ -1964,6 +2157,12 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ClaimInvestorYield;
     } & ParsedClaimInvestorYieldInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.ClaimMigration;
+    } & ParsedClaimMigrationInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.ClaimMigrationProof;
+    } & ParsedClaimMigrationProofInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.ClaimMilestone;
     } & ParsedClaimMilestoneInstruction<TProgram>)
   | ({
@@ -1982,6 +2181,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.CloseDistribution;
     } & ParsedCloseDistributionInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.CloseMigration;
+    } & ParsedCloseMigrationInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.CloseSale;
     } & ParsedCloseSaleInstruction<TProgram>)
   | ({
@@ -1993,6 +2195,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.CreateKycRegistry;
     } & ParsedCreateKycRegistryInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.CreateMigration;
+    } & ParsedCreateMigrationInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.CreateOffer;
     } & ParsedCreateOfferInstruction<TProgram>)
@@ -2008,6 +2213,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.CreateVestingSeries;
     } & ParsedCreateVestingSeriesInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.DepositMigration;
+    } & ParsedDepositMigrationInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.DepositOtcAsset;
     } & ParsedDepositOtcAssetInstruction<TProgram>)
@@ -2042,6 +2250,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ExpireOtcDeal;
     } & ParsedExpireOtcDealInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.FinalizeMigration;
+    } & ParsedFinalizeMigrationInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.FinalizeProposal;
     } & ParsedFinalizeProposalInstruction<TProgram>)
   | ({
@@ -2057,6 +2268,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.FreezeVault;
     } & ParsedFreezeVaultInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.FundMigration;
+    } & ParsedFundMigrationInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.InitializePlatform;
     } & ParsedInitializePlatformInstruction<TProgram>)
   | ({
@@ -2071,6 +2285,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.OpenCustodyVault;
     } & ParsedOpenCustodyVaultInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.OpenMigration;
+    } & ParsedOpenMigrationInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.OpenPayoutVault;
     } & ParsedOpenPayoutVaultInstruction<TProgram>)
@@ -2105,6 +2322,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ProposePlatformRecovery;
     } & ParsedProposePlatformRecoveryInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.PublishMigrationRoot;
+    } & ParsedPublishMigrationRootInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.PublishMilestone;
     } & ParsedPublishMilestoneInstruction<TProgram>)
   | ({
@@ -2122,6 +2342,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.RecoverVestingPosition;
     } & ParsedRecoverVestingPositionInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.RefundMigrationDeposit;
+    } & ParsedRefundMigrationDepositInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.RegisterIssuer;
     } & ParsedRegisterIssuerInstruction<TProgram>)
@@ -2318,6 +2541,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseCancelKycRegistryAuthorityTransferInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.CancelMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CancelMigration,
+        ...parseCancelMigrationInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.CancelOffer: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2381,6 +2611,20 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseClaimInvestorYieldInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.ClaimMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ClaimMigration,
+        ...parseClaimMigrationInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.ClaimMigrationProof: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ClaimMigrationProof,
+        ...parseClaimMigrationProofInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.ClaimMilestone: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2423,6 +2667,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseCloseDistributionInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.CloseMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CloseMigration,
+        ...parseCloseMigrationInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.CloseSale: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2449,6 +2700,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.CreateKycRegistry,
         ...parseCreateKycRegistryInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.CreateMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CreateMigration,
+        ...parseCreateMigrationInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.CreateOffer: {
@@ -2484,6 +2742,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.CreateVestingSeries,
         ...parseCreateVestingSeriesInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.DepositMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.DepositMigration,
+        ...parseDepositMigrationInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.DepositOtcAsset: {
@@ -2563,6 +2828,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseExpireOtcDealInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.FinalizeMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.FinalizeMigration,
+        ...parseFinalizeMigrationInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.FinalizeProposal: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2598,6 +2870,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseFreezeVaultInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.FundMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.FundMigration,
+        ...parseFundMigrationInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.InitializePlatform: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2631,6 +2910,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.OpenCustodyVault,
         ...parseOpenCustodyVaultInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.OpenMigration: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.OpenMigration,
+        ...parseOpenMigrationInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.OpenPayoutVault: {
@@ -2710,6 +2996,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseProposePlatformRecoveryInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.PublishMigrationRoot: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.PublishMigrationRoot,
+        ...parsePublishMigrationRootInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.PublishMilestone: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2750,6 +3043,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.RecoverVestingPosition,
         ...parseRecoverVestingPositionInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.RefundMigrationDeposit: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.RefundMigrationDeposit,
+        ...parseRefundMigrationDepositInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.RegisterIssuer: {

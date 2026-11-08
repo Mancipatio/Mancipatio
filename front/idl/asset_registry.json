@@ -2338,6 +2338,86 @@
       "args": []
     },
     {
+      "name": "cancel_migration",
+      "docs": [
+        "Admin cancels a `Draft`, or an `Open` migration before `closes_at` and",
+        "before any claim."
+      ],
+      "discriminator": [
+        88,
+        255,
+        119,
+        245,
+        65,
+        15,
+        188,
+        223
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "cancel_offer",
       "docs": [
         "Cancels an open OTC offer — escrowed units return to the maker."
@@ -3417,6 +3497,292 @@
       "args": [
         {
           "name": "weight",
+          "type": "u64"
+        },
+        {
+          "name": "proof",
+          "type": {
+            "vec": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "claim_migration",
+      "docs": [
+        "The depositor claims one unit per deposited lot (KYC-checked on a",
+        "KycGated class)."
+      ],
+      "discriminator": [
+        40,
+        53,
+        196,
+        35,
+        178,
+        97,
+        119,
+        204
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "docs": [
+            "The depositor."
+          ],
+          "signer": true
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_deposit",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  100,
+                  101,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              },
+              {
+                "kind": "account",
+                "path": "holder"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "holder_share_account",
+          "docs": [
+            "The holder's own share-class account — bound to the signer, whose key",
+            "is the one the deposit and (KycGated) the KYC check refer to."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claim_migration_proof",
+      "docs": [
+        "An off-chain locker claims its units with a Merkle proof of",
+        "`(claimer, units)` (once per claimer)."
+      ],
+      "discriminator": [
+        43,
+        105,
+        214,
+        90,
+        177,
+        73,
+        86,
+        244
+      ],
+      "accounts": [
+        {
+          "name": "claimer",
+          "docs": [
+            "The entitled key — the leaf's account; pays the claim record."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proof_claim",
+          "docs": [
+            "One claim per (migration, claimer) — `init` fails on a second claim."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  99,
+                  108,
+                  97,
+                  105,
+                  109
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              },
+              {
+                "kind": "account",
+                "path": "claimer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "claimer_share_account",
+          "docs": [
+            "The claimer's own share-class account (mirrors `claim_milestone`: a",
+            "root naming one key can never route units to another's account)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "units",
           "type": "u64"
         },
         {
@@ -4631,6 +4997,214 @@
       "args": []
     },
     {
+      "name": "close_migration",
+      "docs": [
+        "Admin closes a migration after its claim deadline (or once cancelled",
+        "and fully refunded): unclaimed units to `return_to`, escrowed old",
+        "tokens burned, vault / escrow / identity closed, rent to the creator."
+      ],
+      "discriminator": [
+        114,
+        232,
+        214,
+        71,
+        57,
+        139,
+        177,
+        143
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rent_to",
+          "docs": [
+            "The creating Admin (`migration.admin`), who paid every rent: it gets",
+            "the vault's, the escrow's and the identity's back."
+          ],
+          "writable": true
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "return_to_account",
+          "docs": [
+            "Any share-class account owned by `migration.return_to`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "old_mint",
+          "docs": [
+            "Mut: the escrow's old tokens are burned."
+          ],
+          "writable": true,
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_identity",
+          "docs": [
+            "Closed at the end of the instruction (rent → `rent_to`), after the",
+            "return leg's hook CPI has read it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "old_token_program",
+          "relations": [
+            "migration"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "close_sale",
       "docs": [
         "Closes a sale and sweeps proceeds to the issuer."
@@ -5448,6 +6022,346 @@
             "array": [
               "u8",
               128
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_migration",
+      "docs": [
+        "Creates a `Draft` migration of a legacy Solana token into share-class",
+        "units (an Admin AND the issuer's live authority sign): `lot` old base",
+        "units per unit, `units_cap` units to fund, a 30–180-day window, a claim",
+        "deadline at least 30 days after it and the `return_to` owner of every",
+        "unclaimed unit. Opens an empty old-token escrow, an empty unit vault",
+        "and the escrow identity."
+      ],
+      "discriminator": [
+        21,
+        141,
+        1,
+        60,
+        77,
+        47,
+        20,
+        100
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The Admin half of the double gate. Pays every rent of the campaign and",
+            "receives it back at the close (`Migration.admin`)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer_authority",
+          "docs": [
+            "The issuer half: the live authority of the share class's issuer. Its",
+            "signature commits the issuer to the terms (lot, cap, window, claim",
+            "deadline, return_to) before any of its units move."
+          ],
+          "signer": true
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          },
+          "relations": [
+            "asset"
+          ]
+        },
+        {
+          "name": "asset",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  115,
+                  115,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "asset.asset_id",
+                "account": "Asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_class"
+        },
+        {
+          "name": "mint",
+          "docs": [
+            "The share class's Token-2022 mint — the vault's mint."
+          ],
+          "relations": [
+            "share_class"
+          ]
+        },
+        {
+          "name": "old_mint",
+          "docs": [
+            "The legacy token holders deposit (`util::require_supported_old_mint`,",
+            "run by the escrow's size expression below)."
+          ]
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "share_class"
+              },
+              {
+                "kind": "arg",
+                "path": "migration_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_escrow",
+          "docs": [
+            "Escrow of the old token; authority is the Migration PDA."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_vault",
+          "docs": [
+            "Vault of share-class units; authority is the Migration PDA."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_identity",
+          "docs": [
+            "The registry's escrow identity for the Migration PDA (same seeds as an",
+            "`EscrowMarker`, its own discriminator). The transfer hook exempts legs",
+            "INTO the vault from receiver KYC (the issuer's funding) and lets only a",
+            "leg OUT to the refund owner `return_to` pass unscreened; every claim is",
+            "screened, by the hook and by `util::deliver_migration_units`. Its",
+            "existence also keeps the clawbacks off the vault (`ClawbackTargetIsEscrow`).",
+            "`own_deposited` counts the units `return_to` itself funded — the only",
+            "part of the close's return that needs no receiver KYC."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "The share-class mint's program (Token-2022)."
+          ]
+        },
+        {
+          "name": "old_token_program",
+          "docs": [
+            "The old mint's program (SPL Token or Token-2022)."
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only): a migration is an entry into custody."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "migration_id",
+          "type": "u64"
+        },
+        {
+          "name": "lot",
+          "type": "u64"
+        },
+        {
+          "name": "units_cap",
+          "type": "u64"
+        },
+        {
+          "name": "opens_at",
+          "type": "i64"
+        },
+        {
+          "name": "closes_at",
+          "type": "i64"
+        },
+        {
+          "name": "claim_deadline",
+          "type": "i64"
+        },
+        {
+          "name": "return_to",
+          "type": "pubkey"
+        },
+        {
+          "name": "terms_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
             ]
           }
         }
@@ -6389,6 +7303,242 @@
         {
           "name": "pre_cliff_bps",
           "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "deposit_migration",
+      "docs": [
+        "A holder deposits `lots` whole lots of the old token inside the window."
+      ],
+      "discriminator": [
+        68,
+        176,
+        220,
+        173,
+        143,
+        249,
+        250,
+        101
+      ],
+      "accounts": [
+        {
+          "name": "holder",
+          "docs": [
+            "The depositing holder — signs the old-token transfer and pays the",
+            "deposit record's rent on the first deposit."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_deposit",
+          "docs": [
+            "The holder's cumulative deposit (created on the first deposit)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  100,
+                  101,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              },
+              {
+                "kind": "account",
+                "path": "holder"
+              }
+            ]
+          }
+        },
+        {
+          "name": "old_mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "holder_token_account",
+          "docs": [
+            "The holder's own old-token account — debited exactly `lots * lot`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "old_token_program",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only): a deposit is an entry into custody."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "holder_block_entry",
+          "docs": [
+            "prog-novac-4: the depositing holder is not blocked. The old token has no",
+            "Manci hook, so nothing else would stop a blocklisted wallet from",
+            "entering the migration.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "holder"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "lots",
+          "type": "u64"
         }
       ]
     },
@@ -8504,6 +9654,57 @@
       "args": []
     },
     {
+      "name": "finalize_migration",
+      "docs": [
+        "Permissionless: `Open → Claimable` once the window has closed."
+      ],
+      "discriminator": [
+        34,
+        232,
+        228,
+        252,
+        159,
+        14,
+        96,
+        203
+      ],
+      "accounts": [
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "finalize_proposal",
       "docs": [
         "Finalizes a proposal after its voting window — advisory outcome."
@@ -8885,6 +10086,176 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "fund_migration",
+      "docs": [
+        "The issuer's live authority moves `units` of its own units into the",
+        "vault of a `Draft` migration (never past `units_cap`)."
+      ],
+      "discriminator": [
+        128,
+        94,
+        3,
+        7,
+        224,
+        221,
+        30,
+        177
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The share class's live issuer authority, moving its own units in."
+          ],
+          "signer": true
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "docs": [
+            "The migration's issuer; its LIVE authority must sign (an authority",
+            "rotated since the creation funds with the new key)."
+          ]
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "source",
+          "docs": [
+            "The authority's own token account of the share class — debited",
+            "exactly `units`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "migration_identity",
+          "docs": [
+            "Credits the refund ledger when the funder is `return_to`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "units",
+          "type": "u64"
+        }
+      ]
     },
     {
       "name": "initialize_platform",
@@ -9615,6 +10986,108 @@
           "type": "pubkey"
         }
       ]
+    },
+    {
+      "name": "open_migration",
+      "docs": [
+        "Admin opens a fully funded migration (`Draft → Open`)."
+      ],
+      "discriminator": [
+        18,
+        210,
+        250,
+        139,
+        188,
+        232,
+        212,
+        153
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
     },
     {
       "name": "open_payout_vault",
@@ -11102,6 +12575,134 @@
       ]
     },
     {
+      "name": "publish_migration_root",
+      "docs": [
+        "An Admin AND the issuer's live authority publish, once, the Merkle",
+        "root of the off-chain locks and its total units."
+      ],
+      "discriminator": [
+        45,
+        244,
+        202,
+        94,
+        26,
+        87,
+        17,
+        58
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer_authority",
+          "docs": [
+            "The migration issuer's live authority co-signs: the root allocates the",
+            "issuer's funded units, which would otherwise go back to `return_to`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only): new entitlements are an entry."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "total_units",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "publish_milestone",
       "docs": [
         "Publishes a vesting milestone with its claim snapshot Merkle root."
@@ -11907,6 +13508,134 @@
           "type": "pubkey"
         }
       ]
+    },
+    {
+      "name": "refund_migration_deposit",
+      "docs": [
+        "Permissionless: refunds one deposit of a `Cancelled` migration to the",
+        "depositor's own old-token account."
+      ],
+      "discriminator": [
+        20,
+        97,
+        4,
+        249,
+        34,
+        232,
+        54,
+        33
+      ],
+      "accounts": [
+        {
+          "name": "migration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  114,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration.share_class",
+                "account": "Migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration.migration_id",
+                "account": "Migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "migration_deposit",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  100,
+                  101,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              },
+              {
+                "kind": "account",
+                "path": "migration_deposit.holder",
+                "account": "MigrationDeposit"
+              }
+            ]
+          }
+        },
+        {
+          "name": "old_mint",
+          "relations": [
+            "migration"
+          ]
+        },
+        {
+          "name": "migration_escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  103,
+                  95,
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "migration"
+              }
+            ]
+          }
+        },
+        {
+          "name": "holder_token_account",
+          "docs": [
+            "Any old-token account OWNED BY THE DEPOSITOR — the refund can only",
+            "ever reach the wallet that deposited (a crank may create one for it)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "old_token_program",
+          "relations": [
+            "migration"
+          ]
+        }
+      ],
+      "args": []
     },
     {
       "name": "register_issuer",
@@ -14556,6 +16285,45 @@
       ]
     },
     {
+      "name": "Migration",
+      "discriminator": [
+        128,
+        26,
+        74,
+        51,
+        44,
+        114,
+        19,
+        223
+      ]
+    },
+    {
+      "name": "MigrationDeposit",
+      "discriminator": [
+        152,
+        166,
+        54,
+        28,
+        173,
+        222,
+        163,
+        91
+      ]
+    },
+    {
+      "name": "MigrationProofClaim",
+      "discriminator": [
+        24,
+        67,
+        65,
+        214,
+        38,
+        52,
+        51,
+        252
+      ]
+    },
+    {
       "name": "MilestoneClaim",
       "discriminator": [
         5,
@@ -15127,6 +16895,149 @@
         170,
         112,
         47
+      ]
+    },
+    {
+      "name": "MigrationCancelled",
+      "discriminator": [
+        148,
+        227,
+        114,
+        66,
+        249,
+        221,
+        4,
+        216
+      ]
+    },
+    {
+      "name": "MigrationClaimed",
+      "discriminator": [
+        252,
+        251,
+        231,
+        0,
+        51,
+        236,
+        8,
+        142
+      ]
+    },
+    {
+      "name": "MigrationClosed",
+      "discriminator": [
+        131,
+        127,
+        8,
+        235,
+        32,
+        7,
+        63,
+        188
+      ]
+    },
+    {
+      "name": "MigrationCreated",
+      "discriminator": [
+        152,
+        83,
+        119,
+        207,
+        171,
+        158,
+        52,
+        56
+      ]
+    },
+    {
+      "name": "MigrationDepositRefunded",
+      "discriminator": [
+        167,
+        96,
+        184,
+        109,
+        36,
+        246,
+        105,
+        196
+      ]
+    },
+    {
+      "name": "MigrationDeposited",
+      "discriminator": [
+        177,
+        97,
+        242,
+        146,
+        254,
+        219,
+        152,
+        234
+      ]
+    },
+    {
+      "name": "MigrationFinalized",
+      "discriminator": [
+        222,
+        117,
+        101,
+        143,
+        114,
+        79,
+        14,
+        202
+      ]
+    },
+    {
+      "name": "MigrationFunded",
+      "discriminator": [
+        178,
+        177,
+        98,
+        10,
+        91,
+        44,
+        9,
+        221
+      ]
+    },
+    {
+      "name": "MigrationOpened",
+      "discriminator": [
+        239,
+        32,
+        131,
+        83,
+        53,
+        202,
+        201,
+        22
+      ]
+    },
+    {
+      "name": "MigrationProofClaimed",
+      "discriminator": [
+        61,
+        64,
+        10,
+        82,
+        169,
+        110,
+        250,
+        95
+      ]
+    },
+    {
+      "name": "MigrationRootPublished",
+      "discriminator": [
+        145,
+        17,
+        33,
+        226,
+        97,
+        8,
+        150,
+        244
       ]
     },
     {
@@ -16235,6 +18146,81 @@
       "code": 6155,
       "name": "PlatformRecoveryPending",
       "msg": "A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation"
+    },
+    {
+      "code": 6156,
+      "name": "MigrationTermsInvalid",
+      "msg": "Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint"
+    },
+    {
+      "code": 6157,
+      "name": "MigrationWindowInvalid",
+      "msg": "Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days"
+    },
+    {
+      "code": 6158,
+      "name": "MigrationStatusInvalid",
+      "msg": "Migration is not in the status this action requires"
+    },
+    {
+      "code": 6159,
+      "name": "MigrationUnderfunded",
+      "msg": "A migration opens only once units_funded equals units_cap"
+    },
+    {
+      "code": 6160,
+      "name": "MigrationCapExceeded",
+      "msg": "Funding would exceed the migration's units_cap"
+    },
+    {
+      "code": 6161,
+      "name": "MigrationAllocationExceeded",
+      "msg": "Deposits and published entitlements may not exceed the units funded"
+    },
+    {
+      "code": 6162,
+      "name": "MigrationOutsideWindow",
+      "msg": "Migration deposits are accepted only from opens_at until closes_at"
+    },
+    {
+      "code": 6163,
+      "name": "MigrationWindowNotClosed",
+      "msg": "The migration's deposit window has not closed yet"
+    },
+    {
+      "code": 6164,
+      "name": "MigrationNotCancellable",
+      "msg": "A migration can be cancelled only while Draft, or while Open before closes_at and before any claim"
+    },
+    {
+      "code": 6165,
+      "name": "MigrationNotClosable",
+      "msg": "Close needs the claim deadline passed (Open or Claimable), or a cancelled migration with every deposit refunded"
+    },
+    {
+      "code": 6166,
+      "name": "MigrationDepositSettled",
+      "msg": "This migration deposit was already claimed or refunded"
+    },
+    {
+      "code": 6167,
+      "name": "MigrationRootAlreadyPublished",
+      "msg": "The migration's off-chain entitlement root is already published"
+    },
+    {
+      "code": 6168,
+      "name": "MigrationRootMissing",
+      "msg": "The migration has no published off-chain entitlement root"
+    },
+    {
+      "code": 6169,
+      "name": "MigrationRootExceeded",
+      "msg": "Claim would exceed the published root's total units"
+    },
+    {
+      "code": 6170,
+      "name": "MigrationClaimDeadlinePassed",
+      "msg": "The migration's claim deadline has passed"
     }
   ],
   "types": [
@@ -18261,6 +20247,695 @@
           },
           {
             "name": "Expired"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Migration",
+      "docs": [
+        "One migration campaign of a share class. Seeds:",
+        "`[\"migration\", share_class, migration_id LE]`. Owns the old-token escrow",
+        "`[\"mig_escrow\", migration]` and the unit vault `[\"mig_vault\", migration]`,",
+        "and carries an `EscrowIdentity` at `[\"escrow_marker\", migration]` whose",
+        "refund owner is `return_to`.",
+        "",
+        "⚠ Layout (pinned by a test; every offset is fixed because the only",
+        "`Option` is last): share_class 8, mint 40, issuer 72, admin 104,",
+        "old_mint 136, old_token_program 168, return_to 200, migration_id 232,",
+        "lot 240, units_cap 248, units_funded 256, units_committed 264,",
+        "units_claimed 272, lots_deposited 280, lots_refunded 288, opens_at 296,",
+        "closes_at 304, claim_deadline 312, terms_hash 320, status 352,",
+        "merkle_total 353, merkle_claimed 361, bump 369, escrow_bump 370,",
+        "vault_bump 371, version 372, merkle_root 373; 406 B."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "share_class",
+            "docs": [
+              "The share class whose units are delivered."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "docs": [
+              "The share class's Token-2022 mint (the vault's mint)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer",
+            "docs": [
+              "The share class's `Issuer` PDA; its live `authority` funds the vault",
+              "and co-signs the root."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "docs": [
+              "The creating Admin: paid the rent, receives it back at the close."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "old_mint",
+            "docs": [
+              "The legacy token (SPL Token or a supported Token-2022 mint)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "old_token_program",
+            "docs": [
+              "The token program owning `old_mint` and the escrow."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "return_to",
+            "docs": [
+              "Owner of the token account that receives every unit left in the",
+              "vault at the close; also the identity's refund owner."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "migration_id",
+            "type": "u64"
+          },
+          {
+            "name": "lot",
+            "docs": [
+              "Old-token base units per share-class unit (≥ 1)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "units_cap",
+            "docs": [
+              "Exactly the units the issuer must fund before the window opens."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "units_funded",
+            "docs": [
+              "Units moved into the vault through `fund_migration`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "units_committed",
+            "docs": [
+              "Lots deposited plus the published root's total; ≤ `units_funded`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "units_claimed",
+            "docs": [
+              "Units delivered out of the vault (deposit and root claims)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lots_deposited",
+            "docs": [
+              "Lots deposited over the window (one unit each)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lots_refunded",
+            "docs": [
+              "Lots refunded after a cancellation; equal to `lots_deposited` before",
+              "a cancelled migration may close."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "opens_at",
+            "docs": [
+              "The deposit window `[opens_at, closes_at)`."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "closes_at",
+            "type": "i64"
+          },
+          {
+            "name": "claim_deadline",
+            "docs": [
+              "From here on an Admin may close and return unclaimed units."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "terms_hash",
+            "docs": [
+              "sha256 of the off-chain migration terms holders accept."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "MigrationStatus"
+              }
+            }
+          },
+          {
+            "name": "merkle_total",
+            "docs": [
+              "Total units the published root entitles (0 before publication)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "merkle_claimed",
+            "docs": [
+              "Units claimed against the root (≤ `merkle_total`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "escrow_bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "merkle_root",
+            "docs": [
+              "Merkle root of `(claimer, units)` leaves (`util::snapshot_leaf`) for",
+              "off-chain locks; published at most once. Last: its tag moves nothing."
+            ],
+            "type": {
+              "option": {
+                "array": [
+                  "u8",
+                  32
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationCancelled",
+      "docs": [
+        "Emitted by `cancel_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "lots_deposited",
+            "docs": [
+              "Lots that must be refunded before the migration can close."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationClaimed",
+      "docs": [
+        "Emitted by `claim_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "units",
+            "type": "u64"
+          },
+          {
+            "name": "units_claimed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationClosed",
+      "docs": [
+        "Emitted by `close_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "return_to",
+            "type": "pubkey"
+          },
+          {
+            "name": "units_returned",
+            "docs": [
+              "Units moved from the vault to `return_to`'s token account."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "old_burned",
+            "docs": [
+              "Old-token base units burned from the escrow."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "rent_to",
+            "docs": [
+              "The creating Admin, who received the closed accounts' rent."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationCreated",
+      "docs": [
+        "Emitted by `create_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_token_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "return_to",
+            "type": "pubkey"
+          },
+          {
+            "name": "migration_id",
+            "type": "u64"
+          },
+          {
+            "name": "lot",
+            "type": "u64"
+          },
+          {
+            "name": "units_cap",
+            "type": "u64"
+          },
+          {
+            "name": "opens_at",
+            "type": "i64"
+          },
+          {
+            "name": "closes_at",
+            "type": "i64"
+          },
+          {
+            "name": "claim_deadline",
+            "type": "i64"
+          },
+          {
+            "name": "terms_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationDeposit",
+      "docs": [
+        "One holder's deposit into a migration, cumulative over the window. Seeds:",
+        "`[\"mig_dep\", migration, holder]`. Layout: migration 8, holder 40, lots 72,",
+        "claimed 80, refunded 81, bump 82; 83 B."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "lots",
+            "docs": [
+              "Lots deposited; the holder claims exactly this many units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "claimed",
+            "type": "bool"
+          },
+          {
+            "name": "refunded",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationDepositRefunded",
+      "docs": [
+        "Emitted by `refund_migration_deposit`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "lots",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationDeposited",
+      "docs": [
+        "Emitted by `deposit_migration`; `holder_lots` is the holder's total."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "lots",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Old-token base units moved into the escrow (`lots * lot`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "holder_lots",
+            "type": "u64"
+          },
+          {
+            "name": "units_committed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationFinalized",
+      "docs": [
+        "Emitted by `finalize_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "lots_deposited",
+            "type": "u64"
+          },
+          {
+            "name": "units_committed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationFunded",
+      "docs": [
+        "Emitted by `fund_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "funder",
+            "type": "pubkey"
+          },
+          {
+            "name": "units",
+            "type": "u64"
+          },
+          {
+            "name": "units_funded",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationOpened",
+      "docs": [
+        "Emitted by `open_migration`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationProofClaim",
+      "docs": [
+        "A claim against a migration's root (off-chain lock); its existence stops",
+        "a second claim by the same key. Seeds: `[\"mig_claim\", migration, claimer]`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "claimer",
+            "type": "pubkey"
+          },
+          {
+            "name": "units",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationProofClaimed",
+      "docs": [
+        "Emitted by `claim_migration_proof`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "claimer",
+            "type": "pubkey"
+          },
+          {
+            "name": "units",
+            "type": "u64"
+          },
+          {
+            "name": "merkle_claimed",
+            "type": "u64"
+          },
+          {
+            "name": "units_claimed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationRootPublished",
+      "docs": [
+        "Emitted by `publish_migration_root`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "migration",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_units",
+            "type": "u64"
+          },
+          {
+            "name": "units_committed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MigrationStatus",
+      "docs": [
+        "Lifecycle of a `Migration`: Draft → Open → Claimable → Closed, or",
+        "Draft / Open → Cancelled → Closed. Variants are only ever appended."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Draft"
+          },
+          {
+            "name": "Open"
+          },
+          {
+            "name": "Cancelled"
+          },
+          {
+            "name": "Claimable"
+          },
+          {
+            "name": "Closed"
           }
         ]
       }
