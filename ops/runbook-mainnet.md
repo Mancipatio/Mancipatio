@@ -4596,7 +4596,7 @@ public.fee_charges_guard();` (the front then reads "nothing published").
 After a publication or a charge, keep the tables (they are the price and
 billing history): retire prices and waive charges instead.
 
-## 24. Certificates for authorities
+## 25. Certificates for authorities
 
 The product version of the confirmation made by hand on 2026-10-04
 (`MANCI-2026-0001`, a PDF signed with the operator's key): the Super Admin
