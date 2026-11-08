@@ -1,8 +1,10 @@
 // Migration 0085 (token migrations, V1) on an isolated PostgreSQL with the
 // whole migration chain: the ratio and window CHECKs, the campaign and
-// deposit lifecycle guards, the units cap under concurrent recording, the
-// atomic delivery that never reuses a signature, the refund-once index, the
-// write-once final report and burn, and service-role-only access.
+// deposit lifecycle guards, the opening slot and one-campaign-per-deposit-
+// account rules, the units cap under concurrent recording, the atomic
+// delivery and refund functions that never reuse a signature, the
+// write-once final report and burn (only once everything is settled), and
+// service-role-only access.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
 import { applyMigrations, SUPABASE_PLATFORM_SQL } from "./helpers/migrations";
@@ -10,17 +12,23 @@ import { applyMigrations, SUPABASE_PLATFORM_SQL } from "./helpers/migrations";
 const db = new LocalPostgres();
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const addr = (c: string) => c.repeat(32);
+function base58Of(n: number, width: number, pad: string): string {
+  let out = "";
+  while (n > 0) { out = BASE58[n % 58] + out; n = Math.floor(n / 58); }
+  return out.padStart(width, pad);
+}
 let sigN = 0;
 /** A distinct, well-formed signature: signatures are unique per network across every test. */
 const sig = (_label?: string) => {
   void _label;
-  sigN += 1;
-  let n = sigN;
-  let out = "";
-  while (n > 0) { out = BASE58[n % 58] + out; n = Math.floor(n / 58); }
-  return out.padStart(88, "2");
+  return base58Of(++sigN, 88, "2");
 };
+let ataN = 0;
+/** A distinct deposit account: one campaign per deposit account, for good. */
+const freshAta = () => base58Of(++ataN, 44, "3");
 const LOT = 5000;
+const OPENED_SLOT = 100;
+const SLOT = 123;
 
 let slugN = 0;
 /** A draft of the report's worked example (1e9 total, 4e8 excluded, E 12 %, G 1e6 → lot 5,000, cap 120,000). */
@@ -51,7 +59,7 @@ function draft(over: Record<string, string> = {}): string {
     source: "'founder_transfer'",
     unclaimed_policy: "'return_to_source'",
     deposit_owner: `'${addr("8")}'`,
-    deposit_ata: `'${addr(BASE58[slugN % 58])}'`,
+    deposit_ata: `'${freshAta()}'`,
     window_opens_at: "now() - interval '1 day'",
     window_closes_at: "now() + interval '74 days'",
     treasury_wallet: `'${addr("9")}'`,
@@ -65,17 +73,25 @@ function draft(over: Record<string, string> = {}): string {
 }
 const create = (over: Record<string, string> = {}) => db.query(draft(over));
 const status = (id: string) => db.query(`select status from public.token_migrations where id='${id}'`);
-const setStatus = (id: string, to: string) => db.query(`set role service_role; update public.token_migrations set status='${to}' where id='${id}'`);
-function deposit(id: string, tx: string, lots: number | null, opts: { reason?: string; holder?: string; amount?: number } = {}) {
+/** Moves the campaign; opening also sets its opening slot, as the route does. */
+const setStatus = (id: string, to: string) =>
+  db.query(`set role service_role; update public.token_migrations set status='${to}'${to === "open" ? `, opened_slot=${OPENED_SLOT}` : ""} where id='${id}'`);
+function deposit(id: string, tx: string, lots: number | null, opts: { reason?: string; holder?: string; amount?: number; slot?: number } = {}) {
   const amount = opts.amount ?? (lots ?? 1) * LOT;
   return JSON.parse(db.query(`set role service_role; select public.record_token_migration_deposit(
-    '${id}', '${opts.holder ?? addr("b")}', '${tx}', 123, now(), ${amount}, ${lots ?? "null"},
+    '${id}', '${opts.holder ?? addr("b")}', '${tx}', ${opts.slot ?? SLOT}, now(), ${amount}, ${lots ?? "null"},
     ${opts.reason ? `'${opts.reason}'` : "null"}, ${opts.reason ? "'test reason'" : "null"}, 'holder')`)) as {
     created: boolean; id: string; status: string; reason_code: string | null; units_due: string;
   };
 }
-function deliver(id: string, tx: string, ids: string[]) {
-  return JSON.parse(db.query(`set role service_role; select public.record_token_migration_delivery('${id}', '${tx}', array[${ids.map((x) => `'${x}'::uuid`).join(",")}])`)) as {
+const ids = (list: string[]) => `array[${list.map((x) => `'${x}'::uuid`).join(",")}]`;
+function deliver(id: string, tx: string, list: string[]) {
+  return JSON.parse(db.query(`set role service_role; select public.record_token_migration_delivery('${id}', '${tx}', ${ids(list)})`)) as {
+    created: boolean; count: number;
+  };
+}
+function refund(id: string, tx: string, list: string[]) {
+  return JSON.parse(db.query(`set role service_role; select public.record_token_migration_refund('${id}', '${tx}', ${ids(list)})`)) as {
     created: boolean; count: number;
   };
 }
@@ -103,8 +119,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
       expect(() => db.query(`set role service_role; delete from public.${table}`)).toThrow(/permission denied/);
     }
     for (const role of ["anon", "authenticated"]) {
-      expect(() => db.query(`set role ${role}; select public.record_token_migration_delivery('${id}', '${sig("c")}', array['${id}'::uuid])`)).toThrow(/permission denied/);
-      expect(() => db.query(`set role ${role}; select public.record_token_migration_deposit('${id}','${addr("b")}','${sig("c")}',1,now(),5000,1,null,null,'holder')`)).toThrow(/permission denied/);
+      expect(() => db.query(`set role ${role}; select public.record_token_migration_delivery('${id}', '${sig()}', array['${id}'::uuid])`)).toThrow(/permission denied/);
+      expect(() => db.query(`set role ${role}; select public.record_token_migration_refund('${id}', '${sig()}', array['${id}'::uuid])`)).toThrow(/permission denied/);
+      expect(() => db.query(`set role ${role}; select public.record_token_migration_deposit('${id}','${addr("b")}','${sig()}',${SLOT},now(),5000,1,null,null,'holder')`)).toThrow(/permission denied/);
     }
   });
 
@@ -124,19 +141,23 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     create({ slug: "'twice'" });
     expect(() => create({ slug: "'twice'" })).toThrow(/duplicate key/);
     expect(() => create({ status: "'open'" })).toThrow(/bare draft/);
+    expect(() => create({ opened_slot: "5" })).toThrow(/bare draft/);
   });
 
-  it("moves through its lifecycle, stamps each step and freezes the published terms once open", () => {
+  it("moves through its lifecycle, stamps each step and freezes the published terms and the opening slot", () => {
     const id = create({ terms_doc_sha256: "null", terms_doc_url: "null" });
-    // A draft may change and has no Terms yet; it cannot open without them.
+    // A draft may change and has no Terms yet; it cannot open without them, nor without its opening slot.
     db.query(`set role service_role; update public.token_migrations set company_name='Acme a.d.' where id='${id}'`);
     expect(() => setStatus(id, "open")).toThrow(/check constraint/);
     db.query(`set role service_role; update public.token_migrations set terms_doc_sha256='${"cd".repeat(32)}', terms_doc_url='https://example.com/t.pdf' where id='${id}'`);
+    expect(() => db.query(`set role service_role; update public.token_migrations set status='open' where id='${id}'`)).toThrow(/check constraint/);
+    expect(() => db.query(`set role service_role; update public.token_migrations set opened_slot=7 where id='${id}'`)).toThrow(/set when the token migration opens/);
     setStatus(id, "open");
-    expect(db.query(`select status||'|'||(opened_at is not null) from public.token_migrations where id='${id}'`)).toBe("open|true");
+    expect(db.query(`select status||'|'||(opened_at is not null)||'|'||opened_slot from public.token_migrations where id='${id}'`)).toBe(`open|true|${OPENED_SLOT}`);
     for (const change of ["equity_bps=1100, units_cap=110000, lot_base_units=5000", "terms_doc_url='https://example.com/other.pdf'", "treasury_wallet='" + addr("c") + "'", "window_closes_at=window_closes_at + interval '1 day'"]) {
       expect(() => db.query(`set role service_role; update public.token_migrations set ${change} where id='${id}'`), change).toThrow(/frozen|check constraint/);
     }
+    expect(() => db.query(`set role service_role; update public.token_migrations set opened_slot=1 where id='${id}'`)).toThrow(/never changes/);
     expect(() => setStatus(id, "completed")).toThrow(/illegal token migration status transition: open -> completed/);
     expect(() => setStatus(id, "draft")).toThrow(/illegal/);
     setStatus(id, "closed");
@@ -148,39 +169,44 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     expect(() => db.query(`delete from public.token_migrations where id='${id}'`)).toThrow(/Only a draft/);
   });
 
-  it("allows one live campaign per deposit account", () => {
-    const ata = `'${addr("Z")}'`;
+  it("gives a deposit account to one campaign for good", () => {
+    const ata = `'${freshAta()}'`;
     const a = create({ deposit_ata: ata });
     const b = create({ deposit_ata: ata });
     setStatus(a, "open");
     expect(() => setStatus(b, "open")).toThrow(/duplicate key/);
+    // Cancelled, the first campaign keeps the account: a re-run needs a fresh deposit owner.
     setStatus(a, "cancelled");
-    setStatus(b, "open");
-    expect(status(b)).toBe("open");
+    expect(() => setStatus(b, "open")).toThrow(/duplicate key/);
+    // A draft that never opened can still be cancelled.
+    setStatus(b, "cancelled");
+    expect(status(b)).toBe("cancelled");
   });
 
-  it("records deposits under the campaign lock: accepted, irregular, over the cap, idempotent", () => {
+  it("records deposits under the campaign lock: accepted, irregular, over the cap, idempotent, never before the opening", () => {
     const id = create({ units_cap: "120000" });
-    expect(() => deposit(id, sig("d"), 1)).toThrow(/MIGRATION_NOT_RECORDING/);
+    expect(() => deposit(id, sig(), 1)).toThrow(/MIGRATION_NOT_RECORDING/);
     setStatus(id, "open");
+    expect(() => deposit(id, sig(), 1, { slot: OPENED_SLOT - 1 })).toThrow(/DEPOSIT_BEFORE_OPENING/);
+    expect(deposit(id, sig(), 1, { slot: OPENED_SLOT })).toMatchObject({ created: true, status: "accepted" });
     const txE = sig();
     const first = deposit(id, txE, 2);
     expect(first).toMatchObject({ created: true, status: "accepted", reason_code: null, units_due: "2" });
     expect(deposit(id, txE, 2)).toMatchObject({ created: false, id: first.id, status: "accepted" });
-    const late = deposit(id, sig("f"), null, { reason: "outside_window" });
+    const late = deposit(id, sig(), null, { reason: "outside_window" });
     expect(late).toMatchObject({ created: true, status: "irregular", reason_code: "outside_window", units_due: "0" });
-    // 2 accepted so far: 119,998 more fit, the next one does not.
-    expect(deposit(id, sig("g"), 119_998)).toMatchObject({ status: "accepted", units_due: "119998" });
-    expect(deposit(id, sig("h"), 1)).toMatchObject({ status: "irregular", reason_code: "over_cap", units_due: "0" });
-    expect(() => deposit(id, sig("i"), 3, { amount: 3 * LOT + 1 })).toThrow(/INVALID_DEPOSIT_ARGUMENTS/);
-    expect(() => deposit("00000000-0000-4000-8000-000000000000", sig("j"), 1)).toThrow(/MIGRATION_NOT_FOUND/);
-    // The trigger holds the cap and the lifecycle under a direct write too.
-    expect(() => db.query(`set role service_role; insert into public.token_migration_deposits
-      (migration_id, holder_wallet, deposit_tx, deposit_slot, block_time, amount_base, units_due, status, recorded_via)
-      values ('${id}', '${addr("b")}', '${sig("k")}', 1, now(), ${LOT}, 1, 'accepted', 'holder')`)).toThrow(/units cap/);
-    expect(() => db.query(`set role service_role; insert into public.token_migration_deposits
-      (migration_id, holder_wallet, deposit_tx, deposit_slot, block_time, amount_base, units_due, status, delivery_tx, recorded_via)
-      values ('${id}', '${addr("b")}', '${sig("m")}', 1, now(), ${LOT}, 1, 'delivered', '${sig("n")}', 'holder')`)).toThrow(/accepted or irregular/);
+    // 3 accepted so far: 119,997 more fit, the next one does not.
+    expect(deposit(id, sig(), 119_997)).toMatchObject({ status: "accepted", units_due: "119997" });
+    expect(deposit(id, sig(), 1)).toMatchObject({ status: "irregular", reason_code: "over_cap", units_due: "0" });
+    expect(() => deposit(id, sig(), 3, { amount: 3 * LOT + 1 })).toThrow(/INVALID_DEPOSIT_ARGUMENTS/);
+    expect(() => deposit("00000000-0000-4000-8000-000000000000", sig(), 1)).toThrow(/MIGRATION_NOT_FOUND/);
+    // The trigger holds the cap, the opening slot and the lifecycle under a direct write too.
+    const insert = (columns: string, values: string) => db.query(`set role service_role; insert into public.token_migration_deposits
+      (migration_id, holder_wallet, deposit_tx, deposit_slot, block_time, amount_base, units_due, status, recorded_via${columns})
+      values ('${id}', '${addr("b")}', '${sig()}', ${values})`);
+    expect(() => insert("", `${SLOT}, now(), ${LOT}, 1, 'accepted', 'holder'`)).toThrow(/units cap/);
+    expect(() => insert(", reason_code", `${OPENED_SLOT - 1}, now(), ${LOT}, 0, 'irregular', 'holder', 'memo_mismatch'`)).toThrow(/before the token migration opened/);
+    expect(() => insert(", delivery_tx", `${SLOT}, now(), ${LOT}, 1, 'delivered', 'holder', '${sig()}'`)).toThrow(/accepted or irregular/);
     // Another campaign cannot claim a recorded signature.
     const other = create();
     setStatus(other, "open");
@@ -191,7 +217,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     const id = create({ old_total_supply: "1000000000", excluded_wallet_amount: "0", excluded_manual_amount: "999950000", excluded_amount: "999950000", equity_bps: "1", granularity: "100000", lot_base_units: "5000", units_cap: "10" });
     setStatus(id, "open");
     const calls = Array.from({ length: 12 }, () => db.queryAsync(`set role service_role; select public.record_token_migration_deposit(
-      '${id}', '${addr("b")}', '${sig()}', 1, now(), ${LOT}, 1, null, null, 'holder')->>'status'`));
+      '${id}', '${addr("b")}', '${sig()}', ${SLOT}, now(), ${LOT}, 1, null, null, 'holder')->>'status'`));
     const results = await Promise.all(calls);
     expect(results.filter((r) => r === "accepted")).toHaveLength(10);
     expect(results.filter((r) => r === "irregular")).toHaveLength(2);
@@ -201,9 +227,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
   it("delivers atomically and never reuses a delivery signature", () => {
     const id = create();
     setStatus(id, "open");
-    const a = deposit(id, sig("o"), 1);
-    const b = deposit(id, sig("p"), 2);
-    const c = deposit(id, sig("q"), null, { reason: "memo_mismatch" });
+    const a = deposit(id, sig(), 1);
+    const b = deposit(id, sig(), 2);
+    const c = deposit(id, sig(), null, { reason: "memo_mismatch" });
     const txR = sig();
     expect(deliver(id, txR, [a.id])).toEqual({ created: true, count: 1 });
     expect(depositStatus(a.id)).toBe(`delivered|${txR}|`);
@@ -211,79 +237,106 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0085 token migrat
     expect(deliver(id, txR, [a.id])).toEqual({ created: false, count: 1 });
     expect(() => deliver(id, txR, [b.id])).toThrow(/DELIVERY_TX_ALREADY_RECORDED/);
     // All or nothing: an irregular deposit in the list leaves the accepted one untouched.
-    expect(() => deliver(id, sig("s"), [b.id, c.id])).toThrow(/DELIVERY_DEPOSITS_NOT_ACCEPTED/);
+    expect(() => deliver(id, sig(), [b.id, c.id])).toThrow(/DELIVERY_DEPOSITS_NOT_ACCEPTED/);
     expect(depositStatus(b.id)).toBe("accepted||");
     const txT = sig();
     expect(() => deliver(id, txT, [b.id, b.id])).toThrow(/INVALID_DELIVERY_ARGUMENTS/);
     expect(deliver(id, txT, [b.id])).toEqual({ created: true, count: 1 });
     // What the chain proved never changes.
     expect(() => db.query(`set role service_role; update public.token_migration_deposits set amount_base=1 where id='${a.id}'`)).toThrow(/never changes/);
-    expect(() => db.query(`set role service_role; update public.token_migration_deposits set delivery_tx='${sig("u")}' where id='${a.id}'`)).toThrow(/only with its status/);
+    expect(() => db.query(`set role service_role; update public.token_migration_deposits set delivery_tx='${sig()}' where id='${a.id}'`)).toThrow(/only with its status/);
     expect(() => db.query(`delete from public.token_migration_deposits where id='${a.id}'`)).toThrow(/never deleted/);
   });
 
-  it("refunds an irregular deposit once; an accepted one only in a cancelled campaign", () => {
+  it("refunds one holder's irregular deposits in one transaction, never another holder's, and an accepted one only in a cancelled campaign", () => {
     const id = create();
     setStatus(id, "open");
-    const ok = deposit(id, sig("v"), 1);
-    const bad1 = deposit(id, sig("w"), null, { reason: "not_lot_multiple", amount: 1234 });
-    const bad2 = deposit(id, sig("x"), null, { reason: "excluded_wallet" });
-    const refund = (depositId: string, tx: string) =>
-      db.query(`set role service_role; update public.token_migration_deposits set status='refunded', refund_tx='${tx}' where id='${depositId}'`);
+    const ok = deposit(id, sig(), 1);
+    const dust1 = deposit(id, sig(), null, { reason: "not_lot_multiple", amount: 1 });
+    const dust2 = deposit(id, sig(), null, { reason: "not_lot_multiple", amount: 2 });
+    const someoneElse = deposit(id, sig(), null, { reason: "excluded_wallet", holder: addr("c") });
     const txY = sig();
-    refund(bad1.id, txY);
-    expect(depositStatus(bad1.id)).toBe(`refunded||${txY}`);
-    expect(() => refund(bad2.id, txY)).toThrow(/duplicate key/);
-    const txZ = sig();
-    expect(() => refund(ok.id, txZ)).toThrow(/illegal token migration deposit transition: accepted -> refunded \(campaign open\)/);
-    expect(() => db.query(`set role service_role; update public.token_migration_deposits set status='refunded', refund_tx='${sig("2")}', reason_code='over_cap' where id='${bad2.id}'`)).toThrow(/keeps the reason/);
+    expect(() => refund(id, txY, [dust1.id, someoneElse.id])).toThrow(/REFUND_DEPOSITS_NOT_REFUNDABLE/);
+    expect(refund(id, txY, [dust1.id, dust2.id])).toEqual({ created: true, count: 2 });
+    expect(depositStatus(dust2.id)).toBe(`refunded||${txY}`);
+    expect(refund(id, txY, [dust1.id, dust2.id])).toEqual({ created: false, count: 2 });
+    expect(() => refund(id, txY, [someoneElse.id])).toThrow(/REFUND_TX_ALREADY_RECORDED/);
+    // A direct write cannot stretch a refund transaction over another holder either.
+    expect(() => db.query(`set role service_role; update public.token_migration_deposits set status='refunded', refund_tx='${txY}' where id='${someoneElse.id}'`)).toThrow(/one holder of one campaign/);
+    expect(() => refund(id, sig(), [ok.id])).toThrow(/REFUND_DEPOSITS_NOT_REFUNDABLE/);
+    expect(() => db.query(`set role service_role; update public.token_migration_deposits set status='refunded', refund_tx='${sig()}', reason_code='over_cap' where id='${someoneElse.id}'`)).toThrow(/keeps the reason/);
     setStatus(id, "cancelled");
-    refund(ok.id, txZ);
+    expect(refund(id, sig(), [ok.id])).toEqual({ created: true, count: 1 });
     // A cancelled campaign records late deposits as irregular only.
-    expect(deposit(id, sig("3"), 1)).toMatchObject({ status: "irregular", reason_code: "not_open" });
+    expect(deposit(id, sig(), 1)).toMatchObject({ status: "irregular", reason_code: "not_open" });
   });
 
   it("is never cancelled once a deposit was delivered", () => {
     const id = create();
     setStatus(id, "open");
-    const a = deposit(id, sig("4"), 1);
-    deliver(id, sig("5"), [a.id]);
+    const a = deposit(id, sig(), 1);
+    deliver(id, sig(), [a.id]);
     expect(() => setStatus(id, "cancelled")).toThrow(/delivered deposits cannot be cancelled/);
     setStatus(id, "closed");
     expect(() => setStatus(id, "cancelled")).toThrow(/delivered deposits cannot be cancelled/);
   });
 
-  it("completes only with every deposit settled; the report and the burn are written once", () => {
+  it("burns only a settled campaign after the window, and a burned campaign is never cancelled", () => {
     const id = create();
     setStatus(id, "open");
-    const a = deposit(id, sig("6"), 1);
-    const b = deposit(id, sig("7"), null, { reason: "outside_window" });
-    // The burn waits for the window to end.
-    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig("8")}', old_tokens_burned=5000 where id='${id}'`)).toThrow(/closed or completed/);
+    const late = deposit(id, sig(), null, { reason: "outside_window" });
+    const burn = (tx: string) => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${tx}', old_tokens_burned=5000 where id='${id}'`);
+    expect(() => burn(sig())).toThrow(/closed or completed/);
     setStatus(id, "closed");
-    const complete = () => db.query(`set role service_role; update public.token_migrations set status='completed', final_report='{"kind":"x"}', final_report_sha256='${"ef".repeat(32)}' where id='${id}'`);
-    expect(complete).toThrow(/delivered or refunded/);
-    deliver(id, sig("9"), [a.id]);
-    db.query(`set role service_role; update public.token_migration_deposits set status='refunded', refund_tx='${sig("A")}' where id='${b.id}'`);
+    expect(() => burn(sig())).toThrow(/every deposit is delivered or refunded/);
+    refund(id, sig(), [late.id]);
+    const txB = sig();
+    burn(txB);
+    expect(() => setStatus(id, "cancelled")).toThrow(/burned cannot be cancelled/);
+    // A burn proves one campaign's burn.
+    const other = create();
+    setStatus(other, "open");
+    setStatus(other, "closed");
+    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${txB}', old_tokens_burned=5000 where id='${other}'`)).toThrow(/duplicate key/);
+  });
+
+  it("completes only with every deposit settled; the report keeps the route's time; the report and the burn are written once", () => {
+    const id = create();
+    setStatus(id, "open");
+    const a = deposit(id, sig(), 1);
+    const b = deposit(id, sig(), null, { reason: "outside_window" });
+    setStatus(id, "closed");
+    const at = "2026-11-08T12:00:00.123Z";
+    const complete = (completedAt = "now()") => db.query(`set role service_role; update public.token_migrations set status='completed', completed_at=${completedAt}, final_report='{"kind":"x"}', final_report_sha256='${"ef".repeat(32)}' where id='${id}'`);
+    expect(() => complete()).toThrow(/delivered or refunded/);
+    deliver(id, sig(), [a.id]);
+    refund(id, sig(), [b.id]);
     // The report comes with the completion, never before it or without it.
     expect(() => db.query(`set role service_role; update public.token_migrations set final_report='{}', final_report_sha256='${"ef".repeat(32)}' where id='${id}'`)).toThrow(/written once/);
     expect(() => setStatus(id, "completed")).toThrow(/check constraint/);
-    complete();
-    expect(db.query(`select status||'|'||(completed_at is not null)||'|'||final_report_sha256 from public.token_migrations where id='${id}'`)).toBe(`completed|true|${"ef".repeat(32)}`);
+    // An implausible completion time is replaced by the database clock; a current one is kept.
+    complete(`'${at}'`);
+    expect(db.query(`select status||'|'||(completed_at > now() - interval '1 minute')||'|'||final_report_sha256 from public.token_migrations where id='${id}'`)).toBe(`completed|true|${"ef".repeat(32)}`);
+    const kept = create();
+    setStatus(kept, "open");
+    setStatus(kept, "closed");
+    const now = db.query("select to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')");
+    db.query(`set role service_role; update public.token_migrations set status='completed', completed_at='${now}', final_report='{}', final_report_sha256='${"ef".repeat(32)}' where id='${kept}'`);
+    expect(db.query(`select to_char(completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') from public.token_migrations where id='${kept}'`)).toBe(now);
     expect(() => db.query(`set role service_role; update public.token_migrations set final_report='{"kind":"y"}' where id='${id}'`)).toThrow(/written once/);
-    db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig("B")}', old_tokens_burned=5000 where id='${id}'`);
-    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig("C")}', old_tokens_burned=5000 where id='${id}'`)).toThrow(/recorded once/);
-    // A draft records no burn (and a burn always names its amount).
-    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig("D")}', old_tokens_burned=1 where id='${create()}'`)).toThrow(/closed or completed/);
-    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig("D")}' where id='${id}'`)).toThrow(/recorded once|check constraint/);
+    db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig()}', old_tokens_burned=5000 where id='${id}'`);
+    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig()}', old_tokens_burned=5000 where id='${id}'`)).toThrow(/recorded once/);
+    // A draft records no burn, and the reconcile cursor does not move on a completed campaign.
+    expect(() => db.query(`set role service_role; update public.token_migrations set old_tokens_burn_tx='${sig()}', old_tokens_burned=1 where id='${create()}'`)).toThrow(/closed or completed/);
+    expect(() => db.query(`set role service_role; update public.token_migrations set reconcile_cursor='${sig()}' where id='${id}'`)).toThrow(/reconcile cursor/);
     // No deposit can be recorded on a completed campaign.
-    expect(() => deposit(id, sig("E"), 1)).toThrow(/MIGRATION_NOT_RECORDING/);
+    expect(() => deposit(id, sig(), 1)).toThrow(/MIGRATION_NOT_RECORDING/);
   });
 
   it("cannot be redirected through caller-controlled search_path objects", () => {
     const id = create();
     setStatus(id, "open");
     expect(db.query(`create temp table token_migration_deposits (id uuid); set search_path=pg_temp;
-      select public.record_token_migration_deposit('${id}', '${addr("b")}', '${sig("F")}', 1, now(), ${LOT}, 1, null, null, 'holder')->>'status'`)).toBe("accepted");
+      select public.record_token_migration_deposit('${id}', '${addr("b")}', '${sig()}', ${SLOT}, now(), ${LOT}, 1, null, null, 'holder')->>'status'`)).toBe("accepted");
   });
 });

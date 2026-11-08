@@ -28,7 +28,15 @@
 --   record_token_migration_delivery  marks accepted deposits delivered by one
 --                             transaction, atomically; a delivery signature is
 --                             never reused for other deposits
+--   record_token_migration_refund    the same for refunds: one transaction may
+--                             return several deposits of ONE holder (dust
+--                             spread over many transfers costs one refund),
+--                             never deposits of another holder or campaign
 --
+-- A deposit account belongs to one campaign for good (a unique index over
+-- every campaign that ever opened: a re-run needs a fresh deposit owner), and
+-- nothing that reached it before the campaign opened counts (opened_slot:
+-- the finalized slot read when it opened; earlier transfers are refused).
 -- Both tables are service-role only (RLS on, no policy): every write goes
 -- through the signed routes under app/api/token-migrations, and the public
 -- pages read an aggregate through the server (wallets, amounts and
@@ -44,6 +52,7 @@
 -- create or replace throughout.
 --
 -- Rollback (not a migration; only while no campaign has opened):
+--   drop function public.record_token_migration_refund(uuid, text, uuid[]);
 --   drop function public.record_token_migration_delivery(uuid, text, uuid[]);
 --   drop function public.record_token_migration_deposit(uuid, text, text, bigint, timestamptz, numeric, numeric, text, text, text);
 --   drop table public.token_migration_deposits; drop table public.token_migrations;
@@ -110,6 +119,17 @@ create table if not exists public.token_migrations (
   old_tokens_burned numeric(39, 0) check (old_tokens_burned is null or old_tokens_burned >= 1),
   created_by text not null check (created_by ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
   updated_by text check (updated_by is null or updated_by ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
+  -- The finalized slot read when the campaign opened: no transfer before it is a deposit.
+  opened_slot bigint check (opened_slot is null or opened_slot >= 0),
+  -- The operator's reconcile sweeps the deposit account's history backwards,
+  -- a bounded amount per run: reconcile_cursor is the newest signature of the
+  -- last completed sweep (it and everything older down to the opening slot
+  -- was examined); a sweep in progress covers reconcile_sweep_top (the newest
+  -- signature when it started) down to reconcile_sweep_before (the oldest
+  -- examined so far), and the next run continues below it.
+  reconcile_cursor text check (reconcile_cursor is null or reconcile_cursor ~ '^[1-9A-HJ-NP-Za-km-z]{64,96}$'),
+  reconcile_sweep_top text check (reconcile_sweep_top is null or reconcile_sweep_top ~ '^[1-9A-HJ-NP-Za-km-z]{64,96}$'),
+  reconcile_sweep_before text check (reconcile_sweep_before is null or reconcile_sweep_before ~ '^[1-9A-HJ-NP-Za-km-z]{64,96}$'),
   opened_at timestamptz,
   closed_at timestamptz,
   completed_at timestamptz,
@@ -125,12 +145,18 @@ create table if not exists public.token_migrations (
   check (lot_base_units * floor(equity_bps::numeric * granularity / 10000) >= old_total_supply - excluded_amount),
   check (status = 'draft' or status = 'cancelled' or (terms_doc_sha256 is not null and terms_doc_url is not null)),
   check ((status = 'completed') = (final_report is not null and final_report_sha256 is not null)),
-  check ((old_tokens_burn_tx is null) = (old_tokens_burned is null))
+  check ((old_tokens_burn_tx is null) = (old_tokens_burned is null)),
+  check ((opened_at is null) = (opened_slot is null)),
+  check ((reconcile_sweep_top is null) = (reconcile_sweep_before is null))
 );
--- One live campaign per deposit account: deposits are told apart by the
--- account they land in.
-create unique index if not exists token_migrations_live_deposit_ata
-  on public.token_migrations (network, deposit_ata) where status in ('open', 'closed');
+-- One campaign per deposit account, for good: deposits are told apart by the
+-- account they land in, so an account a campaign ever opened on (it has an
+-- opening slot, whatever its status now) is never another campaign's.
+create unique index if not exists token_migrations_deposit_ata_once
+  on public.token_migrations (network, deposit_ata) where opened_slot is not null;
+-- A burn proves one campaign's burn.
+create unique index if not exists token_migrations_burn_once
+  on public.token_migrations (network, old_tokens_burn_tx) where old_tokens_burn_tx is not null;
 create index if not exists token_migrations_status_idx on public.token_migrations (network, status);
 alter table public.token_migrations enable row level security;
 revoke all on public.token_migrations from public, anon, authenticated, service_role;
@@ -170,8 +196,9 @@ create index if not exists token_migration_deposits_migration_idx
   on public.token_migration_deposits (migration_id, status);
 create index if not exists token_migration_deposits_holder_idx
   on public.token_migration_deposits (network, holder_wallet);
--- A refund is one deposit's transfer back: its signature proves one refund.
-create unique index if not exists token_migration_deposits_refund_once
+-- A refund transaction returns deposits of one holder of one campaign
+-- (record_token_migration_refund; the guard below refuses anything wider).
+create index if not exists token_migration_deposits_refund_idx
   on public.token_migration_deposits (network, refund_tx) where refund_tx is not null;
 create index if not exists token_migration_deposits_delivery_idx
   on public.token_migration_deposits (network, delivery_tx) where delivery_tx is not null;
@@ -185,13 +212,17 @@ grant select, insert, update on public.token_migration_deposits to service_role;
 --   closed -> completed | cancelled
 --   completed / cancelled: terminal.
 -- Once a campaign leaves draft, what it published is frozen (the old token,
--- the ratio, the deposit account, the window, the Terms, the treasury).
--- Cancelling is refused once a deposit was delivered (units left the
--- treasury: complete instead); completing is refused while a deposit is
--- still accepted or irregular. The final report is written once, on the
--- closed -> completed step, and never changes; the burn is recorded once,
--- while the campaign is closed or completed. Deleting is refused except for
--- a draft (which can hold no deposit).
+-- the ratio, the deposit account, the window, the Terms, the treasury), and
+-- so is its opening slot. Cancelling is refused once a deposit was delivered
+-- (units left the treasury: complete instead) or the collected tokens were
+-- burned (refunds would then be owed from an empty account); completing is
+-- refused while a deposit is still accepted or irregular. The final report
+-- is written once, on the closed -> completed step, and never changes; its
+-- completion time is the route's (kept when within five minutes of the
+-- database clock) so the report can be rebuilt from the row. The burn is
+-- recorded once, on a closed or completed campaign whose every deposit is
+-- settled (delivered or refunded). Deleting is refused except for a draft
+-- (which can hold no deposit).
 create or replace function public.token_migrations_guard()
 returns trigger
 language plpgsql
@@ -206,6 +237,7 @@ begin
   end if;
   if tg_op = 'INSERT' then
     if new.status <> 'draft' or new.final_report is not null or new.old_tokens_burn_tx is not null
+       or new.opened_slot is not null or new.reconcile_cursor is not null or new.reconcile_sweep_top is not null
        or new.opened_at is not null or new.closed_at is not null or new.completed_at is not null or new.cancelled_at is not null then
       raise exception 'A token migration starts as a bare draft' using errcode = '23514';
     end if;
@@ -230,6 +262,9 @@ begin
     ) then
       raise exception 'A token migration with delivered deposits cannot be cancelled' using errcode = '23514';
     end if;
+    if new.status = 'cancelled' and old.old_tokens_burn_tx is not null then
+      raise exception 'A token migration whose collected tokens were burned cannot be cancelled' using errcode = '23514';
+    end if;
     if new.status = 'completed' and exists (
       select 1 from public.token_migration_deposits d where d.migration_id = old.id and d.status in ('accepted', 'irregular')
     ) then
@@ -238,7 +273,13 @@ begin
     case new.status
       when 'open' then new.opened_at := pg_catalog.clock_timestamp();
       when 'closed' then new.closed_at := pg_catalog.clock_timestamp();
-      when 'completed' then new.completed_at := pg_catalog.clock_timestamp();
+      when 'completed' then
+        -- The route's completion time, which the final report states, when it is plausible.
+        if new.completed_at is null
+           or new.completed_at not between pg_catalog.clock_timestamp() - interval '5 minutes'
+                                   and pg_catalog.clock_timestamp() + interval '5 minutes' then
+          new.completed_at := pg_catalog.clock_timestamp();
+        end if;
       when 'cancelled' then new.cancelled_at := pg_catalog.clock_timestamp();
       else null;
     end case;
@@ -247,6 +288,12 @@ begin
     new.closed_at := old.closed_at;
     new.completed_at := old.completed_at;
     new.cancelled_at := old.cancelled_at;
+  end if;
+  if old.opened_slot is not null and new.opened_slot is distinct from old.opened_slot then
+    raise exception 'The opening slot of a token migration never changes' using errcode = '23514';
+  end if;
+  if new.opened_slot is distinct from old.opened_slot and not (old.status = 'draft' and new.status = 'open') then
+    raise exception 'The opening slot is set when the token migration opens' using errcode = '23514';
   end if;
   if old.status <> 'draft' and (
     new.slug, new.company_name, new.issuer_pda, new.asset_pda, new.share_class_pda, new.new_mint,
@@ -276,6 +323,16 @@ begin
     if new.status not in ('closed', 'completed') then
       raise exception 'The burn is recorded after the window, on a closed or completed token migration' using errcode = '23514';
     end if;
+    if exists (
+      select 1 from public.token_migration_deposits d where d.migration_id = old.id and d.status in ('accepted', 'irregular')
+    ) then
+      raise exception 'The burn is recorded once every deposit is delivered or refunded' using errcode = '23514';
+    end if;
+  end if;
+  if (new.reconcile_cursor, new.reconcile_sweep_top, new.reconcile_sweep_before)
+       is distinct from (old.reconcile_cursor, old.reconcile_sweep_top, old.reconcile_sweep_before)
+     and new.status not in ('open', 'closed', 'cancelled') then
+    raise exception 'The reconcile cursor moves only while deposits are recorded' using errcode = '23514';
   end if;
   new.updated_at := greatest(pg_catalog.clock_timestamp(), old.updated_at + interval '1 microsecond');
   return new;
@@ -288,14 +345,16 @@ create trigger token_migrations_guard before insert or update or delete on publi
 
 -- ── 4. Deposit lifecycle guard ────────────────────────────────────────────
 --   insert: only into an open, closed or cancelled campaign of the same
---           network, as accepted or irregular (a cancelled campaign takes
---           irregular rows only: they are refunded); the campaign row is
---           locked, so concurrent inserts are serialized and the accepted
---           and delivered units can never pass the units cap
+--           network, at or after its opening slot, as accepted or irregular
+--           (a cancelled campaign takes irregular rows only: they are
+--           refunded); the campaign row is locked, so concurrent inserts are
+--           serialized and the accepted and delivered units can never pass
+--           the units cap
 --   accepted  -> delivered | refunded (refunded only in a cancelled campaign)
 --   irregular -> refunded
 --   delivered / refunded: terminal. What the chain proved (holder, signature,
---   slot, time, amount, units) never changes; rows are never deleted.
+--   slot, time, amount, units) never changes; rows are never deleted. A
+--   refund transaction returns deposits of one holder of one campaign only.
 create or replace function public.token_migration_deposits_guard()
 returns trigger
 language plpgsql
@@ -308,7 +367,7 @@ begin
   if tg_op = 'DELETE' then
     raise exception 'Token migration deposits are never deleted' using errcode = '23514';
   end if;
-  select t.id, t.network, t.status, t.units_cap, t.lot_base_units into m
+  select t.id, t.network, t.status, t.units_cap, t.lot_base_units, t.opened_slot into m
     from public.token_migrations t where t.id = new.migration_id for update;
   if not found or m.network <> new.network then
     raise exception 'Unknown token migration for this network' using errcode = '23503';
@@ -316,6 +375,9 @@ begin
   if tg_op = 'INSERT' then
     if m.status not in ('open', 'closed', 'cancelled') then
       raise exception 'This token migration does not record deposits (status %)', m.status using errcode = '23514';
+    end if;
+    if m.opened_slot is null or new.deposit_slot < m.opened_slot then
+      raise exception 'A transfer from before the token migration opened is not a deposit' using errcode = '23514';
     end if;
     if new.status not in ('accepted', 'irregular') or new.delivery_tx is not null or new.refund_tx is not null then
       raise exception 'A deposit is recorded as accepted or irregular' using errcode = '23514';
@@ -365,6 +427,13 @@ begin
   if new.status = 'refunded' and old.status = 'irregular' and new.reason_code is distinct from old.reason_code then
     raise exception 'A refund keeps the reason it was due for' using errcode = '23514';
   end if;
+  if new.refund_tx is not null and old.refund_tx is null and exists (
+    select 1 from public.token_migration_deposits d
+    where d.network = new.network and d.refund_tx = new.refund_tx and d.id <> new.id
+      and (d.migration_id <> new.migration_id or d.holder_wallet <> new.holder_wallet)
+  ) then
+    raise exception 'A refund transaction returns deposits of one holder of one campaign' using errcode = '23514';
+  end if;
   new.updated_at := greatest(pg_catalog.clock_timestamp(), old.updated_at + interval '1 microsecond');
   return new;
 end;
@@ -379,10 +448,11 @@ create trigger token_migration_deposits_guard before insert or update or delete 
 -- evidence.ts) and classified it: p_reason_code null = accepted with
 -- p_lots lots, else irregular. Here, under the campaign row's lock: a
 -- signature already recorded returns its row (idempotent; refused when it
--- belongs to another campaign); a cancelled campaign records irregular
--- 'not_open'; an accepted deposit that would pass the units cap is recorded
--- irregular 'over_cap' instead (refund due), never refused, because the
--- tokens already sit in the deposit account and must be accounted for.
+-- belongs to another campaign); a transfer from before the opening slot is
+-- refused (it is not this campaign's deposit); a cancelled campaign records
+-- irregular 'not_open'; an accepted deposit that would pass the units cap is
+-- recorded irregular 'over_cap' instead (refund due), never refused, because
+-- the tokens already sit in the deposit account and must be accounted for.
 -- Amounts come back as text (no JSON number above 2^53).
 create or replace function public.record_token_migration_deposit(
   p_migration_id uuid,
@@ -415,7 +485,7 @@ begin
      or (p_reason_code is null and (p_lots is null or p_lots < 1)) then
     raise exception 'INVALID_DEPOSIT_ARGUMENTS' using errcode = '22023';
   end if;
-  select t.id, t.network, t.status, t.units_cap, t.lot_base_units into m
+  select t.id, t.network, t.status, t.units_cap, t.lot_base_units, t.opened_slot into m
     from public.token_migrations t
     where t.id = p_migration_id and t.network = public.deployment_network()
     for update;
@@ -433,6 +503,9 @@ begin
   end if;
   if m.status not in ('open', 'closed', 'cancelled') then
     raise exception 'MIGRATION_NOT_RECORDING' using errcode = 'P0001';
+  end if;
+  if m.opened_slot is null or p_deposit_slot < m.opened_slot then
+    raise exception 'DEPOSIT_BEFORE_OPENING' using errcode = 'P0001';
   end if;
   if v_reason_code is null then
     if p_lots * m.lot_base_units <> p_amount_base then
@@ -535,6 +608,77 @@ end;
 $$;
 revoke all on function public.record_token_migration_delivery(uuid, text, uuid[]) from public, anon, authenticated, service_role;
 grant execute on function public.record_token_migration_delivery(uuid, text, uuid[]) to service_role;
+
+-- ── 7. Recording a refund ─────────────────────────────────────────────────
+-- The route verified that the finalized transaction returned exactly these
+-- deposits' total from the deposit account to the wallet that made them
+-- (lib/token-migration/evidence.ts refundEvidence). Here, atomically and like
+-- a delivery: the signature is locked; one already recorded for exactly
+-- these deposits answers "already", one recorded for any other deposit is
+-- refused; every listed deposit must be refundable in this campaign
+-- (irregular, or accepted in a cancelled campaign) and belong to ONE holder,
+-- or nothing is written. One transaction can so settle a holder's many small
+-- irregular deposits at once.
+create or replace function public.record_token_migration_refund(
+  p_migration_id uuid,
+  p_refund_tx text,
+  p_deposit_ids uuid[]
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  m record;
+  requested uuid[];
+  recorded uuid[];
+  holders integer;
+  changed integer;
+begin
+  if p_migration_id is null or p_refund_tx is null or p_refund_tx !~ '^[1-9A-HJ-NP-Za-km-z]{64,96}$'
+     or p_deposit_ids is null or cardinality(p_deposit_ids) not between 1 and 100 then
+    raise exception 'INVALID_REFUND_ARGUMENTS' using errcode = '22023';
+  end if;
+  select array_agg(x order by x) into requested from (select distinct unnest(p_deposit_ids) as x) ids;
+  if cardinality(requested) <> cardinality(p_deposit_ids) then
+    raise exception 'INVALID_REFUND_ARGUMENTS' using errcode = '22023';
+  end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('token_migration_refund:' || p_refund_tx, 0));
+  select t.id, t.network, t.status into m
+    from public.token_migrations t
+    where t.id = p_migration_id and t.network = public.deployment_network()
+    for update;
+  if not found then
+    raise exception 'MIGRATION_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  select array_agg(d.id order by d.id) into recorded from public.token_migration_deposits d
+    where d.network = m.network and d.refund_tx = p_refund_tx;
+  if recorded is not null then
+    if recorded = requested then
+      return jsonb_build_object('created', false, 'count', cardinality(recorded));
+    end if;
+    raise exception 'REFUND_TX_ALREADY_RECORDED' using errcode = 'P0001';
+  end if;
+  if m.status not in ('open', 'closed', 'cancelled') then
+    raise exception 'MIGRATION_NOT_REFUNDING' using errcode = 'P0001';
+  end if;
+  select count(distinct d.holder_wallet) into holders from public.token_migration_deposits d
+    where d.migration_id = m.id and d.id = any(requested);
+  if holders <> 1 then
+    raise exception 'REFUND_DEPOSITS_NOT_REFUNDABLE' using errcode = 'P0001';
+  end if;
+  update public.token_migration_deposits d set status = 'refunded', refund_tx = p_refund_tx
+    where d.migration_id = m.id and d.id = any(requested)
+      and (d.status = 'irregular' or (d.status = 'accepted' and m.status = 'cancelled'));
+  get diagnostics changed = row_count;
+  if changed <> cardinality(requested) then
+    raise exception 'REFUND_DEPOSITS_NOT_REFUNDABLE' using errcode = 'P0001';
+  end if;
+  return jsonb_build_object('created', true, 'count', changed);
+end;
+$$;
+revoke all on function public.record_token_migration_refund(uuid, text, uuid[]) from public, anon, authenticated, service_role;
+grant execute on function public.record_token_migration_refund(uuid, text, uuid[]) to service_role;
 
 select mancipatio_ops.install_network_guards();
 
