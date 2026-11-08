@@ -15,6 +15,7 @@ import {
 } from "@/components/mx";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { scopeEnabled } from "@/lib/features";
+import { indexingAllowed } from "@/lib/indexing";
 import { navHrefVisible, type ModuleRouteState } from "@/lib/pilot-scope";
 import { SPV_CHOICE_LABEL, SPV_COSTS, SPV_REQUIREMENTS } from "@/lib/apply-spv";
 
@@ -42,11 +43,18 @@ const PAUSED_STATE: ModuleRouteState = {
   disabled: true,
 };
 
-export const metadata: Metadata = {
-  title: "Issuing through a Serbian SPV — Manci",
-  description:
-    "For companies incorporated outside Serbia: company ownership, debt and revenue share are issued through a Serbian SPV that Manci incorporates and administers for the issuance. Third-party costs are quoted before any work starts.",
-};
+export function generateMetadata(): Metadata {
+  // As the guides of what KYC-only mode pauses: said in the description,
+  // out of search results (and lib/sitemap.ts) while paused.
+  const shown = navHrefVisible("/solutions/serbian-spv");
+  return {
+    title: "Issuing through a Serbian SPV — Manci",
+    description: shown
+      ? "For companies incorporated outside Serbia: company ownership, debt and revenue share are issued through a Serbian SPV that Manci incorporates and administers for the issuance. Third-party costs are quoted before any work starts."
+      : "Issuing through a Serbian SPV is not available at the moment.",
+    ...(!shown && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
+  };
+}
 
 export default function SerbianSpvGuidePage() {
   const paused = !scopeEnabled("issuance");

@@ -46,13 +46,15 @@ const MODULE_STATE: ModuleRouteState = {
 const WINDOW_DAYS = ESOP_PRESET.approvalWindowSecs / 86_400;
 
 export function generateMetadata(): Metadata {
-  const off = !moduleEnabled("vesting");
+  // As the /solutions/[slug] guides: a guide of a module that is off says so,
+  // stays readable by URL, and is out of search results (and lib/sitemap.ts).
+  const shown = navHrefVisible("/solutions/esop");
   return {
     title: "Employee equity (ESOP) vesting — Manci",
-    description:
-      "How a company can vest tokens to employees with a vesting series: a 12-month cliff, then monthly unlocks to month 48, where the vesting module is offered.",
-    // A guide of a module that is off stays readable by URL but out of search results.
-    ...(off && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
+    description: shown
+      ? "How a company can vest tokens to employees with a vesting series: a 12-month cliff, then monthly unlocks to month 48."
+      : "Employee equity (ESOP) vesting is not available at the moment.",
+    ...(!shown && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
 }
 

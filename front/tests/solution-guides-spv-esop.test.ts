@@ -14,7 +14,8 @@ import { KYC_ONLY_ENV, KYC_ONLY_MESSAGE, PILOT_MODULE_ENV } from "@/lib/features
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { visibleDocumentationGroups } from "@/lib/documentation";
 import EsopGuidePage, { generateMetadata as esopMetadata } from "@/app/(marketing)/solutions/esop/page";
-import SerbianSpvGuidePage from "@/app/(marketing)/solutions/serbian-spv/page";
+import SerbianSpvGuidePage, { generateMetadata as spvMetadata } from "@/app/(marketing)/solutions/serbian-spv/page";
+import { sitemapEntries } from "@/lib/sitemap";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -26,6 +27,9 @@ function network(name: "mainnet" | "devnet", opts: { kycOnly?: string; vesting?:
 }
 const hrefs = (html: string) => [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
 const docs = () => visibleDocumentationGroups().flatMap((g) => g.topics.map((t) => t.href));
+/** The sitemap of an opted-in mainnet build (lib/sitemap.ts), as paths. */
+const sitemapPaths = () => sitemapEntries({ allowed: true, network: "mainnet", origin: "https://www.manci.io" })
+  .map((entry) => entry.url.replace("https://www.manci.io", "") || "/");
 const esop = () => renderToStaticMarkup(createElement(EsopGuidePage));
 const spv = () => renderToStaticMarkup(createElement(SerbianSpvGuidePage));
 
@@ -77,13 +81,15 @@ describe("/solutions/esop", () => {
     expect(hrefs(html)).not.toContain("/issuer/vesting-series");
   });
 
-  it("is kept out of search results while the module is off (where indexing is allowed at all)", () => {
+  it("is kept out of search results and the sitemap while the module is off (where indexing is allowed at all)", () => {
     network("mainnet", { vesting: "" });
     vi.stubEnv("NEXT_PUBLIC_ALLOW_INDEXING", "true");
     vi.stubEnv("VERCEL_ENV", "production");
-    expect(esopMetadata().robots).toEqual({ index: false, follow: true });
+    expect(esopMetadata()).toMatchObject({ robots: { index: false, follow: true }, description: "Employee equity (ESOP) vesting is not available at the moment." });
+    expect(sitemapPaths()).not.toContain("/solutions/esop");
     vi.stubEnv(PILOT_MODULE_ENV.vesting, "true");
     expect(esopMetadata().robots).toBeUndefined();
+    expect(sitemapPaths()).toContain("/solutions/esop");
   });
 });
 
@@ -101,13 +107,21 @@ describe("/solutions/serbian-spv", () => {
     expect(docs()).toContain("/solutions/serbian-spv");
   });
 
-  it("KYC-only mode: Paused., no application button, out of the menus", () => {
+  it("KYC-only mode: Paused., no application button, out of the menus, the sitemap and search results", () => {
     network("mainnet", { kycOnly: "" });
     const html = spv();
     expect(html).toContain("Paused.");
     expect(hrefs(html)).not.toContain("/apply");
     expect(navHrefVisible("/solutions/serbian-spv")).toBe(false);
     expect(docs()).not.toContain("/solutions/serbian-spv");
+    vi.stubEnv("NEXT_PUBLIC_ALLOW_INDEXING", "true");
+    vi.stubEnv("VERCEL_ENV", "production");
+    expect(sitemapPaths()).not.toContain("/solutions/serbian-spv");
+    expect(spvMetadata()).toMatchObject({ robots: { index: false, follow: true }, description: "Issuing through a Serbian SPV is not available at the moment." });
+    vi.stubEnv(KYC_ONLY_ENV, "off");
+    expect(sitemapPaths()).toContain("/solutions/serbian-spv");
+    expect(spvMetadata().robots).toBeUndefined();
+    vi.stubEnv("NEXT_PUBLIC_ALLOW_INDEXING", "");
     // Devnet rehearses the mode the same way.
     network("devnet", { kycOnly: "on" });
     expect(navHrefVisible("/solutions/serbian-spv")).toBe(false);
