@@ -111,6 +111,8 @@ export const KYC_ONLY_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/issuer/assets", modules: ["issuance"], mode: "notice" },
   { prefix: "/issuer/launchpad", modules: ["primarySales", "issuance"], mode: "notice" },
   { prefix: "/issuer/payouts", modules: ["issuance"], mode: "notice" },
+  // Investor relations: composing pauses; reading, discarding and withdrawing stay.
+  { prefix: "/issuer/updates", modules: ["issuance"], mode: "notice" },
 ];
 
 /** KYC-only mode: guides of what it pauses leave every menu (the pages stay, without a notice). */
