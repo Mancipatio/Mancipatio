@@ -597,6 +597,134 @@ from jsonb_to_recordset($manci_knowledge_drafts$
         "date": "2026-11-08"
       }
     ]
+  },
+  {
+    "id": "token-migration-overview",
+    "title": "Can a company bring its existing token holders to Manci?",
+    "category": "answer",
+    "keywords": [
+      "token migration",
+      "migrate a token",
+      "existing token",
+      "token swap",
+      "exchange token",
+      "token holders",
+      "community",
+      "share class",
+      "units",
+      "lot",
+      "ratio",
+      "opt-in window",
+      "Swap Terms",
+      "SPL token",
+      "Token-2022",
+      "Solana",
+      "company shares",
+      "migracija tokena"
+    ],
+    "body": "Where Manci offers a token migration campaign, a company that already issued a token on Solana can give that token's holders units of its share class on Manci. The company's shareholders decide what share of the company goes to the holders, and the campaign publishes a fixed ratio: one unit for every lot of the old token. The lot is rounded up to a round number, so the units can never add up to more than the shareholders decided. Holders opt in during a window of 60 to 90 days by depositing whole lots from their own wallet; Manci's operator then sends their units from the company's treasury wallet to the same wallet. Each campaign has its own Swap Terms, published with their SHA-256 hash, which set the ratio, the window, what happens to units nobody claims and what the units represent. The exchange itself needs no identity verification; converting units into a registered ownership stake later is a separate step that requires KYC, where it is offered. Each campaign page lists every deposit and delivery as proof, and a final report with its hash once the campaign completes. A campaign is not investment advice and does not promise any value.",
+    "sources": [
+      {
+        "title": "Token migrations",
+        "href": "/migrations"
+      }
+    ],
+    "provenance": [
+      {
+        "title": "Pull request #90: Token migration V1: exchange an existing Solana token for Manci share-class units",
+        "section": "Assistant knowledge drafts",
+        "date": "2026-11-08"
+      },
+      {
+        "title": "Counsel review",
+        "section": "Legal wording to be confirmed before publication",
+        "date": "2026-11-08"
+      }
+    ]
+  },
+  {
+    "id": "token-migration-how-to-deposit",
+    "title": "How do I exchange my tokens in a token migration campaign?",
+    "category": "procedure",
+    "keywords": [
+      "how to migrate",
+      "deposit tokens",
+      "token migration deposit",
+      "lots",
+      "memo",
+      "retry recording",
+      "my deposits",
+      "portfolio migration",
+      "wallet",
+      "sign",
+      "window",
+      "delivery",
+      "units",
+      "exchange tokens",
+      "Swap Terms"
+    ],
+    "body": "1. Open the campaign under Token migrations and read its Swap Terms: the ratio (one unit per lot), the window dates and the rules for deposits.\n2. Connect the wallet that holds the old token and open Migrate a token in your portfolio, where it is offered. The page shows your balance and how many whole lots you can deposit.\n3. Choose the number of lots. Manci checks the campaign, your wallet and that you accepted the Terms in force; your wallet then asks you to sign one transaction that sends exactly that many lots to the campaign's deposit account, with a memo naming the campaign.\n4. Keep the page open until the deposit is final (usually 15 to 30 seconds) and sign once more to record it. If the page closes first, it offers Retry recording the next time; never deposit the same tokens again.\n5. Manci's operator delivers your units to the same wallet. My deposits and the campaign page show the deposit and the delivery transactions.\nDeposits cannot be withdrawn. A deposit that is not a whole number of lots, arrives outside the window, comes from an excluded wallet or exceeds the campaign's units cap is returned in full to the wallet it came from.",
+    "sources": [
+      {
+        "title": "Token migrations",
+        "href": "/migrations",
+        "section": "How a migration works"
+      }
+    ],
+    "provenance": [
+      {
+        "title": "Pull request #90: Token migration V1: exchange an existing Solana token for Manci share-class units",
+        "section": "Assistant knowledge drafts",
+        "date": "2026-11-08"
+      },
+      {
+        "title": "Counsel review",
+        "section": "Legal wording to be confirmed before publication",
+        "date": "2026-11-08"
+      }
+    ]
+  },
+  {
+    "id": "token-migration-refunds-and-proof",
+    "title": "What happens to a token migration deposit that breaks the rules, and how can I check a campaign?",
+    "category": "policy",
+    "keywords": [
+      "refund",
+      "irregular deposit",
+      "returned tokens",
+      "outside the window",
+      "not a whole lot",
+      "excluded wallet",
+      "units cap",
+      "held for review",
+      "compliance",
+      "cancelled campaign",
+      "proof",
+      "final report",
+      "SHA-256",
+      "hash",
+      "explorer",
+      "token migration"
+    ],
+    "body": "A token migration deposit earns units only when it is a whole number of lots (at least one), arrives inside the campaign's window, comes from a wallet that is not excluded, fits under the campaign's units cap and carries the campaign's memo. Any other deposit is recorded as irregular and returned in full to the wallet it came from; no units are delivered for it. A deposit from a wallet that matches a sanctions list is held for review: it is neither delivered nor returned until the compliance review concludes. If a campaign is cancelled before any unit is delivered, its accepted deposits are returned as well. Every campaign page lists each deposit with its wallet, amount, units, status and transactions, so anyone can check it on a Solana explorer. When a campaign completes, Manci publishes a final report of every deposit, delivery and refund with its SHA-256 hash: download the file and compare its hash with the one on the campaign page.",
+    "sources": [
+      {
+        "title": "Token migrations",
+        "href": "/migrations"
+      }
+    ],
+    "provenance": [
+      {
+        "title": "Pull request #90: Token migration V1: exchange an existing Solana token for Manci share-class units",
+        "section": "Assistant knowledge drafts",
+        "date": "2026-11-08"
+      },
+      {
+        "title": "Counsel review",
+        "section": "Legal wording to be confirmed before publication",
+        "date": "2026-11-08"
+      }
+    ]
   }
 ]
 $manci_knowledge_drafts$::jsonb) as seed
