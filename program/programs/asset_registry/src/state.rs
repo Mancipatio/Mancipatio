@@ -1748,6 +1748,258 @@ pub struct DistributionBatch {
     pub bump: u8,
 }
 
+// ── Token migration — program V2 ─────────────────────────────────────────────
+//
+// A trustless swap of a legacy token that lives on Solana into share-class
+// units: the issuer funds a vault with exactly `units_cap` units before the
+// window opens, holders deposit whole lots of the old token (`lot` base units
+// each) into an escrow during the window, and after it closes each depositor
+// claims one unit per lot. Off-chain locks (a future EVM lock contract) join
+// through a single Merkle root of `(claimer, units)`. Nothing is minted here:
+// every unit delivered was moved into the vault by the issuer authority, and
+// every unit not claimed by the claim deadline goes back to `return_to`. The
+// old tokens are burned when the migration closes, or refunded if it is
+// cancelled.
+//
+// Invariant (checked arithmetic on every write):
+//   units_claimed <= units_committed <= units_funded <= units_cap,
+// where units_committed = lots deposited + the root's total, and a vault that
+// holds at least units_funded - units_claimed until the close (no instruction
+// moves units out of it except a claim or the close; it carries an
+// `EscrowIdentity`, so no clawback can target it).
+
+/// Lifecycle of a `Migration`: Draft → Open → Claimable → Closed, or
+/// Draft / Open → Cancelled → Closed. Variants are only ever appended.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum MigrationStatus {
+    /// Created; the issuer authority funds the vault. No deposits.
+    Draft,
+    /// Fully funded and opened by an Admin: deposits inside the window.
+    Open,
+    /// Unwound before any claim: every deposit is refunded, then closed.
+    Cancelled,
+    /// The window closed (`finalize_migration`): depositors claim.
+    Claimable,
+    /// Terminal: unclaimed units returned, old tokens burned, escrow, vault
+    /// and identity closed. The account stays as the id-reuse guard.
+    Closed,
+}
+
+/// One migration campaign of a share class. Seeds:
+/// `["migration", share_class, migration_id LE]`. Owns the old-token escrow
+/// `["mig_escrow", migration]` and the unit vault `["mig_vault", migration]`,
+/// and carries an `EscrowIdentity` at `["escrow_marker", migration]` whose
+/// refund owner is `return_to`.
+///
+/// ⚠ Layout (pinned by a test; every offset is fixed because the only
+/// `Option` is last): share_class 8, mint 40, issuer 72, admin 104,
+/// old_mint 136, old_token_program 168, return_to 200, migration_id 232,
+/// lot 240, units_cap 248, units_funded 256, units_committed 264,
+/// units_claimed 272, lots_deposited 280, lots_refunded 288, opens_at 296,
+/// closes_at 304, claim_deadline 312, terms_hash 320, status 352,
+/// merkle_total 353, merkle_claimed 361, bump 369, escrow_bump 370,
+/// vault_bump 371, version 372, merkle_root 373; 406 B.
+#[account]
+#[derive(InitSpace)]
+pub struct Migration {
+    /// The share class whose units are delivered.
+    pub share_class: Pubkey,
+    /// The share class's Token-2022 mint (the vault's mint).
+    pub mint: Pubkey,
+    /// The share class's `Issuer` PDA; its live `authority` funds the vault
+    /// and co-signs the root.
+    pub issuer: Pubkey,
+    /// The creating Admin: paid the rent, receives it back at the close.
+    pub admin: Pubkey,
+    /// The legacy token (SPL Token or a supported Token-2022 mint).
+    pub old_mint: Pubkey,
+    /// The token program owning `old_mint` and the escrow.
+    pub old_token_program: Pubkey,
+    /// Owner of the token account that receives every unit left in the
+    /// vault at the close; also the identity's refund owner.
+    pub return_to: Pubkey,
+    pub migration_id: u64,
+    /// Old-token base units per share-class unit (≥ 1).
+    pub lot: u64,
+    /// Exactly the units the issuer must fund before the window opens.
+    pub units_cap: u64,
+    /// Units moved into the vault through `fund_migration`.
+    pub units_funded: u64,
+    /// Lots deposited plus the published root's total; ≤ `units_funded`.
+    pub units_committed: u64,
+    /// Units delivered out of the vault (deposit and root claims).
+    pub units_claimed: u64,
+    /// Lots deposited over the window (one unit each).
+    pub lots_deposited: u64,
+    /// Lots refunded after a cancellation; equal to `lots_deposited` before
+    /// a cancelled migration may close.
+    pub lots_refunded: u64,
+    /// The deposit window `[opens_at, closes_at)`.
+    pub opens_at: i64,
+    pub closes_at: i64,
+    /// From here on an Admin may close and return unclaimed units.
+    pub claim_deadline: i64,
+    /// sha256 of the off-chain migration terms holders accept.
+    pub terms_hash: [u8; 32],
+    pub status: MigrationStatus,
+    /// Total units the published root entitles (0 before publication).
+    pub merkle_total: u64,
+    /// Units claimed against the root (≤ `merkle_total`).
+    pub merkle_claimed: u64,
+    pub bump: u8,
+    pub escrow_bump: u8,
+    pub vault_bump: u8,
+    pub version: u8,
+    /// Merkle root of `(claimer, units)` leaves (`util::snapshot_leaf`) for
+    /// off-chain locks; published at most once. Last: its tag moves nothing.
+    pub merkle_root: Option<[u8; 32]>,
+}
+
+/// One holder's deposit into a migration, cumulative over the window. Seeds:
+/// `["mig_dep", migration, holder]`. Layout: migration 8, holder 40, lots 72,
+/// claimed 80, refunded 81, bump 82; 83 B.
+#[account]
+#[derive(InitSpace)]
+pub struct MigrationDeposit {
+    pub migration: Pubkey,
+    pub holder: Pubkey,
+    /// Lots deposited; the holder claims exactly this many units.
+    pub lots: u64,
+    pub claimed: bool,
+    pub refunded: bool,
+    pub bump: u8,
+}
+
+/// A claim against a migration's root (off-chain lock); its existence stops
+/// a second claim by the same key. Seeds: `["mig_claim", migration, claimer]`.
+#[account]
+#[derive(InitSpace)]
+pub struct MigrationProofClaim {
+    pub migration: Pubkey,
+    pub claimer: Pubkey,
+    pub units: u64,
+    pub bump: u8,
+}
+
+/// Emitted by `create_migration`.
+#[event]
+pub struct MigrationCreated {
+    pub migration: Pubkey,
+    pub share_class: Pubkey,
+    pub mint: Pubkey,
+    pub issuer: Pubkey,
+    pub admin: Pubkey,
+    pub issuer_authority: Pubkey,
+    pub old_mint: Pubkey,
+    pub old_token_program: Pubkey,
+    pub return_to: Pubkey,
+    pub migration_id: u64,
+    pub lot: u64,
+    pub units_cap: u64,
+    pub opens_at: i64,
+    pub closes_at: i64,
+    pub claim_deadline: i64,
+    pub terms_hash: [u8; 32],
+}
+
+/// Emitted by `fund_migration`.
+#[event]
+pub struct MigrationFunded {
+    pub migration: Pubkey,
+    pub funder: Pubkey,
+    pub units: u64,
+    pub units_funded: u64,
+}
+
+/// Emitted by `open_migration`.
+#[event]
+pub struct MigrationOpened {
+    pub migration: Pubkey,
+    pub admin: Pubkey,
+}
+
+/// Emitted by `deposit_migration`; `holder_lots` is the holder's total.
+#[event]
+pub struct MigrationDeposited {
+    pub migration: Pubkey,
+    pub holder: Pubkey,
+    pub lots: u64,
+    /// Old-token base units moved into the escrow (`lots * lot`).
+    pub amount: u64,
+    pub holder_lots: u64,
+    pub units_committed: u64,
+}
+
+/// Emitted by `cancel_migration`.
+#[event]
+pub struct MigrationCancelled {
+    pub migration: Pubkey,
+    pub admin: Pubkey,
+    /// Lots that must be refunded before the migration can close.
+    pub lots_deposited: u64,
+}
+
+/// Emitted by `refund_migration_deposit`.
+#[event]
+pub struct MigrationDepositRefunded {
+    pub migration: Pubkey,
+    pub holder: Pubkey,
+    pub lots: u64,
+    pub amount: u64,
+}
+
+/// Emitted by `finalize_migration`.
+#[event]
+pub struct MigrationFinalized {
+    pub migration: Pubkey,
+    pub lots_deposited: u64,
+    pub units_committed: u64,
+}
+
+/// Emitted by `claim_migration`.
+#[event]
+pub struct MigrationClaimed {
+    pub migration: Pubkey,
+    pub holder: Pubkey,
+    pub units: u64,
+    pub units_claimed: u64,
+}
+
+/// Emitted by `publish_migration_root`.
+#[event]
+pub struct MigrationRootPublished {
+    pub migration: Pubkey,
+    pub admin: Pubkey,
+    pub issuer_authority: Pubkey,
+    pub root: [u8; 32],
+    pub total_units: u64,
+    pub units_committed: u64,
+}
+
+/// Emitted by `claim_migration_proof`.
+#[event]
+pub struct MigrationProofClaimed {
+    pub migration: Pubkey,
+    pub claimer: Pubkey,
+    pub units: u64,
+    pub merkle_claimed: u64,
+    pub units_claimed: u64,
+}
+
+/// Emitted by `close_migration`.
+#[event]
+pub struct MigrationClosed {
+    pub migration: Pubkey,
+    pub admin: Pubkey,
+    pub return_to: Pubkey,
+    /// Units moved from the vault to `return_to`'s token account.
+    pub units_returned: u64,
+    /// Old-token base units burned from the escrow.
+    pub old_burned: u64,
+    /// The creating Admin, who received the closed accounts' rent.
+    pub rent_to: Pubkey,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2071,5 +2323,121 @@ mod tests {
         assert_eq!(DELIVERY_ESCROW_MIN_DEADLINE_SECS, 86_400);
         assert_eq!(DELIVERY_ESCROW_MAX_DEADLINE_SECS, 365 * 86_400);
         assert_eq!(MIN_VAULT_VOTING_PERIOD_SECS, 7 * 86_400);
+    }
+
+    /// Token migration (V2): append-only codes after 6155, and the bounds.
+    #[test]
+    fn migration_error_codes_and_bounds_are_pinned() {
+        use crate::error::RegistryError as E;
+        let code = |e: E| 6000 + e as u32;
+        assert_eq!(code(E::MigrationTermsInvalid), 6156);
+        assert_eq!(code(E::MigrationWindowInvalid), 6157);
+        assert_eq!(code(E::MigrationStatusInvalid), 6158);
+        assert_eq!(code(E::MigrationUnderfunded), 6159);
+        assert_eq!(code(E::MigrationCapExceeded), 6160);
+        assert_eq!(code(E::MigrationAllocationExceeded), 6161);
+        assert_eq!(code(E::MigrationOutsideWindow), 6162);
+        assert_eq!(code(E::MigrationWindowNotClosed), 6163);
+        assert_eq!(code(E::MigrationNotCancellable), 6164);
+        assert_eq!(code(E::MigrationNotClosable), 6165);
+        assert_eq!(code(E::MigrationDepositSettled), 6166);
+        assert_eq!(code(E::MigrationRootAlreadyPublished), 6167);
+        assert_eq!(code(E::MigrationRootMissing), 6168);
+        assert_eq!(code(E::MigrationRootExceeded), 6169);
+        assert_eq!(code(E::MigrationClaimDeadlinePassed), 6170);
+        assert_eq!(MIGRATION_MIN_WINDOW_SECS, 30 * 86_400);
+        assert_eq!(MIGRATION_MAX_WINDOW_SECS, 180 * 86_400);
+        assert_eq!(MIGRATION_OPEN_GRACE_SECS, 86_400);
+        assert_eq!(MIGRATION_MIN_CLAIM_SECS, 30 * 86_400);
+    }
+
+    /// Indexers list migrations by memcmp: every offset up to `version` is
+    /// fixed, and the one `Option` (the root) is last, so its tag moves
+    /// nothing. Deposit and claim records likewise.
+    #[test]
+    fn migration_layouts_are_pinned() {
+        assert_eq!(8 + Migration::INIT_SPACE, 406);
+        let mut migration = Migration {
+            share_class: key(1),
+            mint: key(2),
+            issuer: key(3),
+            admin: key(4),
+            old_mint: key(5),
+            old_token_program: key(6),
+            return_to: key(7),
+            migration_id: 8,
+            lot: 9,
+            units_cap: 10,
+            units_funded: 11,
+            units_committed: 12,
+            units_claimed: 13,
+            lots_deposited: 14,
+            lots_refunded: 15,
+            opens_at: 16,
+            closes_at: 17,
+            claim_deadline: 18,
+            terms_hash: [19; 32],
+            status: MigrationStatus::Claimable,
+            merkle_total: 20,
+            merkle_claimed: 21,
+            bump: 22,
+            escrow_bump: 23,
+            vault_bump: 24,
+            version: 25,
+            merkle_root: Some([26; 32]),
+        };
+        let data = bytes(&migration, 406);
+        for (i, at) in [8usize, 40, 72, 104, 136, 168, 200].into_iter().enumerate() {
+            assert_eq!(data[at..at + 32], [i as u8 + 1; 32], "pubkey at {at}");
+        }
+        for (value, at) in (8u64..=18).zip((232usize..=312).step_by(8)) {
+            assert_eq!(data[at..at + 8], value.to_le_bytes(), "u64 at {at}");
+        }
+        assert_eq!(data[320..352], [19; 32]);
+        assert_eq!(data[352], 3); // MigrationStatus::Claimable
+        assert_eq!(data[353..361], 20u64.to_le_bytes());
+        assert_eq!(data[361..369], 21u64.to_le_bytes());
+        assert_eq!(
+            (data[369], data[370], data[371], data[372]),
+            (22, 23, 24, 25)
+        );
+        assert_eq!((data[373], &data[374..406]), (1, &[26u8; 32][..]));
+        migration.merkle_root = None;
+        let mut unset = Vec::new();
+        migration.try_serialize(&mut unset).unwrap();
+        assert_eq!(unset.len(), 374);
+        assert_eq!(unset[..373], data[..373]);
+        assert_eq!(unset[373], 0);
+
+        assert_eq!(8 + MigrationDeposit::INIT_SPACE, 83);
+        let deposit = bytes(
+            &MigrationDeposit {
+                migration: key(1),
+                holder: key(2),
+                lots: 3,
+                claimed: true,
+                refunded: false,
+                bump: 4,
+            },
+            83,
+        );
+        assert_eq!(deposit[8..40], [1; 32]);
+        assert_eq!(deposit[40..72], [2; 32]);
+        assert_eq!(deposit[72..80], 3u64.to_le_bytes());
+        assert_eq!((deposit[80], deposit[81], deposit[82]), (1, 0, 4));
+        assert_eq!(8 + MigrationProofClaim::INIT_SPACE, 81);
+        // A new status may only be appended.
+        let statuses = [
+            MigrationStatus::Draft,
+            MigrationStatus::Open,
+            MigrationStatus::Cancelled,
+            MigrationStatus::Claimable,
+            MigrationStatus::Closed,
+        ];
+        for (tag, status) in statuses.into_iter().enumerate() {
+            let mut encoded = Vec::new();
+            status.serialize(&mut encoded).unwrap();
+            assert_eq!(encoded, vec![tag as u8]);
+        }
     }
 }

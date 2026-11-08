@@ -307,3 +307,32 @@ pub const RECLAIM_OTC: u8 = 1;
 pub const RECLAIM_CUSTODY: u8 = 2;
 /// `RentReclaimed.kind`: a KycEntry (fully closed; the PDA is reusable).
 pub const RECLAIM_KYC: u8 = 3;
+
+// ── Token migration (program V2) ─────────────────────────────────────────────
+// Holders of a legacy token that lives on Solana swap it, `lot` base units for
+// one share-class unit, into units the issuer funded up front; off-chain
+// (future EVM) locks join through one Merkle root. Instructions:
+// `create_migration` … `close_migration` (instructions/*migration*.rs).
+/// `Migration` PDA: `["migration", share_class, migration_id LE]`.
+pub const MIGRATION_SEED: &[u8] = b"migration";
+/// The migration's escrow of the OLD token, owned by the Migration PDA:
+/// `["mig_escrow", migration]`.
+pub const MIGRATION_ESCROW_SEED: &[u8] = b"mig_escrow";
+/// The migration's vault of NEW share-class units, owned by the Migration
+/// PDA: `["mig_vault", migration]`.
+pub const MIGRATION_VAULT_SEED: &[u8] = b"mig_vault";
+/// `MigrationDeposit` PDA: `["mig_dep", migration, holder]`.
+pub const MIGRATION_DEPOSIT_SEED: &[u8] = b"mig_dep";
+/// `MigrationProofClaim` PDA: `["mig_claim", migration, claimer]`.
+pub const MIGRATION_CLAIM_SEED: &[u8] = b"mig_claim";
+/// The deposit window `[opens_at, closes_at)` lasts 30 to 180 days.
+pub const MIGRATION_MIN_WINDOW_SECS: i64 = 2_592_000;
+pub const MIGRATION_MAX_WINDOW_SECS: i64 = 15_552_000;
+/// `create_migration`: `opens_at >= now - 1 day` (a window may start a moment
+/// ago, never further back).
+pub const MIGRATION_OPEN_GRACE_SECS: i64 = 86_400;
+/// `claim_deadline >= closes_at + 30 days`: depositors always have at least
+/// 30 days after the window to claim before unclaimed units go back.
+pub const MIGRATION_MIN_CLAIM_SECS: i64 = 2_592_000;
+/// `Migration.version`.
+pub const MIGRATION_STATE_VERSION: u8 = 1;

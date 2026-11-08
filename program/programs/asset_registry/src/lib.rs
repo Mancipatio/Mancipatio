@@ -16,6 +16,10 @@ use anchor_lang::prelude::*;
 pub use constants::*;
 pub use instructions::*;
 pub use state::*;
+// Anchor 1.0's prelude has a `Migration` of its own (an account wrapper);
+// the explicit re-export makes `asset_registry::Migration` the token
+// migration account instead of an ambiguous glob name.
+pub use state::Migration;
 
 declare_id!("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
 
@@ -1000,5 +1004,107 @@ pub mod asset_registry {
     /// PDA can never be reused; a KycEntry is closed outright.
     pub fn reclaim_rent<'info>(ctx: Context<'info, ReclaimRent<'info>>) -> Result<()> {
         instructions::handle_reclaim_rent(ctx)
+    }
+
+    // ── Token migration (program V2) ────────────────────────────────────────
+
+    /// Creates a `Draft` migration of a legacy Solana token into share-class
+    /// units (an Admin AND the issuer's live authority sign): `lot` old base
+    /// units per unit, `units_cap` units to fund, a 30–180-day window, a claim
+    /// deadline at least 30 days after it and the `return_to` owner of every
+    /// unclaimed unit. Opens an empty old-token escrow, an empty unit vault
+    /// and the escrow identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_migration(
+        ctx: Context<CreateMigration>,
+        migration_id: u64,
+        lot: u64,
+        units_cap: u64,
+        opens_at: i64,
+        closes_at: i64,
+        claim_deadline: i64,
+        return_to: Pubkey,
+        terms_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::handle_create_migration(
+            ctx,
+            migration_id,
+            lot,
+            units_cap,
+            opens_at,
+            closes_at,
+            claim_deadline,
+            return_to,
+            terms_hash,
+        )
+    }
+
+    /// The issuer's live authority moves `units` of its own units into the
+    /// vault of a `Draft` migration (never past `units_cap`).
+    pub fn fund_migration<'info>(
+        ctx: Context<'info, FundMigration<'info>>,
+        units: u64,
+    ) -> Result<()> {
+        instructions::handle_fund_migration(ctx, units)
+    }
+
+    /// Admin opens a fully funded migration (`Draft → Open`).
+    pub fn open_migration(ctx: Context<OpenMigration>) -> Result<()> {
+        instructions::handle_open_migration(ctx)
+    }
+
+    /// A holder deposits `lots` whole lots of the old token inside the window.
+    pub fn deposit_migration(ctx: Context<DepositMigration>, lots: u64) -> Result<()> {
+        instructions::handle_deposit_migration(ctx, lots)
+    }
+
+    /// Admin cancels a `Draft`, or an `Open` migration before `closes_at` and
+    /// before any claim.
+    pub fn cancel_migration(ctx: Context<CancelMigration>) -> Result<()> {
+        instructions::handle_cancel_migration(ctx)
+    }
+
+    /// Permissionless: refunds one deposit of a `Cancelled` migration to the
+    /// depositor's own old-token account.
+    pub fn refund_migration_deposit(ctx: Context<RefundMigrationDeposit>) -> Result<()> {
+        instructions::handle_refund_migration_deposit(ctx)
+    }
+
+    /// Permissionless: `Open → Claimable` once the window has closed.
+    pub fn finalize_migration(ctx: Context<FinalizeMigration>) -> Result<()> {
+        instructions::handle_finalize_migration(ctx)
+    }
+
+    /// The depositor claims one unit per deposited lot (KYC-checked on a
+    /// KycGated class).
+    pub fn claim_migration<'info>(ctx: Context<'info, ClaimMigration<'info>>) -> Result<()> {
+        instructions::handle_claim_migration(ctx)
+    }
+
+    /// An Admin AND the issuer's live authority publish, once, the Merkle
+    /// root of the off-chain locks and its total units.
+    pub fn publish_migration_root(
+        ctx: Context<PublishMigrationRoot>,
+        root: [u8; 32],
+        total_units: u64,
+    ) -> Result<()> {
+        instructions::handle_publish_migration_root(ctx, root, total_units)
+    }
+
+    /// An off-chain locker claims its units with a Merkle proof of
+    /// `(claimer, units)` (once per claimer).
+    pub fn claim_migration_proof<'info>(
+        ctx: Context<'info, ClaimMigrationProof<'info>>,
+        units: u64,
+        proof: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        instructions::handle_claim_migration_proof(ctx, units, proof)
+    }
+
+    /// Admin closes a migration after its claim deadline (or once cancelled
+    /// and fully refunded): unclaimed units to `return_to`, escrowed old
+    /// tokens burned, vault / escrow / identity closed, rent to the creator.
+    pub fn close_migration<'info>(ctx: Context<'info, CloseMigration<'info>>) -> Result<()> {
+        instructions::handle_close_migration(ctx)
     }
 }

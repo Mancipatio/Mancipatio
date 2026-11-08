@@ -325,4 +325,35 @@ pub enum RegistryError {
     PayoutModulesClearNotExplicit,
     #[msg("A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation")]
     PlatformRecoveryPending,
+    // ── Token migration, program V2 (appended: every earlier code keeps its position) ──
+    #[msg("Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint")]
+    MigrationTermsInvalid,
+    #[msg("Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days")]
+    MigrationWindowInvalid,
+    #[msg("Migration is not in the status this action requires")]
+    MigrationStatusInvalid,
+    #[msg("A migration opens only once units_funded equals units_cap")]
+    MigrationUnderfunded,
+    #[msg("Funding would exceed the migration's units_cap")]
+    MigrationCapExceeded,
+    #[msg("Deposits and published entitlements may not exceed the units funded")]
+    MigrationAllocationExceeded,
+    #[msg("Migration deposits are accepted only from opens_at until closes_at")]
+    MigrationOutsideWindow,
+    #[msg("The migration's deposit window has not closed yet")]
+    MigrationWindowNotClosed,
+    #[msg("A migration can be cancelled only while Draft, or while Open before closes_at and before any claim")]
+    MigrationNotCancellable,
+    #[msg("Close needs the claim deadline passed (Open or Claimable), or a cancelled migration with every deposit refunded")]
+    MigrationNotClosable,
+    #[msg("This migration deposit was already claimed or refunded")]
+    MigrationDepositSettled,
+    #[msg("The migration's off-chain entitlement root is already published")]
+    MigrationRootAlreadyPublished,
+    #[msg("The migration has no published off-chain entitlement root")]
+    MigrationRootMissing,
+    #[msg("Claim would exceed the published root's total units")]
+    MigrationRootExceeded,
+    #[msg("The migration's claim deadline has passed")]
+    MigrationClaimDeadlinePassed,
 }
