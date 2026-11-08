@@ -13,6 +13,7 @@ import type { Issuer } from "@/lib/generated/asset_registry";
 import type { NetworkData } from "@/lib/enumerate";
 import { useIssuerJourney } from "@/lib/use-issuer-journey";
 import { IssuerJourneyTracker } from "@/components/issuer-journey";
+import { SkeletonCard } from "@/components/skeleton";
 
 export function IssuerJourneyPanel({
   issuer,
@@ -26,7 +27,9 @@ export function IssuerJourneyPanel({
 }) {
   const conn = useWalletConnection();
   const [revision, setRevision] = useState(0);
-  const read = useIssuerJourney({ audience: "admin", data, issuer, session: conn.wallet, refreshKey: revision });
+  // Without the directory's snapshot, the issuer's assets are not known.
+  const read = useIssuerJourney({ audience: "admin", data, issuer: data ? issuer : undefined, session: conn.wallet, refreshKey: revision });
+  if (!read.journey) return <SkeletonCard className="mt-6" rows={4} />;
   return (
     <IssuerJourneyTracker
       journey={read.journey}

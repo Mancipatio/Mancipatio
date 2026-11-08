@@ -128,14 +128,18 @@ export type JourneyInput = {
    * reads the on-chain status alone.
    */
   verification?: { kyc: AccountWalletKycStatus; kyb: AccountWalletKycStatus; documentsRequested: number } | null;
-  /** The on-chain Issuer; null when none is registered (for this wallet). */
-  issuer: { kybStatus: number; jurisdiction: number; authority: string } | null;
+  /**
+   * The on-chain Issuer. null: none is registered (for this wallet);
+   * undefined: not known (the chain snapshot is not in or failed, no wallet
+   * is connected, or the wallet is not one of the account's).
+   */
+  issuer: { kybStatus: number; jurisdiction: number; authority: string } | null | undefined;
   /** The latest application; null: none on record; undefined: not read. */
   application: JourneyApplication | null | undefined;
   /** The SPV whose issuer_pda is this issuer; null: none; undefined: not read. */
   spv: JourneySpv | null | undefined;
-  /** The issuer's assets (archived ones left out) with their classes. */
-  assets: JourneyAsset[];
+  /** The issuer's assets (archived ones left out) with their classes; undefined: not read. */
+  assets: JourneyAsset[] | undefined;
 };
 
 export type JourneyEnvironment = {
@@ -221,7 +225,12 @@ type Facts = {
   requestWaiting: boolean;
   requestApproved: boolean;
   requestDeclined: boolean;
+  /** Units are with holders (sold, or sent out of the treasury). */
   holders: boolean;
+  /** Whether units are with holders is known (a treasury read, or units sold). */
+  holdersKnown: boolean;
+  /** Every placement read is in: treasuries, approvals and each class's sale request. */
+  placementKnown: boolean;
 };
 
 function facts(assets: readonly JourneyAsset[]): Facts {
@@ -252,8 +261,16 @@ function facts(assets: readonly JourneyAsset[]): Facts {
     requestApproved: requests.some((r) => r.status === "requested" && r.outcome === "approved"),
     requestDeclined: requests.some((r) => r.status === "declined"),
     holders: placed !== null ? placed > ZERO : sold > ZERO,
+    holdersKnown: placed !== null || sold > ZERO,
+    placementKnown:
+      placed !== null &&
+      !classes.some((c) => c.liveApprovals === null) &&
+      classes.every((c) => c.saleRequest !== undefined),
   };
 }
+
+/** The input once the chain snapshot is in: the steps that read assets get this. */
+type KnownInput = JourneyInput & { assets: JourneyAsset[] };
 
 type Draft = Omit<JourneyStep, "id" | "number" | "title" | "href" | "linkLabel" | "unknown"> & {
   link?: readonly [href: string, label: string] | null;
@@ -278,8 +295,11 @@ function kybStep(input: JourneyInput): Draft {
         return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? statusLink : dossier,
           explanation: you ? "Company verification was rejected; contact the team with your legal entity ID." : "The issuer's KYB was rejected on-chain; the issuer has to contact the team." };
       case KybStatus.Suspended:
-        return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? statusLink : dossier,
-          explanation: you ? "Issuer access is suspended; contact the team to resolve it." : "Issuer access is suspended on-chain until the team restores it." };
+        return you
+          ? { state: "waiting_on_you", actor: "issuer", offChain, link: statusLink,
+              explanation: "Issuer access is suspended; contact the team to resolve it." }
+          : { state: "waiting_on_manci", actor: "manci", offChain, link: dossier,
+              explanation: "Issuer access is suspended on-chain until compliance restores it." };
       case KybStatus.Pending:
         break;
       default:
@@ -294,7 +314,10 @@ function kybStep(input: JourneyInput): Draft {
   const v = input.verification;
   if (!you) {
     // The admin panel is opened from a registered issuer; without one there is nothing to review.
-    return { state: "not_started", actor: "issuer", offChain, link: null, explanation: "No issuer is registered yet." };
+    return issuer === undefined
+      ? { state: "not_started", actor: "manci", offChain, link: null, unknown: true,
+          explanation: "The on-chain issuer could not be read; refresh to update it." }
+      : { state: "not_started", actor: "issuer", offChain, link: null, explanation: "No issuer is registered yet." };
   }
   if (v === undefined) {
     return { state: "not_started", actor: "issuer", offChain, link: statusLink, unknown: true,
@@ -309,7 +332,16 @@ function kybStep(input: JourneyInput): Draft {
       return { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink,
         explanation: "Your company documents are approved; Manci records the verification on-chain." };
     }
+    // What comes next depends on data that is not loaded: never guess "register your wallet".
+    if (issuer === undefined) {
+      return { state: "not_started", actor: "issuer", offChain, link: statusLink, unknown: true,
+        explanation: "Your company documents are approved; your on-chain issuer status is not loaded yet." };
+    }
     const app = input.application;
+    if (app === undefined) {
+      return { state: "not_started", actor: "issuer", offChain, link: statusLink, unknown: true,
+        explanation: "Your company documents are approved; the next step depends on your application, which is not loaded yet." };
+    }
     // Through an SPV, the issuer is the SPV Manci incorporates, not the applicant's own company.
     if (app && (app.companyFormationRequested || app.applicantKind === "individual")) {
       return app.status === "approved"
@@ -475,7 +507,7 @@ function applicationClear(input: JourneyInput): boolean {
   return app === null ? issuerVerified(input) : app === undefined || app.status === "approved";
 }
 
-function documentsStep(input: JourneyInput, ready: boolean): Draft {
+function documentsStep(input: KnownInput, ready: boolean): Draft {
   const you = input.audience === "issuer";
   const offChain = true;
   const recorded = input.assets.find((a) => a.legalDocHash !== null);
@@ -501,7 +533,7 @@ function documentsStep(input: JourneyInput, ready: boolean): Draft {
     explanation: "Before the asset is created, the company's shareholders approve the issuance off-chain and the issuance documents are prepared." };
 }
 
-function onChainStep(input: JourneyInput, kybVerified: boolean): Draft {
+function onChainStep(input: KnownInput, ready: boolean): Draft {
   const you = input.audience === "issuer";
   const offChain = false;
   const assetLink = (a: JourneyAsset) =>
@@ -523,10 +555,10 @@ function onChainStep(input: JourneyInput, kybVerified: boolean): Draft {
     return { state: "waiting_on_manci", actor: "manci", offChain, link: assetLink(frozen),
       explanation: `${frozen.name} is frozen; nothing is issued until Manci unfreezes it.` };
   }
-  const ready = input.assets.find((a) => a.status === "draft" && withMint(a));
-  if (ready) {
-    return { state: "waiting_on_manci", actor: "manci", offChain, link: you ? assetLink(ready) : ["/admin/assets", "Assets"],
-      explanation: `${ready.name} and its token mint are created; Manci reviews the asset and activates it.` };
+  const minted = input.assets.find((a) => a.status === "draft" && withMint(a));
+  if (minted) {
+    return { state: "waiting_on_manci", actor: "manci", offChain, link: you ? assetLink(minted) : ["/admin/assets", "Assets"],
+      explanation: `${minted.name} and its token mint are created; Manci reviews the asset and activates it.` };
   }
   const draft = input.assets.find((a) => a.status === "draft");
   if (draft) {
@@ -537,17 +569,18 @@ function onChainStep(input: JourneyInput, kybVerified: boolean): Draft {
   if (woundDown) {
     return { state: "done", actor: "manci", offChain, link: assetLink(woundDown), explanation: `${woundDown.name} was wound down.` };
   }
-  if (kybVerified && applicationClear(input)) {
+  // The same gate as the documents step: verified, approved, and the issuing company in place.
+  if (ready) {
     return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? ["/issuer/assets/tokenize", "Token setup"] : null,
       explanation: you
         ? "Create the asset and its share class in Token setup; each share class gets its own token mint."
         : "The issuer has not created the asset yet." };
   }
   return { state: "not_started", actor: "issuer", offChain, link: null,
-    explanation: "Once the company is verified and the application approved, it creates the asset and its share classes on-chain, each class with its own token mint." };
+    explanation: "Once the company is verified, the application approved and the legal structure in place, it creates the asset and its share classes on-chain, each class with its own token mint." };
 }
 
-function mintedStep(input: JourneyInput, f: Facts, onChainDone: boolean): Draft {
+function mintedStep(input: KnownInput, f: Facts, onChainDone: boolean): Draft {
   const you = input.audience === "issuer";
   const offChain = false;
   const firstActive = input.assets.find((a) => a.status === "active");
@@ -567,8 +600,14 @@ function mintedStep(input: JourneyInput, f: Facts, onChainDone: boolean): Draft 
         ? `${formatUnits(f.minted)} of ${plural(f.cap, "unit", "units")} are created; the rest are created only when they are sent or sold.`
         : `${plural(f.minted, "unit is", "units are")} created; more are created only when they are sent or sold.` };
   }
+  // Nothing created yet: minting follows the placement (a list sent, or a
+  // sale's purchases), so this step never claims the turn; placement does.
+  if (onChainDone && f.openSales > 0) {
+    return { state: "not_started", actor: "holders", offChain, link,
+      explanation: "No units exist yet; buyers create them as they purchase in the open sale." };
+  }
   if (onChainDone) {
-    return { state: "waiting_on_you", actor: "issuer", offChain, link,
+    return { state: "not_started", actor: "issuer", offChain, link,
       explanation: you
         ? "No units exist yet; they are created when you send them to named holders or when buyers purchase in an approved sale."
         : "No units exist yet; they are created when the issuer sends them to named holders or when buyers purchase in an approved sale." };
@@ -577,7 +616,7 @@ function mintedStep(input: JourneyInput, f: Facts, onChainDone: boolean): Draft 
     explanation: "Units are created only when they are sent or sold, after the asset is active." };
 }
 
-function placementStep(input: JourneyInput, f: Facts, onChainDone: boolean): Draft {
+function placementStep(input: KnownInput, f: Facts, onChainDone: boolean): Draft {
   const you = input.audience === "issuer";
   const offChain = false;
   const firstActive = input.assets.find((a) => a.status === "active");
@@ -613,6 +652,11 @@ function placementStep(input: JourneyInput, f: Facts, onChainDone: boolean): Dra
     return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? distribute : sales,
       explanation: you ? "Manci declined the public-sale request; see the reason and choose the next step." : "The public-sale request was declined." };
   }
+  // Below, the answer would be "nothing placed": only when every read behind it is in.
+  if (onChainDone && !f.placementKnown) {
+    return { state: "not_started", actor: "issuer", offChain, link: you ? distribute : sales, unknown: true,
+      explanation: "Part of the placement status (treasury, sale approvals or sale requests) is not loaded yet." };
+  }
   if (onChainDone) {
     return { state: "waiting_on_you", actor: "issuer", offChain, link: you ? distribute : sales,
       explanation: you
@@ -630,6 +674,10 @@ function holdersStep(input: JourneyInput, f: Facts, env: JourneyEnvironment): Dr
   const conversionLine = env.conversionOffered
     ? "a holder who wants registered ownership requests conversion, which requires KYC"
     : "conversion into registered ownership is not offered on this network yet";
+  if (!f.holdersKnown && f.minted > ZERO) {
+    return { state: "not_started", actor: "holders", offChain, link: null, unknown: true,
+      explanation: "Whether units are with holders is not loaded yet (the treasury balance could not be read)." };
+  }
   if (!f.holders) {
     return { state: "not_started", actor: "holders", offChain, link: null,
       explanation: `Once units are with holders, they can hold and transfer them; ${conversionLine}.` };
@@ -670,21 +718,40 @@ function holdersStep(input: JourneyInput, f: Facts, env: JourneyEnvironment): Dr
 
 const ORDER: readonly JourneyStepId[] = ["kyb", "application", "legal_structure", "documents", "on_chain", "minted", "placement", "holders"];
 
+/** A chain-derived step whose data is not in: never "not started" as a fact, never "done". */
+function unreadChainStep(audience: JourneyAudience, actor: JourneyActor, offChain: boolean): Draft {
+  return { state: "not_started", actor, offChain, link: null, unknown: true,
+    explanation: audience === "issuer"
+      ? "The on-chain status is not loaded; connect your issuer wallet or refresh to see it."
+      : "The on-chain status could not be read; refresh to update it." };
+}
+
 /** Every step of the engagement, with its state, actor, explanation and link. */
 export function issuerJourney(input: JourneyInput, env: JourneyEnvironment = defaultJourneyEnvironment()): IssuerJourney {
-  const f = facts(input.assets);
-  const kybVerified = issuerVerified(input);
   const drafts: Record<JourneyStepId, Draft> = {} as Record<JourneyStepId, Draft>;
   drafts.kyb = kybStep(input);
   drafts.application = applicationStep(input);
   drafts.legal_structure = legalStructureStep(input);
-  const legalDone = drafts.legal_structure.state === "done";
-  drafts.documents = documentsStep(input, kybVerified && applicationClear(input) && legalDone);
-  drafts.on_chain = onChainStep(input, kybVerified);
-  const onChainDone = drafts.on_chain.state === "done";
-  drafts.minted = mintedStep(input, f, onChainDone);
-  drafts.placement = placementStep(input, f, onChainDone);
-  drafts.holders = holdersStep(input, f, env);
+  // Steps 4–8 read the issuer's assets: without the chain snapshot they are not known.
+  if (input.issuer === undefined || input.assets === undefined) {
+    drafts.documents = unreadChainStep(input.audience, "issuer", true);
+    drafts.on_chain = unreadChainStep(input.audience, "issuer", false);
+    drafts.minted = unreadChainStep(input.audience, "issuer", false);
+    drafts.placement = unreadChainStep(input.audience, "issuer", false);
+    drafts.holders = unreadChainStep(input.audience, "holders", true);
+  } else {
+    const known: KnownInput = { ...input, assets: input.assets };
+    const f = facts(known.assets);
+    const legalDone = drafts.legal_structure.state === "done";
+    // Asset creation needs a verified issuer, an approved application and the issuing company in place.
+    const ready = issuerVerified(known) && applicationClear(known) && legalDone;
+    drafts.documents = documentsStep(known, ready);
+    drafts.on_chain = onChainStep(known, ready);
+    const onChainDone = drafts.on_chain.state === "done";
+    drafts.minted = mintedStep(known, f, onChainDone);
+    drafts.placement = placementStep(known, f, onChainDone);
+    drafts.holders = holdersStep(known, f, env);
+  }
   const steps = ORDER.map((id, index): JourneyStep => {
     const { link, unknown, ...rest } = drafts[id];
     const visible = link && env.linkVisible(link[0]) ? link : null;

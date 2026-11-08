@@ -55,13 +55,21 @@ import {
 type Extras = {
   application: JourneyApplication | null | undefined;
   spv: JourneySpv | null | undefined;
-  assets: JourneyAsset[];
+  /** undefined: the chain-derived figures are not known (no issuer read, or the load failed). */
+  assets: JourneyAsset[] | undefined;
   unavailable: string[];
 };
 
 export type IssuerJourneyRead = {
-  journey: IssuerJourney;
-  /** The first read for the current inputs has not finished. */
+  /**
+   * null until the first read for this company and session is in: a
+   * half-read journey would show made-up steps ("create the asset" for an
+   * issuer whose assets are not read yet), so the page shows a placeholder.
+   * A later re-read (refresh, a new chain snapshot) keeps the previous
+   * result on screen, with `loading`.
+   */
+  journey: IssuerJourney | null;
+  /** A read for the current inputs is still running. */
   loading: boolean;
   /** Reads that failed (the steps behind them say "not loaded"). */
   unavailable: string[];
@@ -71,8 +79,11 @@ export function useIssuerJourney(opts: {
   audience: JourneyAudience;
   /** The on-chain snapshot the page loaded (null while loading or after a failure). */
   data: NetworkData | null;
-  /** The company's on-chain Issuer; null when none is registered for this wallet. */
-  issuer: Issuer | null;
+  /**
+   * The company's on-chain Issuer: null when none is registered for this
+   * wallet, undefined when it is not known (see JourneyInput.issuer).
+   */
+  issuer: Issuer | null | undefined;
   /** The account's own verification (issuer audience; see JourneyInput.verification). */
   verification?: JourneyInput["verification"];
   /** The wallet session for the signed reads (existing session only). */
@@ -82,40 +93,60 @@ export function useIssuerJourney(opts: {
 }): IssuerJourneyRead {
   const { audience, data, issuer, verification, session, refreshKey = 0 } = opts;
   const client = useSolanaClient();
-  // A fresh token per set of inputs: a result counts only for the token it was read for.
-  const token = useMemo(() => ({ audience, data, issuer, session, refreshKey }), [audience, data, issuer, session, refreshKey]);
-  const [read, setRead] = useState<{ token: object; extras: Extras } | null>(null);
+  // The account's verification loads through the same wallet session the
+  // signed rows need ("View my status" starts it): read again once it is in.
+  const sessionReady = verification !== undefined && verification !== null;
+  // Whose journey this is: a result is shown only for the same company, wallet and session state.
+  const subject = `${audience}:${issuer === undefined ? "unread" : issuer ? `${issuer.authority.toString()}:${hex(issuer.legalEntityId)}` : "none"}:${
+    session?.account.address.toString() ?? "no-wallet"}:${sessionReady}`;
+  // A fresh token per set of inputs: a result is current only for the token it was read for.
+  const token = useMemo(
+    () => ({ audience, data, issuer, session, refreshKey, sessionReady }),
+    [audience, data, issuer, session, refreshKey, sessionReady],
+  );
+  const [read, setRead] = useState<{ token: object; subject: string; extras: Extras } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void loadExtras({ audience, data, issuer, session, rpc: client.runtime.rpc }).then((extras) => {
-      if (!cancelled) setRead({ token, extras });
-    });
+    void loadExtras({ audience, data, issuer, session, rpc: client.runtime.rpc })
+      // A derivation or read that throws past its own handling: nothing is known, nothing hangs.
+      .catch((): Extras => ({ application: undefined, spv: undefined, assets: undefined, unavailable: ["the issuance status"] }))
+      .then((extras) => {
+        if (!cancelled) setRead({ token, subject, extras });
+      });
     return () => {
       cancelled = true;
     };
-  }, [token, audience, data, issuer, session, client]);
+  }, [token, subject, audience, data, issuer, session, client]);
 
-  const current = read?.token === token ? read.extras : null;
+  const shown = read?.subject === subject ? read.extras : null;
   const journey = useMemo(
     () =>
-      issuerJourney({
-        audience,
-        verification,
-        issuer: issuer ? { kybStatus: issuer.kybStatus, jurisdiction: issuer.jurisdiction, authority: issuer.authority.toString() } : null,
-        application: current ? current.application : undefined,
-        spv: current ? current.spv : issuer ? undefined : null,
-        assets: current?.assets ?? [],
-      }),
-    [audience, verification, issuer, current],
+      shown === null
+        ? null
+        : issuerJourney({
+            audience,
+            verification,
+            issuer: issuer === undefined ? undefined : issuer
+              ? { kybStatus: issuer.kybStatus, jurisdiction: issuer.jurisdiction, authority: issuer.authority.toString() }
+              : null,
+            application: shown.application,
+            spv: shown.spv,
+            assets: shown.assets,
+          }),
+    [audience, verification, issuer, shown],
   );
-  return { journey, loading: current === null, unavailable: current?.unavailable ?? [] };
+  return { journey, loading: read?.token !== token, unavailable: shown?.unavailable ?? [] };
+}
+
+function hex(bytes: ArrayLike<number>): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function loadExtras(input: {
   audience: JourneyAudience;
   data: NetworkData | null;
-  issuer: Issuer | null;
+  issuer: Issuer | null | undefined;
   session: WalletSession | null | undefined;
   rpc: ReturnType<typeof useSolanaClient>["runtime"]["rpc"];
 }): Promise<Extras> {
@@ -173,7 +204,8 @@ async function loadExtras(input: {
     unavailable.push("the application");
   }
 
-  let spv: JourneySpv | null | undefined = null;
+  // No issuer: no SPV can be linked to it; an issuer not known: nor is its SPV.
+  let spv: JourneySpv | null | undefined = issuer === undefined ? undefined : null;
   if (issuerPda) {
     if (spvs.status === "fulfilled") spv = pickIssuerSpv(spvs.value);
     else {
@@ -210,15 +242,18 @@ async function loadExtras(input: {
   return {
     application,
     spv,
-    assets: journeyAssets({
-      assets,
-      classes,
-      sales: data?.sales ?? [],
-      treasury: treasuryMap,
-      liveApprovals,
-      saleRequests: requestMap,
-      conversions: conversionRows,
-    }),
+    // Without the issuer (or its chain snapshot) the chain-derived steps are not known.
+    assets: issuer === undefined || (issuer && !data)
+      ? undefined
+      : journeyAssets({
+          assets,
+          classes,
+          sales: data?.sales ?? [],
+          treasury: treasuryMap,
+          liveApprovals,
+          saleRequests: requestMap,
+          conversions: conversionRows,
+        }),
     unavailable,
   };
 }

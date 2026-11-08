@@ -62,12 +62,18 @@ export default function IssuerOverviewPage() {
     [workflow.signedIn, workflow.verification],
   );
   const [journeyRevision, setJourneyRevision] = useState(0);
+  // "No issuer" only when it is a fact: signed out with no wallet (nothing to
+  // have registered), or a wallet whose chain snapshot is in and lists none.
+  // Unknown (undefined) while the snapshot loads or failed, without a wallet
+  // while signed in, and for a wallet that is not one of the account's.
+  const journeyIssuer = !wallet
+    ? workflow.signedIn ? undefined : null
+    : !data || workflow.failed || !workflow.walletMatchesAccount ? undefined : me ?? null;
   const journey = useIssuerJourney({
-    audience: "issuer", data, issuer: me ?? null, verification: journeyVerification, session: conn.wallet, refreshKey: journeyRevision,
+    audience: "issuer", data, issuer: journeyIssuer, verification: journeyVerification, session: conn.wallet, refreshKey: journeyRevision,
   });
-  // Until the chain snapshot is in, "no issuer" would only be a guess.
   const chainLoading = !!wallet && !data && !workflow.failed;
-  const tracker = chainLoading || workflow.authLoading
+  const tracker = chainLoading || workflow.authLoading || !journey.journey
     ? <SkeletonCard className="mt-6" rows={4} />
     : <IssuerJourneyTracker
         journey={journey.journey}
@@ -75,7 +81,11 @@ export default function IssuerOverviewPage() {
         companyName={currentProfile?.profile?.company_name ?? (me ? fromBytes32(me.legalEntityId) : null)}
         loading={journey.loading}
         unavailable={journey.unavailable}
-        onRetry={() => setJourneyRevision((revision) => revision + 1)}
+        onRetry={() => {
+          setJourneyRevision((revision) => revision + 1);
+          // A failed chain snapshot is read again too.
+          if (workflow.failed) void refresh();
+        }}
       />;
 
   return <main className="min-w-0 flex-1">

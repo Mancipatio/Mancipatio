@@ -114,6 +114,28 @@ describe("issuer audience: from a first visit to holders", () => {
     expect(step(rejected, "kyb")).toMatchObject({ state: "waiting_on_you", explanation: "Company verification is not approved; contact the compliance team." });
   });
 
+  it("an issuer that is not known (snapshot failed, no wallet, foreign wallet) never reads as 'no issuer'", () => {
+    const j = journey({ issuer: undefined, spv: undefined, assets: undefined });
+    // KYB approved, but the next step depends on the chain: no onboarding prompt.
+    expect(step(j, "kyb")).toMatchObject({ state: "not_started", unknown: true, href: "/issuer/status" });
+    for (const id of ["documents", "on_chain", "minted", "placement", "holders"] as const) {
+      expect(step(j, id), id).toMatchObject({ state: "not_started", unknown: true, href: null });
+    }
+    expect(step(j, "documents").explanation).toBe("The on-chain status is not loaded; connect your issuer wallet or refresh to see it.");
+    // Account-level facts still show: the application is approved.
+    expect(step(j, "application").state).toBe("done");
+    // Assets not read for a known issuer: the same.
+    expect(step(journey({ assets: undefined }), "on_chain")).toMatchObject({ unknown: true });
+    expect(step(journey({ audience: "admin", verification: null, assets: undefined }), "placement").explanation).toBe(
+      "The on-chain status could not be read; refresh to update it.",
+    );
+  });
+
+  it("approved documents with the application unread: no guess about onboarding", () => {
+    const j = journey({ issuer: null, application: undefined });
+    expect(step(j, "kyb")).toMatchObject({ state: "not_started", unknown: true, href: "/issuer/status" });
+  });
+
   it("an unknown on-chain status never counts as verified", () => {
     const j = journey({ issuer: { ...issuerVerified, kybStatus: 9 } });
     expect(step(j, "kyb")).toMatchObject({ state: "not_started", unknown: true });
@@ -212,12 +234,23 @@ describe("issuer audience: from a first visit to holders", () => {
     expect(step(journey({ assets: [asset({ legalDocHash: null })] }), "documents")).toMatchObject({ state: "waiting_on_manci", actor: "manci" });
   });
 
-  it("active, nothing minted: choose how units reach holders", () => {
+  it("active, nothing minted: choose how units reach holders (placement has the turn, minting follows it)", () => {
     const j = journey({ assets: [asset()] });
-    expect(states(j)).toMatchObject({ on_chain: "done", minted: "waiting_on_you", placement: "waiting_on_you", holders: "not_started" });
+    expect(states(j)).toMatchObject({ on_chain: "done", minted: "not_started", placement: "waiting_on_you", holders: "not_started" });
+    expect(j.next?.id).toBe("placement");
     expect(step(j, "minted").href).toBe("/issuer/assets/Asset1");
     expect(step(j, "placement").explanation).toBe("Choose how units reach holders: send them to named holders, or request an approved primary sale.");
     expect(step(j, "holders").explanation).toContain("requires KYC");
+  });
+
+  it("nothing minted while a sale is open, requested or approved: placement drives the next step", () => {
+    const open = journey({ assets: [asset({}, [cls({ openSales: 1 })])] });
+    expect(step(open, "minted")).toMatchObject({ state: "not_started", actor: "holders" });
+    expect(open.next).toMatchObject({ id: "placement", state: "in_progress" });
+    const requested = journey({ assets: [asset({}, [cls({ saleRequest: { status: "requested", outcome: null } })])] });
+    expect(requested.next).toMatchObject({ id: "placement", state: "waiting_on_manci" });
+    const approved = journey({ assets: [asset({}, [cls({ liveApprovals: 1 })])] });
+    expect(approved.next).toMatchObject({ id: "placement", state: "waiting_on_you" });
   });
 
   it("a public-sale request waits on Manci; an approval waits on the company", () => {
@@ -301,7 +334,11 @@ describe("the legal structure", () => {
     expect(step(journey({ issuer: foreign, application: null, spv: undefined }), "legal_structure")).toMatchObject({ state: "not_started", unknown: true });
     // A foreign issuer that asked for an SPV: Manci's turn, not "ask again".
     const asked = { status: "approved", applicantKind: "company", incorporation: "BVI", companyFormationRequested: true } as const;
-    expect(step(journey({ issuer: foreign, application: asked }), "legal_structure").state).toBe("waiting_on_manci");
+    const waiting = journey({ issuer: foreign, application: asked });
+    expect(step(waiting, "legal_structure").state).toBe("waiting_on_manci");
+    // Nor is the asset its turn while the issuing company is not in place.
+    expect(step(waiting, "on_chain").state).toBe("not_started");
+    expect(step(waiting, "documents").state).toBe("not_started");
   });
 
   it("a Serbian issuer issues directly; without the registry read only the jurisdiction is claimed", () => {
@@ -328,6 +365,12 @@ describe("admin audience", () => {
     expect(step(direct, "placement")).toMatchObject({ state: "done", href: "/admin/audit" });
     const sold = admin({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(50), circulatingSupply: BigInt(50), treasury: BigInt(0), sold: BigInt(50) })])] });
     expect(step(sold, "placement").href).toBe("/admin/launchpad");
+  });
+
+  it("a suspended issuer is compliance's to restore", () => {
+    expect(step(admin({ issuer: { ...issuerVerified, kybStatus: KybStatus.Suspended } }), "kyb")).toMatchObject({
+      state: "waiting_on_manci", actor: "manci", explanation: "Issuer access is suspended on-chain until compliance restores it.",
+    });
   });
 
   it("a pending KYB is Manci's to decide, from the dossier", () => {
@@ -473,12 +516,22 @@ describe("input mappers (lib/issuer-journey-input.ts)", () => {
     expect(unread[0].classes[0].liveApprovals).toBeNull();
   });
 
-  it("an unread treasury is never read as units placed", () => {
+  it("an unread treasury is never read as units placed, nor as nothing placed", () => {
     const j = journey({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(100), circulatingSupply: BigInt(100), treasury: null })])] });
-    // 100 units exist, but whether they left the treasury is unknown: no holders claimed.
-    expect(step(j, "placement").state).toBe("waiting_on_you");
-    expect(step(j, "holders").state).toBe("not_started");
+    // 100 units exist, but whether they left the treasury is unknown.
+    expect(step(j, "placement")).toMatchObject({ state: "not_started", unknown: true });
+    expect(step(j, "holders")).toMatchObject({ state: "not_started", unknown: true });
+    // Units sold are a fact the chain shows even without the treasury.
+    const sold = journey({ assets: [asset({}, [cls({ lifetimeMinted: BigInt(100), circulatingSupply: BigInt(100), treasury: null, sold: BigInt(40) })])] });
+    expect(step(sold, "placement")).toMatchObject({ state: "done", unknown: false, explanation: "40 units have been placed with holders: 40 sold in a primary sale." });
     expect(formatUnits(BigInt(1234567))).toBe("1,234,567");
+  });
+
+  it("unread approvals or sale requests never become 'choose how units reach holders'", () => {
+    expect(step(journey({ assets: [asset({}, [cls({ liveApprovals: null })])] }), "placement")).toMatchObject({ state: "not_started", unknown: true });
+    expect(step(journey({ assets: [asset({}, [cls({ saleRequest: undefined })])] }), "placement")).toMatchObject({ state: "not_started", unknown: true });
+    // A positive signal is still a fact: an open sale shows even with other reads missing.
+    expect(step(journey({ assets: [asset({}, [cls({ openSales: 1, saleRequest: undefined, liveApprovals: null })])] }), "placement").state).toBe("in_progress");
   });
 });
 
