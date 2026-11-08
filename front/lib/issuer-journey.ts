@@ -41,6 +41,7 @@
 
 import type { AccountWalletKycStatus } from "@/lib/account";
 import { KybStatus } from "@/lib/generated/asset_registry/types/kybStatus";
+import { issuerStatus } from "@/lib/issuer-status";
 import { moduleEnabled, scopeEnabled } from "@/lib/features";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { SERBIA_INCORPORATION, SERBIAN_SPV_GUIDE } from "@/lib/apply-spv";
@@ -310,18 +311,19 @@ function kybStep(input: JourneyInput): Draft {
       : { state: "waiting_on_you", actor: "issuer", offChain, link: ["/issuer/onboarding", "Issuer onboarding"],
           explanation: "Your company documents are approved; register your issuer wallet in Issuer onboarding so Manci can record the verification on-chain." };
   }
-  if (v.kyb === "more_info" || (v.kyb !== "none" && v.documentsRequested > 0)) {
-    return { state: "waiting_on_you", actor: "issuer", offChain, link: docsLink,
-      explanation: "Manci asked for more company documents; supply them to continue." };
-  }
-  if (v.kyb === "pending") {
-    return { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink, explanation: "Manci is reviewing your company documents." };
-  }
+  // A decision beats an open document request (as lib/issuer-workflow.ts puts "blocked" first).
   if (v.kyb === "rejected" || v.kyb === "suspended" || v.kyb === "expired") {
     return { state: "waiting_on_you", actor: "issuer", offChain, link: statusLink,
       explanation: v.kyb === "expired"
         ? "Your company verification has expired; renew it to continue."
         : `Company verification is ${v.kyb === "rejected" ? "not approved" : "suspended"}; contact the compliance team.` };
+  }
+  if (v.kyb === "more_info" || (v.kyb === "pending" && v.documentsRequested > 0)) {
+    return { state: "waiting_on_you", actor: "issuer", offChain, link: docsLink,
+      explanation: "Manci asked for more company documents; supply them to continue." };
+  }
+  if (v.kyb === "pending") {
+    return { state: "waiting_on_manci", actor: "manci", offChain, link: statusLink, explanation: "Manci is reviewing your company documents." };
   }
   // No company verification: a founder applying as an individual (verified KYC).
   if (v.kyc === "verified") {
@@ -353,7 +355,7 @@ function applicationStep(input: JourneyInput): Draft {
       explanation: you ? "Your application status is not loaded; sign in with the wallet you applied with to see it." : "The application queue could not be read." };
   }
   if (app === null) {
-    if (input.issuer?.kybStatus === KybStatus.Verified) {
+    if (issuerVerified(input)) {
       return { state: "not_applicable", actor: "manci", offChain, link: null,
         explanation: you
           ? "No application is on record for this wallet, and the issuer is already verified, so this step does not apply."
@@ -443,10 +445,15 @@ function legalStructureStep(input: JourneyInput): Draft {
     explanation: "Company ownership, debt and revenue share are issued by a Serbian company: your own, or an SPV that Manci incorporates and administers for you." };
 }
 
+/** The on-chain KYB unlocks issuance (lib/issuer-status.ts: unknown and unsuccessful states never do). */
+function issuerVerified(input: JourneyInput): boolean {
+  return issuerStatus(input.issuer?.kybStatus).verified;
+}
+
 /** The application does not hold the issuance back (approved, or not part of this issuer's path). */
 function applicationClear(input: JourneyInput): boolean {
   const app = input.application;
-  return app === null ? input.issuer?.kybStatus === KybStatus.Verified : app === undefined || app.status === "approved";
+  return app === null ? issuerVerified(input) : app === undefined || app.status === "approved";
 }
 
 function documentsStep(input: JourneyInput, ready: boolean): Draft {
@@ -462,7 +469,7 @@ function documentsStep(input: JourneyInput, ready: boolean): Draft {
   if (first) {
     return { state: "waiting_on_manci", actor: "manci", offChain,
       link: you ? [`/issuer/assets/${first.address}`, "Open the asset"] : [`/admin/assets/${first.address}`, "Asset"],
-      explanation: `No legal document hash is recorded on ${first.name}; Manci corrects the record before anything is issued.` };
+      explanation: `No legal document hash is recorded on ${first.name}; the team has to review its documents before anything is issued.` };
   }
   if (ready) {
     return { state: "waiting_on_you", actor: "issuer", offChain,
@@ -642,7 +649,7 @@ const ORDER: readonly JourneyStepId[] = ["kyb", "application", "legal_structure"
 /** Every step of the engagement, with its state, actor, explanation and link. */
 export function issuerJourney(input: JourneyInput, env: JourneyEnvironment = defaultJourneyEnvironment()): IssuerJourney {
   const f = facts(input.assets);
-  const kybVerified = input.issuer?.kybStatus === KybStatus.Verified;
+  const kybVerified = issuerVerified(input);
   const drafts: Record<JourneyStepId, Draft> = {} as Record<JourneyStepId, Draft>;
   drafts.kyb = kybStep(input);
   drafts.application = applicationStep(input);

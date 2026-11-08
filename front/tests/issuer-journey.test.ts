@@ -101,6 +101,16 @@ describe("issuer audience: from a first visit to holders", () => {
     expect(pending.next?.id).toBe("kyb");
     const more = journey({ verification: { kyc: "none", kyb: "more_info", documentsRequested: 2 }, issuer: null, application: null });
     expect(step(more, "kyb")).toMatchObject({ state: "waiting_on_you", href: "/issuer/verification?type=kyb" });
+    // A decision beats an open document request.
+    const rejected = journey({ verification: { kyc: "none", kyb: "rejected", documentsRequested: 1 }, issuer: null, application: null });
+    expect(step(rejected, "kyb")).toMatchObject({ state: "waiting_on_you", explanation: "Company verification is not approved; contact the compliance team." });
+  });
+
+  it("an unknown on-chain status never counts as verified", () => {
+    const j = journey({ issuer: { ...issuerVerified, kybStatus: 9 } });
+    expect(step(j, "kyb")).toMatchObject({ state: "not_started", unknown: true });
+    expect(step(j, "on_chain").state).toBe("not_started");
+    expect(step(j, "application").state).toBe("done");
   });
 
   it("documents approved, no issuer yet: register the wallet, and the application is the company's to submit", () => {
