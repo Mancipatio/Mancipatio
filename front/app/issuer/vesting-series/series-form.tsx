@@ -4,6 +4,14 @@
 // schedule, timing/delivery mode, approval window, recovery, cancellation and
 // the pre-cliff percentage. Used both for the initial submit and for
 // resubmit-after-fixes (needs_changes).
+//
+// The ESOP preset (lib/esop-schedule.ts) fills the schedule with a 12-month
+// cliff and monthly tranches to month 48, as EXACT base-unit amounts of the
+// current total allocation (the percent rows below round to basis points, so
+// the preset keeps its own amounts while it is on), and sets approval timing,
+// cancellation (pre-cliff 0) and recovery. Every value stays editable: the
+// settings are the ordinary controls, the start date is an input, and "Edit
+// tranches manually" turns the tranches into percent rows.
 
 import { address, isAddress } from "@solana/kit";
 import { useSolanaClient } from "@solana/react-hooks";
@@ -34,6 +42,16 @@ import {
   type RecipientEntry,
   type ScheduleEntry,
 } from "@/lib/vesting-series";
+import {
+  ESOP_NOMINAL_TOTAL,
+  ESOP_PRESET,
+  esopPercentRows,
+  esopSchedule,
+  esopSharePercent,
+  parseUtcDate,
+  utcDateString,
+  type EsopTranche,
+} from "@/lib/esop-schedule";
 
 /** `at` is a datetime-local value (browser zone); converted to unix UTC on
  *  submit — see parseLocalDateTime. */
@@ -263,6 +281,50 @@ export function SeriesForm({
   );
   const zoneLabel = useMemo(() => localZoneLabel(), []);
 
+  // The ESOP preset: its vesting start ("YYYY-MM-DD", 00:00 UTC) while it is
+  // on, null otherwise. While on, its tranches replace the percent rows
+  // (kept as they were, so removing the preset brings them back).
+  const [esopStart, setEsopStart] = useState<string | null>(null);
+  const esop = useMemo(():
+    | null
+    | { ok: false; error: string }
+    | { ok: true; tranches: EsopTranche[]; total: bigint; nominal: boolean } => {
+    if (esopStart === null) return null;
+    const startTs = parseUtcDate(esopStart);
+    if (startTs === null) return { ok: false, error: "Pick the vesting start date." };
+    // Before any allocation is entered, the shape is shown on a nominal total.
+    const nominal = totalAllocated <= BigInt(0);
+    const total = nominal ? ESOP_NOMINAL_TOTAL : totalAllocated;
+    try {
+      return { ok: true, tranches: esopSchedule({ total, startTs }), total, nominal };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }, [esopStart, totalAllocated]);
+
+  /** Applies the preset; each value it sets stays editable before submit. */
+  function applyEsopPreset() {
+    setEsopStart(utcDateString(currentUnixSeconds()));
+    setTimingMode(ESOP_PRESET.timingMode);
+    setWindowDays(String(ESOP_PRESET.approvalWindowSecs / 86_400));
+    setCancellation(ESOP_PRESET.cancellationEnabled);
+    setPreCliffPct(String(ESOP_PRESET.preCliffBps / 100));
+    setRecovery(ESOP_PRESET.recoveryEnabled);
+    setError(null);
+  }
+
+  /** Turns the preset's tranches into editable percent rows (adding up to exactly 100). */
+  function editEsopManually() {
+    if (!esop?.ok) return;
+    setTranches(
+      esopPercentRows(esop.tranches, esop.total).map((row) => ({
+        at: unixToLocalDateTime(row.unlockTs),
+        pct: row.pct,
+      })),
+    );
+    setEsopStart(null);
+  }
+
   /** Switch the amount unit, converting every parseable amount EXACTLY;
    *  unparseable text is kept verbatim so nothing is silently changed. */
   function switchUnit(next: AmountUnit) {
@@ -310,17 +372,22 @@ export function SeriesForm({
     }
     if (totalAllocated > U64_MAX)
       return "The total allocation exceeds the token program limit.";
-    if (tranches.length === 0 || tranches.length > MAX_VESTING_TRANCHES)
-      return `Schedule must have 1–${MAX_VESTING_TRANCHES} entries.`;
-    if (Math.abs(totalPct - 100) > 0.0001)
-      return `Tranche percentages must add up to 100 (now ${totalPct.toFixed(2)}).`;
-    let prev = 0;
-    for (const [i, t] of parsedTranches.entries()) {
-      const ts = t.unlockTs;
-      if (ts === null || ts <= 0)
-        return `Tranche #${i + 1}: ${t.timeError ?? "pick a date and time."}`;
-      if (ts <= prev) return "Tranche times must be strictly ascending.";
-      prev = ts;
+    if (esop) {
+      // The preset's tranches are exact, positive and ascending by construction.
+      if (!esop.ok) return `ESOP schedule: ${esop.error}`;
+    } else {
+      if (tranches.length === 0 || tranches.length > MAX_VESTING_TRANCHES)
+        return `Schedule must have 1–${MAX_VESTING_TRANCHES} entries.`;
+      if (Math.abs(totalPct - 100) > 0.0001)
+        return `Tranche percentages must add up to 100 (now ${totalPct.toFixed(2)}).`;
+      let prev = 0;
+      for (const [i, t] of parsedTranches.entries()) {
+        const ts = t.unlockTs;
+        if (ts === null || ts <= 0)
+          return `Tranche #${i + 1}: ${t.timeError ?? "pick a date and time."}`;
+        if (ts <= prev) return "Tranche times must be strictly ascending.";
+        prev = ts;
+      }
     }
     if (timingMode === "approval") {
       const w = Math.round(Number(windowDays) * 86_400);
@@ -357,7 +424,12 @@ export function SeriesForm({
       recoveryEnabled: recovery,
       cancellationEnabled: cancellation,
       preCliffBps: Math.round(Number(preCliffPct) * 100),
-      schedule: scheduleFromPercents(rows, totalAllocated),
+      // Validation passed, so a preset schedule was computed on the real
+      // total (every recipient amount parsed, the total above 0).
+      schedule:
+        esop?.ok && !esop.nominal
+          ? esop.tranches.map((t) => ({ unlock_ts: t.unlockTs, amount: t.amount.toString() }))
+          : scheduleFromPercents(rows, totalAllocated),
       recipients: outRecipients,
     };
   }
@@ -585,75 +657,104 @@ export function SeriesForm({
           {/* Schedule */}
           <div>
             <FieldLabel>Release schedule (% of total per unlock time)</FieldLabel>
-            <p className="mt-1 text-xs text-slate-500">
-              Times are entered in your zone, {zoneLabel}, and stored on-chain
-              as unix seconds (UTC). The UTC reading is shown next to each
-              tranche.
-            </p>
-            <div className="mt-2 space-y-2">
-              {tranches.map((t, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="datetime-local"
-                    step={60}
-                    className={`${inputCls} w-auto`}
-                    value={t.at}
-                    onChange={(e) =>
-                      setTranches((ts) =>
-                        ts.map((x, j) =>
-                          j === i ? { ...x, at: e.target.value } : x,
-                        ),
-                      )
-                    }
-                  />
-                  <span className="min-w-[10rem] text-[11px] text-slate-500">
-                    {parsedTranches[i].unlockTs !== null
-                      ? formatUtc(parsedTranches[i].unlockTs as number)
-                      : "— pick date and time"}
-                  </span>
-                  <input
-                    className={`${inputCls} w-28 text-right`}
-                    value={t.pct}
-                    onChange={(e) =>
-                      setTranches((ts) =>
-                        ts.map((x, j) =>
-                          j === i ? { ...x, pct: e.target.value } : x,
-                        ),
-                      )
-                    }
-                    placeholder="%"
-                  />
-                  <span className="text-xs text-slate-500">%</span>
-                  {tranches.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setTranches((ts) => ts.filter((_, j) => j !== i))
-                      }
-                      className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:border-slate-400"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 flex items-center gap-3">
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-slate-500">Preset:</span>
               <button
                 type="button"
-                onClick={() =>
-                  setTranches((ts) => [...ts, { at: "", pct: "" }])
-                }
-                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400"
+                onClick={applyEsopPreset}
+                disabled={esop !== null}
+                aria-pressed={esop !== null}
+                className={`rounded-md border px-2.5 py-1 font-medium ${
+                  esop !== null
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 text-slate-700 hover:border-slate-400"
+                }`}
               >
-                + Add tranche
+                {ESOP_PRESET.label}
               </button>
-              <p
-                className={`text-xs ${Math.abs(totalPct - 100) > 0.0001 ? "font-semibold text-red-600" : "text-slate-500"}`}
-              >
-                Total: {totalPct.toFixed(2)}% (must equal 100%)
-              </p>
             </div>
+            {esopStart !== null ? (
+              <EsopSchedulePanel
+                start={esopStart}
+                onStartChange={setEsopStart}
+                schedule={esop}
+                decimals={decimals}
+                onEditManually={editEsopManually}
+                onRemove={() => setEsopStart(null)}
+              />
+            ) : (
+              <>
+                <p className="mt-1 text-xs text-slate-500">
+                  Times are entered in your zone, {zoneLabel}, and stored on-chain
+                  as unix seconds (UTC). The UTC reading is shown next to each
+                  tranche.
+                </p>
+                <div className="mt-2 space-y-2">
+                  {tranches.map((t, i) => (
+                    <div key={i} className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="datetime-local"
+                        step={60}
+                        className={`${inputCls} w-auto`}
+                        value={t.at}
+                        onChange={(e) =>
+                          setTranches((ts) =>
+                            ts.map((x, j) =>
+                              j === i ? { ...x, at: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <span className="min-w-[10rem] text-[11px] text-slate-500">
+                        {parsedTranches[i].unlockTs !== null
+                          ? formatUtc(parsedTranches[i].unlockTs as number)
+                          : "— pick date and time"}
+                      </span>
+                      <input
+                        className={`${inputCls} w-28 text-right`}
+                        value={t.pct}
+                        onChange={(e) =>
+                          setTranches((ts) =>
+                            ts.map((x, j) =>
+                              j === i ? { ...x, pct: e.target.value } : x,
+                            ),
+                          )
+                        }
+                        placeholder="%"
+                      />
+                      <span className="text-xs text-slate-500">%</span>
+                      {tranches.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setTranches((ts) => ts.filter((_, j) => j !== i))
+                          }
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:border-slate-400"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTranches((ts) => [...ts, { at: "", pct: "" }])
+                    }
+                    className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400"
+                  >
+                    + Add tranche
+                  </button>
+                  <p
+                    className={`text-xs ${Math.abs(totalPct - 100) > 0.0001 ? "font-semibold text-red-600" : "text-slate-500"}`}
+                  >
+                    Total: {totalPct.toFixed(2)}% (must equal 100%)
+                  </p>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Modes */}
@@ -865,6 +966,127 @@ export function SeriesForm({
                 : "Review exact amounts"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The ESOP preset's schedule: its start date, the exact tranches it computed
+ * for the current total, and the ways out of it (manual rows, or removing it).
+ */
+function EsopSchedulePanel({
+  start,
+  onStartChange,
+  schedule,
+  decimals,
+  onEditManually,
+  onRemove,
+}: {
+  start: string;
+  onStartChange: (value: string) => void;
+  schedule:
+    | null
+    | { ok: false; error: string }
+    | { ok: true; tranches: EsopTranche[]; total: bigint; nominal: boolean };
+  decimals: number | null;
+  onEditManually: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="mt-2 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <p className="text-xs text-slate-600">
+        {ESOP_PRESET.cliffMonths} months after the vesting start, 25&nbsp;% of
+        the allocation unlocks; then 1/{ESOP_PRESET.totalMonths} unlocks every
+        month until month {ESOP_PRESET.totalMonths}. Amounts are exact base
+        units: the last tranche makes the total equal the allocation, and a
+        month that would unlock 0 (a very small allocation) is skipped.
+      </p>
+      <label className="block">
+        <FieldLabel>Vesting start (00:00 UTC)</FieldLabel>
+        <input
+          type="date"
+          value={start}
+          onChange={(e) => onStartChange(e.target.value)}
+          className="mt-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-400 focus:outline-none"
+        />
+        <span className="mt-1 block text-xs text-slate-500">
+          Usually the grant date. Months are counted in UTC from this date; a
+          start on the 31st unlocks on the last day of shorter months.
+        </span>
+      </label>
+      {schedule?.ok ? (
+        <>
+          {schedule.nominal && (
+            <p className="text-xs text-slate-500">
+              Add the recipients to see the exact amounts; the shares below
+              show the shape.
+            </p>
+          )}
+          <div className="max-h-64 overflow-y-auto rounded-md border border-slate-200 bg-white">
+            <table className="min-w-full text-left text-xs">
+              <thead className="sticky top-0 bg-white text-[10px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-2 py-1">#</th>
+                  <th className="px-2 py-1">Month</th>
+                  <th className="px-2 py-1">Unlock (UTC)</th>
+                  <th className="px-2 py-1 text-right">Share</th>
+                  {!schedule.nominal && <th className="px-2 py-1 text-right">Amount</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {schedule.tranches.map((t, i) => (
+                  <tr key={t.unlockTs} className="border-t border-slate-100">
+                    <td className="px-2 py-0.5">{i + 1}</td>
+                    <td className="px-2 py-0.5">{t.month}</td>
+                    <td className="px-2 py-0.5 font-mono">{formatUtc(t.unlockTs)}</td>
+                    <td className="px-2 py-0.5 text-right font-mono">
+                      {esopSharePercent(t.amount, schedule.total)}%
+                    </td>
+                    {!schedule.nominal && (
+                      <td className="px-2 py-0.5 text-right font-mono">
+                        {describeAmount(t.amount, decimals)}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-slate-500">
+            {schedule.tranches.length} tranche{schedule.tranches.length === 1 ? "" : "s"}
+            {schedule.nominal ? "" : `, ${describeAmount(schedule.total, decimals)} in total`}.
+          </p>
+        </>
+      ) : (
+        <p className="text-xs font-medium text-red-600">
+          {schedule?.error ?? "Pick the vesting start date."}
+        </p>
+      )}
+      <p className="text-xs text-slate-500">
+        The preset also set approval timing with a{" "}
+        {ESOP_PRESET.approvalWindowSecs / 86_400}-day window, cancellation with a
+        pre-cliff share of 0, and recovery; change them below if your plan
+        differs. Approval only delays delivery, and approval and cancellation
+        apply to every recipient of the series: for leaver terms per person,
+        create one series per grant.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onEditManually}
+          disabled={!schedule?.ok}
+          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+        >
+          Edit tranches manually
+        </button>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400"
+        >
+          Remove preset
+        </button>
       </div>
     </div>
   );
