@@ -2349,6 +2349,7 @@ mod tests {
         assert_eq!(MIGRATION_MAX_WINDOW_SECS, 180 * 86_400);
         assert_eq!(MIGRATION_OPEN_GRACE_SECS, 86_400);
         assert_eq!(MIGRATION_MIN_CLAIM_SECS, 30 * 86_400);
+        assert_eq!(MIGRATION_MAX_CLAIM_SECS, 730 * 86_400);
     }
 
     /// Indexers list migrations by memcmp: every offset up to `version` is

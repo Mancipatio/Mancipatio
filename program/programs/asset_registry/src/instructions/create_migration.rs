@@ -133,8 +133,10 @@ pub struct CreateMigration<'info> {
 ///   * `lot` old-token base units buy one unit; `units_cap` units must be
 ///     funded before the window opens (`open_migration`);
 ///   * the window `[opens_at, closes_at)` lasts 30 to 180 days and starts no
-///     earlier than one day ago; `claim_deadline` is at least 30 days after
-///     the window, so every depositor gets a claim period;
+///     earlier than one day ago; `claim_deadline` is 30 days to 2 years after
+///     the window — every depositor gets a claim period, and a deadline in
+///     the wrong unit cannot lock the vault and the escrow for good (past
+///     `closes_at` only the close ends a migration);
 ///   * `return_to` receives every unit left in the vault at the close;
 ///   * `terms_hash` (sha256 of the off-chain terms) is non-zero.
 ///
@@ -174,7 +176,8 @@ pub fn handle_create_migration(
         .is_some_and(|earliest| opens_at >= earliest);
     let claim_ok = closes_at
         .checked_add(MIGRATION_MIN_CLAIM_SECS)
-        .is_some_and(|floor| claim_deadline >= floor);
+        .zip(closes_at.checked_add(MIGRATION_MAX_CLAIM_SECS))
+        .is_some_and(|(floor, ceiling)| (floor..=ceiling).contains(&claim_deadline));
     ensure(
         window_ok && start_ok && claim_ok,
         RegistryError::MigrationWindowInvalid,

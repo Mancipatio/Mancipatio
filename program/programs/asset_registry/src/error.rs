@@ -328,7 +328,7 @@ pub enum RegistryError {
     // ── Token migration, program V2 (appended: every earlier code keeps its position) ──
     #[msg("Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint")]
     MigrationTermsInvalid,
-    #[msg("Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline at least closes_at + 30 days")]
+    #[msg("Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at")]
     MigrationWindowInvalid,
     #[msg("Migration is not in the status this action requires")]
     MigrationStatusInvalid,

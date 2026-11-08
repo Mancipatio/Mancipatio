@@ -334,5 +334,9 @@ pub const MIGRATION_OPEN_GRACE_SECS: i64 = 86_400;
 /// `claim_deadline >= closes_at + 30 days`: depositors always have at least
 /// 30 days after the window to claim before unclaimed units go back.
 pub const MIGRATION_MIN_CLAIM_SECS: i64 = 2_592_000;
+/// `claim_deadline <= closes_at + 2 years`: past `closes_at` nothing but the
+/// close ends a migration, so a deadline entered in the wrong unit (ms) must
+/// not lock its vault and escrow for good.
+pub const MIGRATION_MAX_CLAIM_SECS: i64 = 63_072_000;
 /// `Migration.version`.
 pub const MIGRATION_STATE_VERSION: u8 = 1;

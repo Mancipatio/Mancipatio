@@ -70,6 +70,10 @@ pub struct DepositMigration<'info> {
         constraint = crate::util::is_unset(&holder_block_entry) @ RegistryError::PartyBlocklisted,
     )]
     pub holder_block_entry: UncheckedAccount<'info>,
+    // remaining_accounts — proof of the SHARE-CLASS mint's restriction mode
+    // (`util::require_receiver_kyc_for_mint_to`, fail-closed):
+    //   Open:     [ExtraAccountMetaList(share mint)] (its Open shape)
+    //   KycGated: [TransferHookConfig(share mint), KycRegistry, KycEntry(holder)]
 }
 
 /// Deposits `lots` whole lots of the old token (`lots * lot` base units,
@@ -82,9 +86,19 @@ pub struct DepositMigration<'info> {
 /// and only while the committed units stay within the funded ones
 /// (`MigrationAllocationExceeded`) — every accepted lot is backed by a unit
 /// already in the vault. The old mint is re-checked against the migration's
-/// old-mint policy here, the moment holders commit funds. No KYC: holding
-/// needs none; a KycGated class checks the receiver at the claim. Pause:
-/// `PAUSE_CUSTODY_ENTRY`; a blocklisted holder is `PartyBlocklisted`.
+/// old-mint policy here, the moment holders commit funds.
+///
+/// KYC, for the depositor's own protection: a deposit is irrevocable unless
+/// the migration is cancelled, and on a KycGated class a holder without a
+/// current `KycEntry` could never claim — the unit would go back to
+/// `return_to` and the old tokens would be burned. So the share class's
+/// restriction mode is proven here, fail-closed like `buy`
+/// (`util::require_receiver_kyc_for_mint_to`): an Open class needs no KYC
+/// (its meta list's Open shape is the proof), a KycGated class needs the
+/// holder's Approved, unexpired, jurisdiction-allowed entry, and a missing
+/// proof is `KycProofRequired`. The claim checks again (an entry can lapse
+/// in between). Pause: `PAUSE_CUSTODY_ENTRY`; a blocklisted holder is
+/// `PartyBlocklisted`.
 pub fn handle_deposit_migration(ctx: Context<DepositMigration>, lots: u64) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let m = &ctx.accounts.migration;
@@ -96,6 +110,11 @@ pub fn handle_deposit_migration(ctx: Context<DepositMigration>, lots: u64) -> Re
     crate::util::require_supported_old_mint(
         &ctx.accounts.old_mint.to_account_info(),
         &ctx.accounts.old_token_program.key(),
+    )?;
+    crate::util::require_receiver_kyc_for_mint_to(
+        ctx.remaining_accounts,
+        &m.mint,
+        &ctx.accounts.holder.key(),
     )?;
     let amount = lots.checked_mul(m.lot).ok_or(RegistryError::Overflow)?;
     let committed = m

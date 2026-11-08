@@ -45,9 +45,16 @@ pub struct CloseMigration<'info> {
     )]
     pub return_to_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Mut: the escrow's old tokens are burned.
+    /// Mut: the escrow's old tokens are burned. Deliberately NOT deserialized:
+    /// with nothing left in the escrow (a Draft, no deposits, every deposit
+    /// refunded) a Token-2022 old mint whose supply reached 0 may have been
+    /// closed by its close authority, and the close must not depend on it
+    /// then. With tokens in the escrow the mint has supply, cannot have been
+    /// closed, and the token program checks it against the escrow in the burn.
+    /// CHECK: bound to `migration.old_mint` by `has_one`; only the old token
+    /// program reads it, in the burn.
     #[account(mut)]
-    pub old_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub old_mint: UncheckedAccount<'info>,
 
     #[account(mut, seeds = [MIGRATION_ESCROW_SEED, migration.key().as_ref()], bump = migration.escrow_bump)]
     pub migration_escrow: Box<InterfaceAccount<'info, TokenAccount>>,

@@ -1171,6 +1171,10 @@ pub fn require_receiver_kyc(
 ///     Open shape proves `Open` mode.
 ///
 /// A tail carrying neither fails with `KycProofRequired`.
+///
+/// `deposit_migration` uses the same proof: its old-token transfer never
+/// touches this hook either, and a holder who cannot pass receiver KYC on a
+/// KycGated class must not commit old tokens it could never claim units for.
 pub fn require_receiver_kyc_for_mint_to(
     remaining_accounts: &[AccountInfo],
     mint: &Pubkey,
