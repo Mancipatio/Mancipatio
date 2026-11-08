@@ -31,14 +31,15 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0084 knowledge pu
   afterAll(() => db.close());
 
   it("seeds the configured network only, has RLS and keeps every row private to browser database roles", () => {
-    expect(db.query("select network||'|'||count(*) from public.assistant_knowledge group by network")).toBe("devnet|26");
+    // 0091 adds drafts on the same network; the published corpus is 0084's.
+    expect(db.query("select network||'|'||count(*) from public.assistant_knowledge where status='published' group by network")).toBe("devnet|26");
     expect(db.query("select relrowsecurity from pg_class where oid='public.assistant_knowledge'::regclass")).toBe("t");
     for (const role of ["anon", "authenticated"]) {
       expect(() => db.query(`set role ${role}; select * from public.assistant_knowledge`)).toThrow(/permission denied/);
       expect(() => db.query(`set role ${role}; insert into public.assistant_knowledge(id,title,body) values ('attack','Attack','Body')`)).toThrow(/permission denied/);
     }
     expect(db.query("set role service_role; select count(*) from public.assistant_knowledge where status='published'")).toBe("26");
-    expect(db.query("select category||'|'||count(*) from public.assistant_knowledge group by category order by category")).toBe("answer|21\npolicy|2\nprocedure|3");
+    expect(db.query("select category||'|'||count(*) from public.assistant_knowledge where status='published' group by category order by category")).toBe("answer|21\npolicy|2\nprocedure|3");
   });
 
   it("defaults new policies to draft, refuses sourceless publication and prevents deletion while published", () => {
@@ -64,8 +65,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0084 knowledge pu
   it("installs the network guard and never overwrites an editorial change on migration replay", () => {
     expect(() => db.query("insert into public.assistant_knowledge(network,id,title,body) values ('mainnet','wrong-network','Wrong','Body')")).toThrow(/mainnet/);
     db.query("update public.assistant_knowledge set status='draft',title='Editorial draft' where id='platform-operator'");
+    const total = db.query("select count(*) from public.assistant_knowledge");
     db.query(migration);
     expect(db.query("select title||'|'||status from public.assistant_knowledge where id='platform-operator'")).toBe("Editorial draft|draft");
-    expect(db.query("select count(*) from public.assistant_knowledge")).toBe("26");
+    expect(db.query("select count(*) from public.assistant_knowledge")).toBe(total);
   });
 });
