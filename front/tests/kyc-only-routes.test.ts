@@ -386,6 +386,8 @@ describe("every API route is classified", () => {
     "internal/alarms": "platform", "internal/fx": "platform", "internal/retry": "platform", "internal/sanctions": "platform",
     "distribution-plans/proof": "read", "payout-snapshots/proof": "read",
     "inquiries/create": "support",
+    // The holder's own records for the portfolio CSV export (read-only).
+    "portfolio/export": "read",
     "profiles/public": "read",
     "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
     // Purchase recovery: a buy that already landed on-chain ("Retry recording").

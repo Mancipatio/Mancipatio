@@ -94,6 +94,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "passport.list",
   "payout-snapshots.adminRead",
   "payout-snapshots.proof",
+  // The signer's own purchases, OTC deals and conversions plus daily EUR
+  // rates, for the portfolio CSV export (app/api/portfolio/export).
+  "portfolio.export",
   "profiles.read",
   // The seller's own listings or the admin board (0082: a listing is public only while active).
   "resell.list",
