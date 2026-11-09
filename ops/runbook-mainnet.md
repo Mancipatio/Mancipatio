@@ -1204,6 +1204,24 @@ source paths are clean (see "Safety rules").
     `cancel_platform_admin_transfer`) can cancel them. `remove_admin`, every
     pause and the freeze stay instant. Each proposal raises a critical alarm
     (§15): an unexpected one is cancelled inside its window.
+  - **Direct Admin grant (`grant_admin`, owner decision 2026-11-09, from the
+    program upgrade that adds it).** The super admin makes a key an Admin at
+    once on `/admin/admins` → Add an Admin: no 48 hours, no signature of the
+    new key (the super admin pays its record, about 0.0014 SOL, returned by
+    `remove_admin`). A grant still staged for the same key is cancelled in
+    the same transaction. The page offers it only where the deployed program
+    has the instruction (one simulation, nothing sent); elsewhere it keeps
+    the two-step proposal above. Trade-off accepted with the decision: there
+    is no veto window, so a compromised super admin seats Admins at once.
+    Every `grant_admin` is a critical alarm (`onchain:admin-record`, §15),
+    and the answer is `remove_admin` after the recovery below. It is not in
+    the `chain:squads-export` allowlist: with the super admin in the Squads
+    vault, Admins are still proposed (`registry-ix propose_admin`).
+  - **Names on `/admin/admins` (0092).** The super admin names each wallet
+    (when adding it, or with Name / Rename in the list); the list also shows
+    the Manci account a wallet is linked to. A name grants nothing; roles
+    are read from the chain. Writing a name asks for one wallet signature
+    and leaves an `admin_wallet_label` audit row.
   - A **lost** super admin or blocklist authority: the upgrade authority
     proposes the successor (`registry-ix propose_platform_recovery`,
     `hook-ix propose_blocklist_recovery`); the successor executes 7 days
@@ -1414,9 +1432,11 @@ adds Admins, sets the treasury, decides KYB, stages issuer recoveries and
 custody proposals. BA and KYC are unaffected.
 - First: rotate the SA to the successor if it still signs; other Admins keep
   pausing (the attacker can clear it); maintenance on.
-- Recovery: the upgrade authority cancels the attacker's Admin grants and
-  its super admin rotation (48 hours to do so); remove the attacker's
-  Admins, set the treasury back, cancel its issuer recoveries (the issuer
+- Recovery: the upgrade authority cancels the attacker's staged Admin grants
+  and its super admin rotation (48 hours to do so). Admins it granted
+  directly (`grant_admin`) are already live: after the recovery, remove
+  every Admin the list on `/admin/admins` shows that you did not add (each
+  `grant_admin` also left a critical alert with the key); set the treasury back, cancel its issuer recoveries (the issuer
   can cancel too) and custody proposals (the SA, or the vault's current
   operator while it is an Admin). Lost: the D4 recovery (7 days). Taken
   over (it cancels the recovery): the incident build above.
@@ -2932,7 +2952,7 @@ MANCI_TARGET=<t> bash scripts/db.sh -c "drop policy if exists resell_listings_ac
 | `fx:jump` (`fx-jump:<mint>`, medium) | The automatic rate moved more than 1 % within an hour: compare with the market (EUR/USD does move that much on central-bank days). Unexpected: pin a manual override on `/admin/limits` and investigate. |
 | `worker:alert-channel` (`alert-channel-email` or `alert-channel-webhook`, high) | That channel failed a digest; the other one delivered this alert. Fix the channel (SMTP or Resend; `ALERT_WEBHOOK_*`: §11 "SMTP down"), send a test alert, re-queue what gave up (Operations); it clears after three digests it delivers. |
 | `worker:ops-watch-config` | `ALARM_BALANCE_WATCH` or `ALARM_SQUADS_CONFIG` does not parse: correct it and redeploy (no balance or Squads watch until then). |
-| v1.0.0-rc role changes, all critical: `onchain:admin-grant` (propose / cancel an Admin grant), `onchain:admin-record` (`add_admin`, the new key executes it; `remove_admin`, instant: a Super Admin removing Admins also removes their veto, K1.1c), `onchain:platform-admin` (Super Admin rotation propose / accept / cancel), `onchain:platform-recovery` and `onchain:blocklist-recovery` (the upgrade authority's recoveries: propose / cancel / execute), `onchain:blocklist-authority` (rotation propose / accept / cancel) | Compare with the signer matrix and the change you planned (§19). Unexpected proposal: cancel it inside its window (Admin grant and Super Admin rotation: the Super Admin, any Admin or the upgrade authority; Super Admin recovery: the Super Admin or the upgrade authority; blocklist recovery or rotation: the blocklist authority, or the upgrade authority for a recovery), then treat the proposer's key as compromised, §11. Unexpected execute or accept: incident, §11. |
+| v1.0.0-rc role changes, all critical: `onchain:admin-grant` (propose / cancel an Admin grant), `onchain:admin-record` (`add_admin`, the new key executes it; `grant_admin`, the super admin's direct grant with no waiting period (owner decision 2026-11-09): expected only when the super admin just added that key on `/admin/admins`, otherwise the super admin key is compromised, §11; `remove_admin`, instant: a Super Admin removing Admins also removes their veto, K1.1c), `onchain:platform-admin` (Super Admin rotation propose / accept / cancel), `onchain:platform-recovery` and `onchain:blocklist-recovery` (the upgrade authority's recoveries: propose / cancel / execute), `onchain:blocklist-authority` (rotation propose / accept / cancel) | Compare with the signer matrix and the change you planned (§19). Unexpected proposal: cancel it inside its window (Admin grant and Super Admin rotation: the Super Admin, any Admin or the upgrade authority; Super Admin recovery: the Super Admin or the upgrade authority; blocklist recovery or rotation: the blocklist authority, or the upgrade authority for a recovery), then treat the proposer's key as compromised, §11. Unexpected execute or accept: incident, §11. |
 | `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
 | `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
 | `onchain:frozen-issuer-activity` (high) | A frozen issuer's authority wallet traded or moved units (the evidence names the issuer, its role and the instructions). Check the transaction and decide at once whether the BA blocks the wallet (§11 "Issuer proceeds freeze", O-9); record the decision in the freeze's case file. |

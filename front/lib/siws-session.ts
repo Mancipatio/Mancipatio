@@ -54,6 +54,10 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "admin.badges",
   // Registered accounts before KYC/KYB; the route rechecks the admin role.
   "admin.accountsList",
+  // Names (0092) and linked accounts of the wallets on /admin/admins; the
+  // route rechecks the admin role. Naming a wallet signs afresh
+  // (admin.walletLabelSet, Super Admin only).
+  "admin.walletLabels",
   // The Super Admin's document anchors (app/api/admin/document-anchor). The
   // list reads audit rows. Record WRITES (one of the accepted exceptions in
   // the header): its only write is the audit row of an anchor the server

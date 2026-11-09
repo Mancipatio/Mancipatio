@@ -41,8 +41,10 @@ import {
   VaultState,
   findAdminRecordPda,
   findPlatformPda,
+  getAdminEncoder,
   getPendingAdminEncoder,
   parseAddAdminInstruction,
+  parseGrantAdminInstruction,
   parseCancelAdminProposalInstruction,
   parseCancelCustodyAuthorityTransferInstruction,
   parseCancelPlatformRecoveryInstruction,
@@ -66,7 +68,18 @@ import {
   buildReleasePayoutInstruction,
 } from "@/lib/proceeds-exits";
 import { buildVestingReleaseInstruction } from "@/lib/vesting-release";
-import { STALE_ADMIN_PROPOSAL, buildAddAdmin, buildCancelAdminProposal, buildProposeAdmin, listPendingAdmins } from "@/lib/admin-grants";
+import {
+  ANCHOR_INSTRUCTION_FALLBACK_NOT_FOUND,
+  STALE_ADMIN_PROPOSAL,
+  buildAddAdmin,
+  buildCancelAdminProposal,
+  buildGrantAdmin,
+  buildProposeAdmin,
+  instructionCustomCode,
+  listAdmins,
+  listPendingAdmins,
+  probeDirectGrant,
+} from "@/lib/admin-grants";
 import { proposalWindowState } from "@/lib/proposal-window";
 import { buildCancelCustodyAuthorityTransfer } from "@/lib/custody-authority";
 import { buildCancelRoleRecovery, buildExecuteRoleRecovery } from "@/lib/role-recovery";
@@ -130,6 +143,70 @@ describe("proceeds exits (D1 freeze, prog-novac-4 payees)", () => {
     expect(claim.founder.address).toBe(WALLET);
     expect(claim.asset.address).toBe(ASSET);
     expect(claim.founderBlockEntry.address).toBe(await findBlockEntryPda(WALLET));
+  });
+});
+
+describe("Admin grants: the direct grant (grant_admin, owner decision 2026-11-09)", () => {
+  it("grant_admin: the live Super Admin only, never the default key or a key that already holds the role", async () => {
+    const ixs = await buildGrantAdmin(rpc, createNoopSigner(SA), NEW);
+    expect(ixs).toHaveLength(1);
+    const parsed = parseGrantAdminInstruction(ixs[0] as never);
+    expect(parsed.accounts.superAdmin.address).toBe(SA);
+    expect(parsed.accounts.platform.address).toBe((await findPlatformPda())[0]);
+    expect(parsed.accounts.adminRecord.address).toBe((await findAdminRecordPda({ authority: NEW }))[0]);
+    expect(parsed.data.newAdmin).toBe(NEW);
+    await expect(buildGrantAdmin(rpc, createNoopSigner(WALLET), NEW)).rejects.toThrow(/Only the Super Admin/);
+    await expect(buildGrantAdmin(rpc, createNoopSigner(SA), "11111111111111111111111111111111" as Address)).rejects.toThrow(/default/);
+    mocks.admin.mockResolvedValue(owned({ admin: NEW }));
+    await expect(buildGrantAdmin(rpc, createNoopSigner(SA), NEW)).rejects.toThrow(/already holds the Admin role/);
+  });
+
+  it("a grant still staged for the key is cancelled first in the same transaction, rent to its proposer", async () => {
+    mocks.pendingAdmin.mockResolvedValue(owned({ newAdmin: NEW, proposedBy: WALLET, proposedAt: BigInt(0), eta: BigInt(1), expiresAt: BigInt(2) }));
+    const [cancel, grant] = await buildGrantAdmin(rpc, createNoopSigner(SA), NEW);
+    const c = parseCancelAdminProposalInstruction(cancel as never);
+    expect(c.accounts.canceller.address).toBe(SA);
+    expect(c.accounts.pendingAdmin.address).toBe(await findPendingAdminPda(NEW));
+    // A stale proposal of an earlier Super Admin: its rent still goes back to it.
+    expect(c.accounts.proposer.address).toBe(WALLET);
+    expect(c.accounts.programData.address).toBe(await findProgramDataPda(ASSET_REGISTRY_PROGRAM_ADDRESS));
+    expect(parseGrantAdminInstruction(grant as never).data.newAdmin).toBe(NEW);
+  });
+
+  it("listAdmins: every record whose address is its own PDA, the Super Admin first", async () => {
+    const record = async (admin: Address, addedBy: Address, owner: Address = ASSET_REGISTRY_PROGRAM_ADDRESS, at?: Address) => ({
+      pubkey: at ?? (await findAdminRecordPda({ authority: admin }))[0],
+      account: { owner, data: [Buffer.from(getAdminEncoder().encode({ admin, addedBy, bump: 255 })).toString("base64"), "base64"] },
+    });
+    const rows = [
+      await record(NEW, SA),
+      await record(SA, SA),
+      await record(WALLET, SA, key(0)), // another owner
+      await record(UA, SA, ASSET_REGISTRY_PROGRAM_ADDRESS, key(9)), // not its PDA
+    ];
+    const list = { getProgramAccounts: () => ({ send: async () => rows }) } as never;
+    const directory = await listAdmins(list);
+    expect(directory.superAdmin).toBe(SA);
+    expect(directory.admins.map((a) => [a.admin, a.addedBy])).toEqual([[SA, SA], [NEW, SA]]);
+  });
+
+  it("probeDirectGrant: one simulation; Anchor's 101 means the program has no grant_admin, anything else is unknown", async () => {
+    const answer = (err: unknown) => ({
+      simulateTransaction: vi.fn(() => ({ send: async () => ({ value: { err, logs: [], unitsConsumed: BigInt(1) } }) })),
+    });
+    const ok = answer(null);
+    expect(await probeDirectGrant(ok as never, SA)).toBe("supported");
+    expect(ok.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(ok.simulateTransaction.mock.calls[0][1]).toMatchObject({ sigVerify: false, replaceRecentBlockhash: true });
+    expect(await probeDirectGrant(answer({ InstructionError: [0, { Custom: 101 }] }) as never, SA)).toBe("unsupported");
+    expect(await probeDirectGrant(answer({ InstructionError: [BigInt(0), { Custom: BigInt(101) }] }) as never, SA)).toBe("unsupported");
+    expect(await probeDirectGrant(answer({ InstructionError: [0, { Custom: 6001 }] }) as never, SA)).toBe("unknown");
+    expect(await probeDirectGrant(answer("AccountNotFound") as never, SA)).toBe("unknown");
+    const down = { simulateTransaction: () => ({ send: async () => { throw new Error("RPC down"); } }) };
+    expect(await probeDirectGrant(down as never, SA)).toBe("unknown");
+    expect(ANCHOR_INSTRUCTION_FALLBACK_NOT_FOUND).toBe(101);
+    expect(instructionCustomCode({ InstructionError: [1, { Custom: 101 }] })).toBeNull();
+    expect(instructionCustomCode({ InstructionError: [1, { Custom: 101 }] }, 1)).toBe(101);
   });
 });
 

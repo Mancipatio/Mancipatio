@@ -24,6 +24,7 @@ import {
   VaultType,
   getAcceptPlatformAdminInstructionDataEncoder,
   getAddAdminInstructionDataEncoder,
+  getGrantAdminInstructionDataEncoder,
   getApproveHolderInstructionDataEncoder,
   getApproveSaleInstructionDataEncoder,
   getCancelAdminProposalInstructionDataEncoder,
@@ -445,6 +446,8 @@ describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
     ["execute_blocklist_recovery", ix(getExecuteBlocklistRecoveryInstructionDataEncoder(), {}, 7, H)],
     // K1.1c: instant, and it strips the veto of the Admin it removes.
     ["remove_admin", ix(getRemoveAdminInstructionDataEncoder(), { admin: C as Address }, 4)],
+    // Owner decision 2026-11-09: the Super Admin's direct grant, no timelock.
+    ["grant_admin", ix(getGrantAdminInstructionDataEncoder(), { newAdmin: C as Address }, 4)],
   ];
 
   it("every step is critical, top-level or inside Squads, with or without logs", () => {
@@ -486,6 +489,16 @@ describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
     expect(cancelled).toMatchObject({ source: "onchain:admin-grant", summary: `Admin grant for ${C} cancelled by ${A}` });
     const rotation = one(run([critical[5][1]], { events: [[encodeEvent("AuthorityProposalCancelled", { kind: 0, cancelled_new_authority: C })]] }));
     expect(rotation).toMatchObject({ source: "onchain:platform-admin", evidence: { cancelled_new_authority: C } });
+  });
+
+  it("grant_admin is critical, names the new Admin and the Super Admin, evidence from AdminGranted or the signer", () => {
+    const granted = critical.find(([name]) => name === "grant_admin")![1];
+    expect(one(run([granted], { events: [[encodeEvent("AdminGranted", { admin: C, granted_by: A, granted_at: 7 })]] }))).toMatchObject({
+      source: "onchain:admin-record", severity: "critical",
+      summary: `Admin added: ${C} (granted at once by the Super Admin ${A}, no waiting period)`,
+      evidence: { admin: C, granted_by: A, granted_at: "7", accounts: { super_admin: A, platform: B, admin_record: C } },
+    });
+    expect(one(run([granted], { logs: "none" }))).toMatchObject({ severity: "critical", evidence: { admin: C, granted_by: A, granted_at: null } });
   });
 
   it("recovery: the proposal names who replaces whom and when; the execute names the old admin", () => {

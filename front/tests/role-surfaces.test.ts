@@ -216,13 +216,19 @@ describe("K2/K3 bootstrap (F)", () => {
 });
 
 describe("review follow-ups (3.1)", () => {
-  it("K17: Grant (now a proposal, D3) and Revoke on the Admins page are Super Admin only; any Admin may cancel a grant", () => {
+  it("K17: Add (direct grant or proposal), Add now and Revoke on the Admins page are Super Admin only; any Admin may cancel a grant", () => {
     const page = src("app/admin/admins/page.tsx");
-    expect(page).toContain("const { isSuperAdmin, isAdmin } = useRole();");
+    expect(page).toContain("const role = useRole({ kyc: true });");
+    expect(page).toContain("const { isSuperAdmin, isAdmin } = role;");
+    // Cancel a staged grant: any Admin (the program also lets the upgrade authority).
     expect(page).toContain("disabled={!isAdmin || tx.isSending}");
-    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !grantAddr.trim()}");
-    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !revokeAddr.trim()}");
-    expect(page.match(/if \(!isSuperAdmin \|\| !wallet/g)?.length).toBe(2);
+    // Add, Add now, Revoke (per row; by address only while the list cannot be read).
+    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !addTargetValid");
+    expect(page).toContain("disabled={!isSuperAdmin || isSa || tx.isSending}");
+    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !isWalletAddress(revokeAddr.trim())}");
+    expect(page.match(/disabled=\{!isSuperAdmin \|\| tx\.isSending\}/g)?.length).toBe(1);
+    // add, grantNow and revoke return early for anyone but the Super Admin.
+    expect(page.match(/if \(!isSuperAdmin \|\| !wallet/g)?.length).toBe(3);
   });
 
   it("K18: issuer registration asks for a dedicated issuer key", () => {

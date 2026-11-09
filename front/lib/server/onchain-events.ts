@@ -87,6 +87,9 @@ export const EVENT_SPECS: readonly EventSpec[] = [
     fields: [["new_admin", "pubkey"], ["proposed_by", "pubkey"], ["cancelled_by", "pubkey"]] },
   { name: "AdminAdded", discriminator: [23, 13, 37, 90, 130, 53, 75, 251],
     fields: [["admin", "pubkey"], ["added_by", "pubkey"], ["proposed_at", "i64"]] },
+  // The Super Admin's direct grant (grant_admin, owner decision 2026-11-09).
+  { name: "AdminGranted", discriminator: [247, 13, 102, 98, 39, 168, 51, 209],
+    fields: [["admin", "pubkey"], ["granted_by", "pubkey"], ["granted_at", "i64"]] },
   { name: "AuthorityProposalCreated", discriminator: [181, 8, 121, 90, 217, 34, 126, 195],
     fields: [["target", "pubkey"], ["kind", "u8"], ["current_authority", "pubkey"], ["new_authority", "pubkey"],
       ["proposed_by", "pubkey"], ["eta", "i64"], ["expires_at", "i64"]] },

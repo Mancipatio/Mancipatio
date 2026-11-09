@@ -36,6 +36,7 @@ import {
   ACCEPT_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR,
   ACCEPT_PLATFORM_ADMIN_DISCRIMINATOR,
   ADD_ADMIN_DISCRIMINATOR,
+  GRANT_ADMIN_DISCRIMINATOR,
   APPROVE_SALE_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   CANCEL_ADMIN_PROPOSAL_DISCRIMINATOR,
@@ -82,6 +83,7 @@ import {
   UPDATE_KYC_REGISTRY_JURISDICTIONS_DISCRIMINATOR,
   VERIFY_ISSUER_KYB_DISCRIMINATOR,
   getAddAdminInstructionDataDecoder,
+  getGrantAdminInstructionDataDecoder,
   getApproveSaleInstructionDataDecoder,
   getClawbackBlocklistedHolderInstructionDataDecoder,
   getClawbackFromHolderInstructionDataDecoder,
@@ -349,6 +351,15 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     classify: ({ args, events }) => ({ source: "onchain:admin-record", severity: "critical",
       summary: `Admin added: ${String(args?.newAdmin)} (staged grant executed by the new key)`,
       evidence: { admin: args?.newAdmin, added_by: events.AdminAdded?.added_by ?? null, proposed_at: events.AdminAdded?.proposed_at ?? null } }) },
+  // The Super Admin's direct grant (owner decision 2026-11-09): no timelock
+  // and no signature of the new key, so this alarm is the only notice.
+  { name: "grant_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(GRANT_ADMIN_DISCRIMINATOR),
+    decode: dec(getGrantAdminInstructionDataDecoder()), accounts: { super_admin: 0, platform: 1, admin_record: 2 }, format: "platform",
+    fallback: "critical",
+    classify: ({ args, account, events }) => ({ source: "onchain:admin-record", severity: "critical",
+      summary: `Admin added: ${String(args?.newAdmin)} (granted at once by the Super Admin ${account(0)}, no waiting period)`,
+      evidence: { admin: args?.newAdmin, granted_by: events.AdminGranted?.granted_by ?? account(0) ?? null,
+        granted_at: events.AdminGranted?.granted_at ?? null } }) },
   { name: "cancel_admin_proposal", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CANCEL_ADMIN_PROPOSAL_DISCRIMINATOR),
     decode: null, accounts: { canceller: 0, pending_admin: 3, proposer: 4 }, format: "platform", fallback: "critical",
     classify: ({ account, events }) => {

@@ -1,8 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { type Address } from "@solana/kit";
+import { useSolanaClient } from "@solana/react-hooks";
+import { useEffect, useState, type ReactNode } from "react";
 import { WalletRequired } from "@/components/wallet-required";
+import { loadPendingAdmin, type PendingAdminRecord } from "@/lib/admin-grants";
+import { describeProposalWindow, proposalWindowState } from "@/lib/proposal-window";
+import { useChainClock } from "@/lib/use-chain-clock";
 import { SkeletonCard } from "@/components/skeleton";
 import { useRole, type Role, type RoleState } from "@/lib/auth";
 import { CAPABILITY_LABEL } from "@/lib/role-resolution";
@@ -107,6 +112,48 @@ export function connectedAsLabel(state: RoleState): string {
   return side.length > 0 && state.role === "public" ? side.join(" · ") : [main, ...side].join(" · ");
 }
 
+/** The gate opens for an Admin (an Admin grant would open it). */
+function wantsAdmin(requirement: Requirement): boolean {
+  return requirement.anyOf ? requirement.anyOf.includes("admin") : requirement.role === "admin";
+}
+
+/**
+ * A wallet proposed as Admin that is still inside the 48 h wait is not in
+ * `state.pending` (counted only once executable), so without this it would
+ * see a bare "Access denied": it says when the grant can be accepted.
+ */
+function ProposedAdminNotice({ wallet }: { wallet: string }) {
+  const client = useSolanaClient();
+  const now = useChainClock();
+  const [grant, setGrant] = useState<PendingAdminRecord | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadPendingAdmin(client.runtime.rpc, wallet as Address)
+      .then((g) => {
+        if (live) setGrant(g);
+      })
+      .catch(() => {
+        // A hint only: the gate's answer stands either way.
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, wallet]);
+  if (!grant || grant.stale) return null;
+  const windowState = proposalWindowState(grant, now, { pauseFlags: grant.platformPauseFlags, bootstrapWaived: true });
+  if (windowState.kind !== "waiting") return null;
+  return (
+    <p className="mt-3 text-xs text-amber-900">
+      The Admin role is proposed for this wallet and is not active yet. {describeProposalWindow(windowState)} Accept
+      it then on{" "}
+      <Link href={ACCOUNT_ROLES_PATH} className="font-semibold underline">
+        {ACCOUNT_ROLES_PATH}
+      </Link>{" "}
+      with this wallet; until then this page stays closed.
+    </p>
+  );
+}
+
 function NotAuthorized({ requirement, state }: { requirement: Requirement; state: RoleState }) {
   const required = requirement.anyOf
     ? requirement.anyOf.map((c) => CAPABILITY_LABEL[c])
@@ -132,6 +179,9 @@ function NotAuthorized({ requirement, state }: { requirement: Requirement; state
       <p className="mt-1 text-xs text-amber-800/80">Connected as: {connectedAsLabel(state)}</p>
       {kycMatters && state.kycUnavailable && (
         <p className="mt-2 text-xs text-amber-800">{state.kycUnavailable}</p>
+      )}
+      {state.pending.length === 0 && state.walletAddress && wantsAdmin(requirement) && (
+        <ProposedAdminNotice wallet={state.walletAddress} />
       )}
       {state.pending.length > 0 ? (
         <p className="mt-3 text-xs text-amber-900">

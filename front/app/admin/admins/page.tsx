@@ -11,19 +11,27 @@ import {
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import { useCallback, useEffect, useState } from "react";
-import {
-  fetchMaybeAdmin,
-  findSuperAdminRecordPda,
-  getRemoveAdminInstructionAsync,
-  type Admin,
-} from "@/lib/generated/asset_registry";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getRemoveAdminInstructionAsync } from "@/lib/generated/asset_registry";
 import {
   buildCancelAdminProposal,
+  buildGrantAdmin,
   buildProposeAdmin,
+  listAdmins,
   listPendingAdmins,
+  probeDirectGrant,
+  type AdminDirectory,
+  type DirectGrantSupport,
   type PendingAdminRecord,
 } from "@/lib/admin-grants";
+import {
+  WALLET_LABEL_MAX,
+  isWalletAddress,
+  normalizeWalletLabel,
+  readWalletLabels,
+  setWalletLabel,
+  type WalletLabels,
+} from "@/lib/admin-wallet-labels";
 import { describeProposalWindow, proposalWindowState } from "@/lib/proposal-window";
 import { useChainClock } from "@/lib/use-chain-clock";
 import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
@@ -32,6 +40,7 @@ import { recordAudit } from "@/lib/supabase";
 import { invalidateRoles } from "@/lib/role-store";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { useRole } from "@/lib/auth";
+import { WalletSessionRequiredError } from "@/lib/siws-client";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
@@ -41,90 +50,220 @@ const BTN =
   "rounded-lg border border-slate-300/60 px-4 py-2 text-sm font-medium text-slate-900 transition-colors hover:border-slate-400 hover:text-slate-900 disabled:opacity-50";
 const BTN2 =
   "rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:border-slate-500 disabled:opacity-50";
+const BTN_SM =
+  "rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-500 disabled:opacity-50";
 const INPUT =
-  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400";
+  "w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400";
+const BADGE =
+  "rounded-full border border-brand-200 bg-brand-50 px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-brand-700";
+
+const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export default function AdminsPage() {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const wallet = conn.wallet?.account.address;
-  // propose_admin / remove_admin require the Super Admin on-chain (K17,
-  // OD12): other Admins see the forms but cannot submit them. Any Admin (and
-  // the program upgrade authority) may cancel a staged grant.
-  const { isSuperAdmin, isAdmin } = useRole();
+  // grant_admin / propose_admin / remove_admin and the names are the Super
+  // Admin's alone (the program and the routes refuse anyone else); other
+  // Admins see the list and may cancel a staged grant.
+  const role = useRole({ kyc: true });
+  const { isSuperAdmin, isAdmin } = role;
   const superAdminOnly = isSuperAdmin ? undefined : "Super Admin only: the program rejects this from any other wallet";
 
-  const [grantAddr, setGrantAddr] = useState("");
-  const [revokeAddr, setRevokeAddr] = useState("");
-  const [checkAddr, setCheckAddr] = useState("");
-  const [checked, setChecked] = useState<Admin | null | undefined>(undefined);
-  const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const [confirmGrant, setConfirmGrant] = useState(false);
+  const [directory, setDirectory] = useState<AdminDirectory | null>(null);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [pendingGrants, setPendingGrants] = useState<PendingAdminRecord[] | null>(null);
   const [pendingError, setPendingError] = useState<string | null>(null);
+  const [support, setSupport] = useState<DirectGrantSupport | "checking">("checking");
+  const [names, setNames] = useState<WalletLabels | null>(null);
+  const [namesError, setNamesError] = useState<{ session: boolean; message: string } | null>(null);
+
+  const [addAddr, setAddAddr] = useState("");
+  const [addName, setAddName] = useState("");
+  const [confirmAdd, setConfirmAdd] = useState(false);
+  const [editing, setEditing] = useState<{ wallet: string; value: string } | null>(null);
+  const [savingName, setSavingName] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState<PendingAdminRecord | null>(null);
+  const [confirmGrantNow, setConfirmGrantNow] = useState<PendingAdminRecord | null>(null);
+  const [revokeAddr, setRevokeAddr] = useState("");
   const toast = useToast();
   const now = useChainClock();
 
-  const loadPending = useCallback(async () => {
-    try {
-      setPendingGrants(await listPendingAdmins(client.runtime.rpc));
+  const loadChain = useCallback(async () => {
+    const rpc = client.runtime.rpc;
+    const [admins, pending] = await Promise.allSettled([listAdmins(rpc), listPendingAdmins(rpc)]);
+    if (admins.status === "fulfilled") {
+      setDirectory(admins.value);
+      setDirectoryError(null);
+    } else {
+      setDirectoryError(errorText(admins.reason));
+    }
+    if (pending.status === "fulfilled") {
+      setPendingGrants(pending.value);
       setPendingError(null);
-    } catch (err) {
-      setPendingError(err instanceof Error ? err.message : String(err));
+    } else {
+      setPendingError(errorText(pending.reason));
     }
   }, [client]);
-  useEffect(() => {
-    // Load the staged grants after hydration.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadPending();
-  }, [loadPending]);
 
-  /**
-   * Step 1 of a grant (D3): propose_admin. The proposed key then takes the
-   * role itself (add_admin) at /account/roles after 48 hours, within 14 days.
-   */
-  async function grant(reason: string) {
-    if (!isSuperAdmin || !wallet || !conn.wallet || !grantAddr.trim()) return;
-    const target = grantAddr.trim();
+  useEffect(() => {
+    // Load the chain state after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadChain();
+  }, [loadChain]);
+
+  // Whether this network's program grants at once (one simulation, nothing sent).
+  const superAdmin = directory?.superAdmin ?? null;
+  useEffect(() => {
+    if (!superAdmin) return;
+    let live = true;
+    void probeDirectGrant(client.runtime.rpc, superAdmin).then((s) => {
+      if (live) setSupport(s);
+    });
+    return () => {
+      live = false;
+    };
+  }, [client, superAdmin]);
+
+  const listed = useMemo(() => {
+    const all = new Set<string>();
+    for (const a of directory?.admins ?? []) all.add(a.admin);
+    for (const p of pendingGrants ?? []) all.add(p.newAdmin);
+    return [...all].sort();
+  }, [directory, pendingGrants]);
+  const listedKey = listed.join(",");
+
+  const loadNames = useCallback(
+    async (interactive: boolean | "session-only" = "session-only") => {
+      if (!conn.wallet || listedKey === "") return;
+      try {
+        setNames(await readWalletLabels(conn.wallet, listedKey.split(","), { interactive }));
+        setNamesError(null);
+      } catch (err) {
+        setNamesError({ session: err instanceof WalletSessionRequiredError, message: errorText(err) });
+      }
+    },
+    [conn.wallet, listedKey],
+  );
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadNames();
+  }, [loadNames]);
+
+  const direct = support === "supported";
+  const addTarget = addAddr.trim();
+  const addTargetValid = isWalletAddress(addTarget);
+  let addNameError: string | null = null;
+  try {
+    normalizeWalletLabel(addName);
+  } catch (err) {
+    addNameError = errorText(err);
+  }
+
+  /** Names a wallet after a grant; a refusal leaves the role in place. */
+  async function saveName(target: string, raw: string, quietWhenEmpty: boolean): Promise<boolean> {
+    if (!conn.wallet) return false;
+    const label = normalizeWalletLabel(raw);
+    if (label === "" && quietWhenEmpty) return true;
+    if (names && !names.available) {
+      toast.showError("Name not saved", "Wallet names are not set up on this network yet (database migration 0092).");
+      return false;
+    }
+    try {
+      await setWalletLabel(conn.wallet, target, label);
+      await loadNames(true);
+      return true;
+    } catch (err) {
+      toast.showError("Name not saved", errorText(err));
+      return false;
+    }
+  }
+
+  /** Adds an Admin: at once (grant_admin) where the program has it, else the 48 h proposal. */
+  async function add(reason: string) {
+    if (!isSuperAdmin || !wallet || !conn.wallet || !addTargetValid || addNameError) return;
+    const target = addTarget;
+    const ixName = direct ? "grant_admin" : "propose_admin";
     const pendingId = toast.showPending(
-      `Proposing admin ${target.slice(0, 6)}…`,
+      direct ? `Adding Admin ${short(target)}…` : `Proposing Admin ${short(target)}…`,
       reason,
     );
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
-      // Re-reads the Super Admin and refuses a wallet that is already an Admin.
-      const ix = await buildProposeAdmin(client.runtime.rpc, signer, target as Address);
-      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      // Both re-read the Super Admin and refuse a wallet that is already an Admin.
+      const instructions = direct
+        ? await buildGrantAdmin(client.runtime.rpc, signer, target as Address)
+        : [await buildProposeAdmin(client.runtime.rpc, signer, target as Address)];
+      const sig = await tx.send({ instructions, feePayer: signer });
       toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Admin grant proposed" });
+      toast.showTx(sig, { title: direct ? "Admin added" : "Admin grant proposed" });
       void recordAudit({
-        ix_name: "propose_admin",
+        ix_name: ixName,
         category: "admins",
         actor_wallet: wallet.toString(),
         reason,
         target_label: target,
         tx_signature: sig,
       });
-      setConfirmGrant(false);
-      setGrantAddr("");
-      void loadPending();
-      // The menu counts grants in their review window (0079 mirror).
+      setConfirmAdd(false);
+      setAddAddr("");
+      await saveName(target, addName, true);
+      setAddName("");
+      invalidateRoles();
+      void loadChain();
       notifyAdminBadges({ afterIndexer: true });
     } catch (err) {
       toast.dismiss(pendingId);
       const explained = explainSendError(err);
-      toast.showError("Failed to propose admin", explained);
-      const message = err instanceof Error ? err.message : String(err);
+      toast.showError(direct ? "Failed to add the Admin" : "Failed to propose the Admin", explained);
       void recordAudit({
-        ix_name: "propose_admin",
+        ix_name: ixName,
         category: "admins",
         actor_wallet: wallet.toString(),
         reason,
         target_label: target,
         status: "failed",
-        metadata: { error: message, explained },
+        metadata: { error: errorText(err), explained },
+      });
+    }
+  }
+
+  /** A staged grant made an Admin at once: one transaction cancels it and grants. */
+  async function grantNow(p: PendingAdminRecord, reason: string) {
+    if (!isSuperAdmin || !wallet || !conn.wallet) return;
+    const target = p.newAdmin.toString();
+    try {
+      const { signer } = createWalletTransactionSigner(conn.wallet);
+      const instructions = await buildGrantAdmin(client.runtime.rpc, signer, p.newAdmin);
+      const sig = await tx.send({ instructions, feePayer: signer });
+      toast.showTx(sig, { title: "Admin added" });
+      void recordAudit({
+        ix_name: "grant_admin",
+        category: "admins",
+        actor_wallet: wallet.toString(),
+        reason,
+        target_label: target,
+        tx_signature: sig,
+        metadata: { replaced_staged_grant: true },
+      });
+      setConfirmGrantNow(null);
+      invalidateRoles();
+      void loadChain();
+      notifyAdminBadges({ afterIndexer: true });
+    } catch (err) {
+      const explained = explainSendError(err);
+      toast.showError("Failed to add the Admin", explained);
+      void recordAudit({
+        ix_name: "grant_admin",
+        category: "admins",
+        actor_wallet: wallet.toString(),
+        reason,
+        target_label: target,
+        status: "failed",
+        metadata: { error: explained, replaced_staged_grant: true },
       });
     }
   }
@@ -146,7 +285,7 @@ export default function AdminsPage() {
         tx_signature: sig,
       });
       setConfirmCancel(null);
-      void loadPending();
+      void loadChain();
       notifyAdminBadges({ afterIndexer: true });
     } catch (err) {
       const explained = explainSendError(err);
@@ -163,13 +302,9 @@ export default function AdminsPage() {
     }
   }
 
-  async function revoke(reason: string) {
-    if (!isSuperAdmin || !wallet || !conn.wallet || !revokeAddr.trim()) return;
-    const target = revokeAddr.trim();
-    const pendingId = toast.showPending(
-      `Revoking admin ${target.slice(0, 6)}…`,
-      reason,
-    );
+  async function revoke(target: string, reason: string) {
+    if (!isSuperAdmin || !wallet || !conn.wallet) return;
+    const pendingId = toast.showPending(`Revoking Admin ${short(target)}…`, reason);
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
       const ix = await getRemoveAdminInstructionAsync({
@@ -187,14 +322,14 @@ export default function AdminsPage() {
         target_label: target,
         tx_signature: sig,
       });
-      setConfirmRevoke(false);
+      setConfirmRevoke(null);
       setRevokeAddr("");
       invalidateRoles();
+      void loadChain();
     } catch (err) {
       toast.dismiss(pendingId);
       const explained = explainSendError(err);
-      const message = err instanceof Error ? err.message : String(err);
-      toast.showError("Failed to revoke admin", explained);
+      toast.showError("Failed to revoke the Admin", explained);
       void recordAudit({
         ix_name: "remove_admin",
         category: "admins",
@@ -202,31 +337,47 @@ export default function AdminsPage() {
         reason,
         target_label: target,
         status: "failed",
-        metadata: { error: message, explained },
+        metadata: { error: errorText(err), explained },
       });
     }
   }
 
-  async function check() {
-    if (!checkAddr.trim()) return;
-    const [pda] = await findSuperAdminRecordPda({
-      admin: checkAddr.trim() as Address,
-    });
-    const maybe = await fetchMaybeAdmin(client.runtime.rpc, pda);
-    setChecked(maybe.exists ? maybe.data : null);
+  async function rename() {
+    if (!editing) return;
+    setSavingName(true);
+    const ok = await saveName(editing.wallet, editing.value, false);
+    setSavingName(false);
+    if (ok) setEditing(null);
   }
+
+  const kycAuthority = role.kycRegistry?.registry.authority?.toString() ?? null;
+  const blocklistAuthority = role.blocklistAuthority?.toString() ?? null;
+  const rolesOf = (key: string) =>
+    [
+      key === superAdmin ? "Super Admin" : null,
+      "Admin",
+      key === kycAuthority ? "KYC provider" : null,
+      key === blocklistAuthority ? "Blocklist authority" : null,
+    ].filter((r): r is string => r !== null);
+
+  const addHelp =
+    support === "supported"
+      ? "The wallet is an Admin as soon as the transaction lands. It signs nothing; you pay its record (about 0.0014 SOL, returned when you revoke it)."
+      : support === "unsupported"
+        ? "This network's program still grants in two steps: the wallet accepts at /account/roles once 48 hours have passed, within 14 days. Adding at once arrives with the program upgrade."
+        : support === "checking"
+          ? "Checking whether this network's program grants at once…"
+          : "Could not check whether this network's program grants at once, so this proposes the grant (the wallet accepts at /account/roles after 48 hours).";
 
   return (
     <section className="min-w-0 flex-1">
       <h1 className="text-2xl font-semibold">Admins</h1>
-      <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-        The super admin proposes and revokes the admin role — admins operate
-        issuance and custody. A grant waits 48 hours (waived while the
-        bootstrap window is open): the proposed wallet then takes the role
-        itself within 14 days, and any admin or the program upgrade authority
-        can cancel it meanwhile (the upgrade authority through the CLI /
-        Squads export). A revoke is immediate. The blocklist is
-        changed only by the blocklist authority, a separate key.
+      <p className="mt-1.5 max-w-3xl text-[13px] leading-relaxed text-slate-600">
+        Admins operate issuance and custody. The Super Admin adds and revokes
+        them; both are on-chain transactions, and every one raises a critical
+        alert. Names are notes for operators: they grant nothing, and every
+        role on this page is read from the chain. The blocklist is changed
+        only by the blocklist authority, a separate key.
       </p>
 
       {!conn.isReady ? (
@@ -236,150 +387,247 @@ export default function AdminsPage() {
       ) : (
         <div className="mt-8 space-y-6">
           <div className={CARD}>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Propose admin role
-            </h2>
-            <p className="mt-1 text-sm text-slate-500">
-              Super admin only. The proposed wallet accepts at{" "}
-              <a className="underline" href={ACCOUNT_ROLES_PATH}>
-                {ACCOUNT_ROLES_PATH}
-              </a>{" "}
-              once the waiting period ends.
+            <h2 className="text-lg font-semibold text-slate-900">Add an Admin</h2>
+            <p className="mt-1 max-w-2xl text-sm text-slate-500">
+              Super Admin only. {addHelp}
             </p>
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_auto]">
               <input
                 className={INPUT}
-                value={grantAddr}
+                value={addAddr}
                 placeholder="Wallet address"
-                onChange={(e) => setGrantAddr(e.target.value)}
+                aria-label="Wallet address"
+                spellCheck={false}
+                onChange={(e) => setAddAddr(e.target.value)}
+              />
+              <input
+                className={INPUT}
+                value={addName}
+                maxLength={WALLET_LABEL_MAX + 20}
+                placeholder="Name, e.g. Ana — operations"
+                aria-label="Name (who holds this wallet)"
+                onChange={(e) => setAddName(e.target.value)}
               />
               <button
                 type="button"
-                disabled={!isSuperAdmin || tx.isSending || !grantAddr.trim()}
+                disabled={!isSuperAdmin || tx.isSending || !addTargetValid || addNameError !== null || support === "checking"}
                 title={superAdminOnly}
-                onClick={() => setConfirmGrant(true)}
+                onClick={() => setConfirmAdd(true)}
                 className={`shrink-0 ${BTN}`}
               >
-                Propose
+                {direct ? "Add Admin" : "Propose"}
               </button>
             </div>
+            {addTarget !== "" && !addTargetValid && (
+              <p className="mt-2 text-xs text-amber-800">That is not a Solana wallet address.</p>
+            )}
+            {addNameError && <p className="mt-2 text-xs text-amber-800">{addNameError}</p>}
           </div>
 
           <div className={CARD}>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Pending admin grants
-            </h2>
-            {pendingError ? (
-              <p className="mt-2 text-sm text-amber-800">
-                Could not read the pending grants: {pendingError}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Admins{directory ? ` (${directory.admins.length})` : ""}
+              </h2>
+              <button type="button" className={BTN_SM} onClick={() => void loadChain()}>
+                Refresh
+              </button>
+            </div>
+            {namesError && (
+              <div className="mt-3 flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 sm:flex-row sm:items-center sm:justify-between">
+                <span role="alert">
+                  {namesError.session
+                    ? "Sign in with your wallet to see the names (one signature, nothing is sent on chain)."
+                    : `Could not load the names: ${namesError.message}`}
+                </span>
+                <button type="button" className={BTN_SM} onClick={() => void loadNames(true)}>
+                  {namesError.session ? "Sign in" : "Retry"}
+                </button>
+              </div>
+            )}
+            {names && !names.available && isSuperAdmin && (
+              <p className="mt-3 text-xs text-amber-800">
+                Wallet names are not set up on this network yet (database migration 0092).
               </p>
-            ) : pendingGrants === null ? (
-              <p className="mt-2 text-sm text-slate-500">Loading…</p>
-            ) : pendingGrants.length === 0 ? (
-              <p className="mt-2 text-sm text-slate-600">No grant is pending.</p>
+            )}
+            {directoryError ? (
+              <p className="mt-3 text-sm text-amber-800">Could not read the Admins: {directoryError}</p>
+            ) : directory === null ? (
+              <p className="mt-3 text-sm text-slate-500">Loading…</p>
             ) : (
               <ul className="mt-3 divide-y divide-slate-100">
-                {pendingGrants.map((p) => (
-                  <li key={p.address} className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm">
-                    <div className="min-w-0">
-                      <p className="break-all font-mono text-xs text-slate-800">{p.newAdmin}</p>
-                      <p className="mt-0.5 text-xs text-slate-500">
-                        {/* The program waives the 48 h while the bootstrap window (bit 7) is open (util::effective_eta). */}
-                        {describeProposalWindow(
-                          proposalWindowState(p, now, { pauseFlags: p.platformPauseFlags, bootstrapWaived: true }),
+                {directory.admins.map((a) => {
+                  const key = a.admin.toString();
+                  const isSa = key === superAdmin;
+                  const isEditing = editing?.wallet === key;
+                  return (
+                    <li key={key} className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        {isEditing ? (
+                          <div className="flex flex-wrap gap-2">
+                            <input
+                              className={`${INPUT} max-w-sm`}
+                              value={editing.value}
+                              autoFocus
+                              maxLength={WALLET_LABEL_MAX + 20}
+                              placeholder="Name (empty removes it)"
+                              aria-label={`Name of ${key}`}
+                              onChange={(e) => setEditing({ wallet: key, value: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void rename();
+                                if (e.key === "Escape") setEditing(null);
+                              }}
+                            />
+                            <button type="button" className={BTN_SM} disabled={savingName} onClick={() => void rename()}>
+                              {savingName ? "Saving…" : "Save"}
+                            </button>
+                            <button type="button" className={BTN_SM} disabled={savingName} onClick={() => setEditing(null)}>
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <WalletName address={key} names={names} />
                         )}
-                      </p>
-                      {!p.stale && (
-                        <p className="mt-1 max-w-xl text-xs text-slate-600">
-                          The grant is executed by the proposed wallet itself (it signs{" "}
-                          <span className="font-mono">add_admin</span>): send its holder{" "}
-                          <Link href="/account/roles" className="font-medium text-brand-700 underline">
-                            /account/roles
-                          </Link>{" "}
-                          — they connect THAT wallet and press Accept under Pending roles once the
-                          waiting period ends, before it expires.
-                        </p>
+                        <p className="break-all font-mono text-xs text-slate-700">{key}</p>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {rolesOf(key).map((r) => (
+                            <span key={r} className={BADGE}>
+                              {r}
+                            </span>
+                          ))}
+                          <span className="text-[11px] text-slate-500">
+                            {key === wallet ? "This wallet · " : ""}
+                            {isSa && a.addedBy.toString() === key ? "set up with the platform" : `added by ${a.addedBy.toString() === superAdmin ? "the Super Admin" : short(a.addedBy.toString())}`}
+                          </span>
+                        </div>
+                      </div>
+                      {!isEditing && (
+                        <div className="flex shrink-0 gap-2">
+                          <button
+                            type="button"
+                            className={BTN_SM}
+                            disabled={!isSuperAdmin || (names !== null && !names.available)}
+                            title={isSuperAdmin ? undefined : "Super Admin only"}
+                            onClick={() => setEditing({ wallet: key, value: names?.labels[key]?.label ?? "" })}
+                          >
+                            {names?.labels[key] ? "Rename" : "Name"}
+                          </button>
+                          <button
+                            type="button"
+                            className={BTN_SM}
+                            disabled={!isSuperAdmin || isSa || tx.isSending}
+                            title={
+                              isSa
+                                ? "The Super Admin's own record stays while it is the Super Admin; hand the role over first (/account/roles)"
+                                : superAdminOnly
+                            }
+                            onClick={() => setConfirmRevoke(key)}
+                          >
+                            Revoke
+                          </button>
+                        </div>
                       )}
-                      {p.stale && (
-                        <p className="mt-0.5 text-xs text-amber-800">
-                          Proposed by an earlier Super Admin ({p.proposedBy.slice(0, 6)}…): it can no
-                          longer be executed. Cancel it.
-                        </p>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      disabled={!isAdmin || tx.isSending}
-                      title={isAdmin ? undefined : "Admins (and the upgrade authority) only"}
-                      onClick={() => setConfirmCancel(p)}
-                      className={`shrink-0 ${BTN2}`}
-                    >
-                      Cancel
-                    </button>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             )}
+            {directoryError && (
+              <div className="mt-4 border-t border-slate-100 pt-4">
+                <p className="text-sm text-slate-600">Revoke by address while the list cannot be read:</p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    className={INPUT}
+                    value={revokeAddr}
+                    placeholder="Admin wallet address"
+                    aria-label="Admin wallet address"
+                    onChange={(e) => setRevokeAddr(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    disabled={!isSuperAdmin || tx.isSending || !isWalletAddress(revokeAddr.trim())}
+                    title={superAdminOnly}
+                    onClick={() => setConfirmRevoke(revokeAddr.trim())}
+                    className={`shrink-0 ${BTN2}`}
+                  >
+                    Revoke
+                  </button>
+                </div>
+              </div>
+            )}
+            <p className="mt-4 max-w-2xl text-xs leading-relaxed text-slate-500">
+              The program has one Admin role. The Super Admin, the KYC provider
+              and the blocklist authority are separate keys: each is handed
+              over by proposing the next key, which accepts with its own
+              signature on{" "}
+              <Link href={ACCOUNT_ROLES_PATH} className="font-medium text-brand-700 underline">
+                {ACCOUNT_ROLES_PATH}
+              </Link>
+              .
+            </p>
           </div>
 
-          <div className={CARD}>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Revoke admin role
-            </h2>
-            <p className="mt-1 text-sm text-slate-500">Super admin only.</p>
-            <div className="mt-4 flex gap-2">
-              <input
-                className={INPUT}
-                value={revokeAddr}
-                placeholder="Admin wallet address"
-                onChange={(e) => setRevokeAddr(e.target.value)}
-              />
-              <button
-                type="button"
-                disabled={!isSuperAdmin || tx.isSending || !revokeAddr.trim()}
-                title={superAdminOnly}
-                onClick={() => setConfirmRevoke(true)}
-                className={`shrink-0 ${BTN2}`}
-              >
-                Revoke
-              </button>
-            </div>
-          </div>
-
-          <div className={CARD}>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Check a wallet
-            </h2>
-            <div className="mt-4 flex gap-2">
-              <input
-                className={INPUT}
-                value={checkAddr}
-                placeholder="Wallet address"
-                onChange={(e) => setCheckAddr(e.target.value)}
-              />
-              <button
-                type="button"
-                disabled={!checkAddr.trim()}
-                onClick={() => void check()}
-                className={`shrink-0 ${BTN2}`}
-              >
-                Check
-              </button>
-            </div>
-            {checked === null && (
-              <p className="mt-3 text-sm text-slate-600">
-                Not an admin.
+          {(pendingError || (pendingGrants !== null && pendingGrants.length > 0)) && (
+            <div className={CARD}>
+              <h2 className="text-lg font-semibold text-slate-900">Pending admin grants</h2>
+              <p className="mt-1 max-w-2xl text-sm text-slate-500">
+                Proposed grants the proposed wallet executes itself at{" "}
+                <Link href={ACCOUNT_ROLES_PATH} className="underline">
+                  {ACCOUNT_ROLES_PATH}
+                </Link>{" "}
+                after 48 hours, within 14 days.
+                {direct && " The Super Admin can add the wallet now instead: the proposal is cancelled in the same transaction."}
               </p>
-            )}
-            {checked != null && (
-              <p className="mt-3 text-sm text-emerald-600">
-                Admin — granted by{" "}
-                <span className="font-mono break-all">
-                  {checked.addedBy.toString()}
-                </span>
-              </p>
-            )}
-          </div>
+              {pendingError ? (
+                <p className="mt-2 text-sm text-amber-800">Could not read the pending grants: {pendingError}</p>
+              ) : (
+                <ul className="mt-3 divide-y divide-slate-100">
+                  {(pendingGrants ?? []).map((p) => (
+                    <li key={p.address} className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <WalletName address={p.newAdmin.toString()} names={names} />
+                        <p className="break-all font-mono text-xs text-slate-800">{p.newAdmin}</p>
+                        <p className="text-xs text-slate-500">
+                          {/* The program waives the 48 h while the bootstrap window (bit 7) is open (util::effective_eta). */}
+                          {describeProposalWindow(
+                            proposalWindowState(p, now, { pauseFlags: p.platformPauseFlags, bootstrapWaived: true }),
+                          )}
+                        </p>
+                        {p.stale && (
+                          <p className="text-xs text-amber-800">
+                            Proposed by an earlier Super Admin ({p.proposedBy.slice(0, 6)}…): it can no longer be
+                            executed. Cancel it.
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 gap-2">
+                        {direct && (
+                          <button
+                            type="button"
+                            disabled={!isSuperAdmin || tx.isSending}
+                            title={superAdminOnly}
+                            onClick={() => setConfirmGrantNow(p)}
+                            className={BTN_SM}
+                          >
+                            Add now
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={!isAdmin || tx.isSending}
+                          title={isAdmin ? undefined : "Admins (and the upgrade authority) only"}
+                          onClick={() => setConfirmCancel(p)}
+                          className={BTN_SM}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -402,25 +650,41 @@ export default function AdminsPage() {
         </p>
       )}
       <ConfirmModal
-        open={confirmGrant}
-        onClose={() => setConfirmGrant(false)}
-        onConfirm={(reason) => grant(reason)}
-        title="Propose admin role"
+        open={confirmAdd}
+        onClose={() => setConfirmAdd(false)}
+        onConfirm={(reason) => add(reason)}
+        title={direct ? "Add an Admin" : "Propose an Admin"}
         kind="info"
-        confirmLabel="Propose"
+        confirmLabel={direct ? "Add Admin" : "Propose"}
         description={
           <>
-            <p>You are about to propose admin permissions for:</p>
-            <p className="mt-2 break-all rounded bg-slate-100 px-2 py-1 font-mono text-xs">
-              {grantAddr.trim()}
-            </p>
+            <p>{direct ? "You are about to make this wallet an Admin:" : "You are about to propose admin permissions for:"}</p>
+            <p className="mt-2 break-all rounded bg-slate-100 px-2 py-1 font-mono text-xs">{addTarget}</p>
+            {normalizeSafe(addName) && <p className="mt-2 text-sm">Name: {normalizeSafe(addName)}</p>}
             <p className="mt-2 text-xs text-slate-500">
-              After 48 hours (at once while the bootstrap window is open) that
-              wallet takes the role itself, within 14 days. It will gain access
-              to issuance and custody (the blocklist stays with the blocklist
-              authority). Reason will be recorded in the audit log.
+              {direct
+                ? "It gains access to issuance and custody as soon as the transaction lands, without signing anything. You can revoke it at any time. "
+                : "After 48 hours that wallet takes the role itself, within 14 days. It will gain access to issuance and custody. "}
+              The blocklist stays with the blocklist authority. The reason is recorded in the audit log
+              {normalizeSafe(addName) ? "; saving the name asks for one more wallet signature." : "."}
             </p>
           </>
+        }
+        busy={tx.isSending}
+      />
+      <ConfirmModal
+        open={confirmGrantNow !== null}
+        onClose={() => setConfirmGrantNow(null)}
+        onConfirm={(reason) => (confirmGrantNow ? grantNow(confirmGrantNow, reason) : undefined)}
+        title="Add this Admin now"
+        kind="info"
+        confirmLabel="Add Admin"
+        description={
+          <p>
+            <span className="break-all font-mono text-xs">{confirmGrantNow?.newAdmin}</span> becomes an Admin
+            at once. Its pending proposal is cancelled in the same transaction (the proposal&apos;s rent
+            returns to the Super Admin who made it).
+          </p>
         }
         busy={tx.isSending}
       />
@@ -441,23 +705,22 @@ export default function AdminsPage() {
         busy={tx.isSending}
       />
       <ConfirmModal
-        open={confirmRevoke}
-        onClose={() => setConfirmRevoke(false)}
-        onConfirm={(reason) => revoke(reason)}
+        open={confirmRevoke !== null}
+        onClose={() => setConfirmRevoke(null)}
+        onConfirm={(reason) => (confirmRevoke ? revoke(confirmRevoke, reason) : undefined)}
         title="Revoke admin role"
         kind="destructive"
         confirmLabel="Revoke"
         description={
           <>
-            <p>
-              You are about to revoke admin permissions from:
-            </p>
-            <p className="mt-2 break-all rounded bg-slate-100 px-2 py-1 font-mono text-xs">
-              {revokeAddr.trim()}
-            </p>
+            <p>You are about to revoke admin permissions from:</p>
+            {confirmRevoke && names?.labels[confirmRevoke] && (
+              <p className="mt-2 text-sm font-semibold">{names.labels[confirmRevoke].label}</p>
+            )}
+            <p className="mt-2 break-all rounded bg-slate-100 px-2 py-1 font-mono text-xs">{confirmRevoke}</p>
             <p className="mt-2 text-xs text-slate-500">
-              They will lose access to all operational instructions. Reason
-              will be recorded in the audit log.
+              It loses access to every operational instruction at once. Its name stays, so a later grant
+              shows it again. The reason is recorded in the audit log.
             </p>
           </>
         }
@@ -465,4 +728,28 @@ export default function AdminsPage() {
       />
     </section>
   );
+}
+
+/** Who holds a wallet: its operator name (0092) and the Manci account it is linked to. */
+function WalletName({ address, names }: { address: string; names: WalletLabels | null }) {
+  const label = names?.labels[address]?.label ?? null;
+  const account = names?.accounts[address] ?? null;
+  const accountText = account
+    ? [account.displayName || null, account.email].filter(Boolean).join(" · ") || "linked Manci account"
+    : null;
+  return (
+    <div className="min-w-0">
+      <p className={label ? "font-semibold text-slate-900" : "text-slate-500"}>{label ?? "No name"}</p>
+      {accountText && <p className="mt-0.5 text-xs text-slate-600">Account: {accountText}</p>}
+    </div>
+  );
+}
+
+/** The name as it would be stored, or "" while it is invalid. */
+function normalizeSafe(raw: string): string {
+  try {
+    return normalizeWalletLabel(raw);
+  } catch {
+    return "";
+  }
 }
