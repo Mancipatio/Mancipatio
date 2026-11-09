@@ -61,6 +61,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0081_issuer_profile_archive.sql");
       expect(applied).toContain("0088_notification_log.sql");
       expect(applied).toContain("0089_fee_schedule.sql");
+      expect(applied).toContain("0092_admin_wallet_labels.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -113,6 +114,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "fee_charges",
         "certificates",
         "certificate_counters",
+        // 0092: operator names of platform wallets; read by Admins through the server only.
+        "admin_wallet_labels",
       ]) {
         for (const role of ["anon", "authenticated"]) {
           const privileges = db.query(

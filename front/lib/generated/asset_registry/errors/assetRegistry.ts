@@ -326,10 +326,13 @@ export const ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY = 0x1809; // 6153
 export const ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT = 0x180a; // 6154
 /** PlatformRecoveryPending: A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation */
 export const ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING = 0x180b; // 6155
+/** AdminGrantStaged: An Admin grant is staged for this key; cancel it before granting the role directly */
+export const ASSET_REGISTRY_ERROR__ADMIN_GRANT_STAGED = 0x180c; // 6156
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_NOT_CLOSABLE
+  | typeof ASSET_REGISTRY_ERROR__ADMIN_GRANT_STAGED
   | typeof ASSET_REGISTRY_ERROR__ALREADY_CLAIMED
   | typeof ASSET_REGISTRY_ERROR__ASSET_HAS_NO_SHARE_CLASSES
   | typeof ASSET_REGISTRY_ERROR__ASSET_NOT_ACTIVE
@@ -490,6 +493,7 @@ if (process.env.NODE_ENV !== "production") {
   assetRegistryErrorMessages = {
     [ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED]: `This account requires a reviewed migration before this operation`,
     [ASSET_REGISTRY_ERROR__ACCOUNT_NOT_CLOSABLE]: `Account is not closable: terminal status required (a KYC entry must be Revoked and past its expiry)`,
+    [ASSET_REGISTRY_ERROR__ADMIN_GRANT_STAGED]: `An Admin grant is staged for this key; cancel it before granting the role directly`,
     [ASSET_REGISTRY_ERROR__ALREADY_CLAIMED]: `This claim has already been fully drawn`,
     [ASSET_REGISTRY_ERROR__ASSET_HAS_NO_SHARE_CLASSES]: `An asset must have at least one share class before activation`,
     [ASSET_REGISTRY_ERROR__ASSET_NOT_ACTIVE]: `Asset must be Active for this action`,

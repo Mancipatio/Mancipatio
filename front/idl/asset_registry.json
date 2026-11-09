@@ -8887,6 +8887,123 @@
       "args": []
     },
     {
+      "name": "grant_admin",
+      "docs": [
+        "Super admin grants the admin role to `new_admin` at once: no timelock,",
+        "no signature of the new key (owner decision 2026-11-09)."
+      ],
+      "discriminator": [
+        195,
+        254,
+        173,
+        116,
+        39,
+        54,
+        68,
+        72
+      ],
+      "accounts": [
+        {
+          "name": "super_admin",
+          "docs": [
+            "Pays the Admin record's rent (`remove_admin` returns it to the super",
+            "admin that signs the removal)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Created here, so a key that already holds the role fails the `init`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "docs": [
+            "A grant staged for the key must be cancelled first (earlier in the",
+            "same transaction is enough): left next to the record, `add_admin`",
+            "could re-create the role from it after a later `remove_admin`."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "initialize_platform",
       "docs": [
         "Creates the platform singleton. The signer becomes the platform admin.",
@@ -14805,6 +14922,19 @@
       ]
     },
     {
+      "name": "AdminGranted",
+      "discriminator": [
+        247,
+        13,
+        102,
+        98,
+        39,
+        168,
+        51,
+        209
+      ]
+    },
+    {
       "name": "AdminProposalCancelled",
       "discriminator": [
         158,
@@ -16235,6 +16365,11 @@
       "code": 6155,
       "name": "PlatformRecoveryPending",
       "msg": "A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation"
+    },
+    {
+      "code": 6156,
+      "name": "AdminGrantStaged",
+      "msg": "An Admin grant is staged for this key; cancel it before granting the role directly"
     }
   ],
   "types": [
@@ -16281,6 +16416,30 @@
           },
           {
             "name": "proposed_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminGranted",
+      "docs": [
+        "Emitted by `grant_admin`: the super admin's direct grant (no timelock,",
+        "no signature of the new key)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "granted_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "granted_at",
             "type": "i64"
           }
         ]

@@ -547,6 +547,26 @@ pub fn execute_platform_recovery_ix(
     )
 }
 
+/// `grant_admin(new_admin)`: the super admin's direct grant (no timelock,
+/// no signature of the new key; it pays the record).
+pub fn grant_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::GrantAdmin {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::GrantAdmin {
+            super_admin: *super_admin,
+            platform: platform_pda(),
+            admin_record: admin_pda(new_admin),
+            pending_admin: pending_admin(new_admin),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
 pub fn remove_admin_ix(super_admin: &Pubkey, admin: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         asset_registry::ID,

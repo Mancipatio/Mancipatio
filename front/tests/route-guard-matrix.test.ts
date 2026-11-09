@@ -50,6 +50,10 @@ const MATRIX: Record<string, Gate> = {
   "admin/certificates/sign": "requireSuperAdmin",
   "admin/certificates/anchor": "requireSuperAdmin",
   "admin/certificates/revoke": "requireAdmin",
+  // Names of the wallets on /admin/admins (0092): any Admin reads, only the
+  // Super Admin names a wallet.
+  "admin/wallet-labels": "requireAdmin",
+  "admin/wallet-labels/set": "requireSuperAdmin",
   // Super Admin only.
   "clients/anonymize": "requireSuperAdmin",
   // The passport write-back: the registry authority only.

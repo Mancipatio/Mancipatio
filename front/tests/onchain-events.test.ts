@@ -61,6 +61,12 @@ describe("asset_registry event decoders", () => {
     expect(decodeRegistryEvent(bad)).toEqual({ name: "PlatformAdminChanged", error: "LAYOUT" });
   });
 
+  it("decodes AdminGranted, the Super Admin's direct grant", () => {
+    expect(EVENT_SPECS.map((spec) => spec.name)).toContain("AdminGranted");
+    expect(decodeRegistryEvent(encodeEvent("AdminGranted", { admin: OTHER, granted_by: KEY, granted_at: 1_790_000_000 })))
+      .toEqual({ name: "AdminGranted", data: { admin: OTHER, granted_by: KEY, granted_at: "1790000000" } });
+  });
+
   it("decodes values and pubkeys at the exact length", () => {
     expect(decodeRegistryEvent(encodeEvent("PauseFlagsChanged", { old: 0x01, new: 0x3f, by: KEY })))
       .toEqual({ name: "PauseFlagsChanged", data: { old: 1, new: 0x3f, by: KEY } });

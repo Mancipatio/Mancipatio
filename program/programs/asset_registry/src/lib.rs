@@ -176,6 +176,12 @@ pub mod asset_registry {
         instructions::handle_cancel_admin_proposal(ctx)
     }
 
+    /// Super admin grants the admin role to `new_admin` at once: no timelock,
+    /// no signature of the new key (owner decision 2026-11-09).
+    pub fn grant_admin(ctx: Context<GrantAdmin>, new_admin: Pubkey) -> Result<()> {
+        instructions::handle_grant_admin(ctx, new_admin)
+    }
+
     /// Super admin revokes the admin role from `admin`.
     pub fn remove_admin(ctx: Context<RemoveAdmin>, admin: Pubkey) -> Result<()> {
         instructions::handle_remove_admin(ctx, admin)

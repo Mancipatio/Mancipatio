@@ -325,4 +325,6 @@ pub enum RegistryError {
     PayoutModulesClearNotExplicit,
     #[msg("A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation")]
     PlatformRecoveryPending,
+    #[msg("An Admin grant is staged for this key; cancel it before granting the role directly")]
+    AdminGrantStaged,
 }

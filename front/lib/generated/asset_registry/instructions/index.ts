@@ -63,6 +63,7 @@ export * from "./finalizeVaultVote";
 export * from "./finalizeVestingSeries";
 export * from "./freezeIssuerProceeds";
 export * from "./freezeVault";
+export * from "./grantAdmin";
 export * from "./initializePlatform";
 export * from "./initializeShareClassMint";
 export * from "./lockSupply";

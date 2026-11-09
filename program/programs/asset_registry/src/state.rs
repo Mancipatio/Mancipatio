@@ -1543,6 +1543,15 @@ pub struct AdminAdded {
     pub proposed_at: i64,
 }
 
+/// Emitted by `grant_admin`: the super admin's direct grant (no timelock,
+/// no signature of the new key).
+#[event]
+pub struct AdminGranted {
+    pub admin: Pubkey,
+    pub granted_by: Pubkey,
+    pub granted_at: i64,
+}
+
 /// Emitted by `propose_platform_admin` and `propose_custody_authority`.
 #[event]
 pub struct AuthorityProposalCreated {

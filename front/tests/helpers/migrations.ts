@@ -117,6 +117,8 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "fee_schedule", "fee_charges",
   // 0090 investor relations: issuer updates and their documents
   "issuer_updates", "issuer_update_documents",
+  // 0092 operator names of platform wallets (/admin/admins)
+  "admin_wallet_labels",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */
