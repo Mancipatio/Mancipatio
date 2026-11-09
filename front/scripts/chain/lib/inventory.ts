@@ -617,6 +617,12 @@ export type FindingOptions = {
   handoverWhilePaused?: boolean;
   /** The cluster, for the mainnet-only checks when there is no role map. */
   network?: string;
+  /**
+   * D2: the super admin the owner's recorded decision to switch the payout
+   * modules on names (CHAIN_ENABLE_PAYOUT_MODULES). A clear 0x40 on mainnet
+   * under that super admin is then an info, not a blocker.
+   */
+  payoutModulesDecision?: string | null;
 };
 
 /**
@@ -723,7 +729,11 @@ export function inventoryFindings(
       add("info", "pilot-paused", `areas outside the role map's unpauseMask stay paused (${formatPauseFlags(pilot)}: ${describePausedAreas(pilot)})`);
     }
     if (network === "mainnet" && (flags & PAUSE_PAYOUT_MODULES) === 0) {
-      add("blocker", "payout-modules", `pause bit 0x40 (payout / Merkle modules) is clear on mainnet (${inv.platform.pauseFlagsHex}); D2 keeps it set`);
+      if (options.payoutModulesDecision && options.payoutModulesDecision === inv.platform.admin) {
+        add("info", "payout-modules", `pause bit 0x40 (payout / Merkle modules) is clear on mainnet (${inv.platform.pauseFlagsHex}) by the owner's recorded D2 decision (CHAIN_ENABLE_PAYOUT_MODULES = the super admin)`);
+      } else {
+        add("blocker", "payout-modules", `pause bit 0x40 (payout / Merkle modules) is clear on mainnet (${inv.platform.pauseFlagsHex}); D2 keeps it set unless the owner's decision is recorded (CHAIN_ENABLE_PAYOUT_MODULES = the super admin)`);
+      }
     }
     // Bit 7 must be closed once the final super admin holds the platform (X1).
     const x1Done = map ? inv.platform.admin === map.superAdmin : false;
@@ -955,6 +965,7 @@ export async function inventoryTool(ctx: ToolContext): Promise<ToolStatus> {
   const findings = inventoryFindings(inv, loaded?.map ?? null, phase, {
     handoverWhilePaused: ctx.env.CHAIN_HANDOVER_WHILE_PAUSED?.trim() === "1",
     network: config.network,
+    payoutModulesDecision: ctx.env.CHAIN_ENABLE_PAYOUT_MODULES?.trim() || null,
   });
   evidence.inventory = inventoryEvidence(inv);
   evidence.findings = findings;

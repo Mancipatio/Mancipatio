@@ -145,6 +145,10 @@ describe("inventory findings (§6)", () => {
     // 0x40 clear on mainnet (no role map: the network option decides).
     expect(bySeverity(inventoryFindings(clean(map), null, "in-progress", { network: "mainnet" }), "payout-modules")).toEqual(["blocker"]);
     expect(bySeverity(inventoryFindings(payout, null, "in-progress", { network: "mainnet" }), "payout-modules")).toEqual([]);
+    // D2: the owner's decision recorded (CHAIN_ENABLE_PAYOUT_MODULES = the super admin): an info.
+    const sa = clean(map).platform!.admin;
+    expect(bySeverity(inventoryFindings(clean(map), null, "in-progress", { network: "mainnet", payoutModulesDecision: sa }), "payout-modules")).toEqual(["info"]);
+    expect(bySeverity(inventoryFindings(clean(map), null, "in-progress", { network: "mainnet", payoutModulesDecision: map.deployer }), "payout-modules")).toEqual(["blocker"]);
     // The deployer as super admin with a pause bit clear (K1.3).
     const deployerSa = clean(map);
     deployerSa.platform!.admin = map.deployer;

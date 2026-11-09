@@ -20,8 +20,9 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe("pilotPauseMask: the bits set on purpose, from the switches every gate reads", () => {
   // The env is stubbed explicitly: the "kyc-only-on" vitest project sets KYC_ONLY=on.
-  const mainnet = (kycOnly: string, modules: Record<string, string> = {}) => {
+  const mainnet = (kycOnly: string, modules: Record<string, string> = {}, payoutDecision = "") => {
     vi.stubEnv("NEXT_PUBLIC_FEATURE_KYC_ONLY", kycOnly);
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", payoutDecision);
     for (const name of ["SECONDARY_TRADING", "DISTRIBUTIONS", "RIGHTS", "VESTING"]) {
       vi.stubEnv(`NEXT_PUBLIC_FEATURE_${name}`, modules[name] ?? "");
     }
@@ -38,6 +39,18 @@ describe("pilotPauseMask: the bits set on purpose, from the switches every gate 
     expect(mainnet("off", { VESTING: "on" })).toBe(0x6e);
     // KYC-only mode overrides every module switch.
     expect(mainnet("on", { SECONDARY_TRADING: "on", DISTRIBUTIONS: "on" })).toBe(0x7f);
+  });
+
+  it("leaves the payout modules (0x40) out once the owner's D2 decision is recorded in the build", () => {
+    const sa = "8TEmJBkcoBsUjRPftZ3kdWb9NmZDy7Zy3a7GqFCK5Nx9";
+    expect(mainnet("", {}, sa)).toBe(0x3f);
+    expect(mainnet("off", { SECONDARY_TRADING: "on", DISTRIBUTIONS: "on", RIGHTS: "on" }, sa)).toBe(0x2a);
+    // Not an address: nothing is recorded, 0x40 stays expected.
+    expect(mainnet("off", {}, "true")).toBe(0x7e);
+    // A clear 0x40 is then no drift row; without the decision it is.
+    const drift = (expected: number) => pauseAlerts(0x2a, expected, 0).map((r) => r.title);
+    expect(drift(0x2a)).not.toContain("Payout modules: open on-chain, off on this site");
+    expect(drift(0x6a)).toContain("Payout modules: open on-chain, off on this site");
   });
 
   it("is 0 off mainnet: devnet keeps today's rows", () => {

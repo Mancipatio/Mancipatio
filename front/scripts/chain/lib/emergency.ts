@@ -198,10 +198,11 @@ export function readEmergencyRequest(env: ToolContext["env"]): EmergencyRequest 
 /**
  * D2: on mainnet the payout / Merkle modules (0x40) stay off; switching them
  * on is an owner decision after a vote of at least 7 days, never an incident
- * step (the /admin/platform panel refuses it on mainnet as well). An unpause
- * that clears 0x40 on mainnet therefore needs the explicit override
- * CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin, typed out>, which the
- * evidence records. Returns whether the override was used.
+ * step (the /admin/platform panel offers it on mainnet only when the build
+ * records the same decision: NEXT_PUBLIC_ENABLE_PAYOUT_MODULES = the super
+ * admin). An unpause that clears 0x40 on mainnet therefore needs the explicit
+ * override CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin, typed out>,
+ * which the evidence records. Returns whether the override was used.
  */
 export function assertPayoutModulesClearAllowed(req: EmergencyRequest, network: string, env: ToolContext["env"]): boolean {
   if (req.op !== "unpause" || req.mask === "all" || (req.mask & PAUSE_PAYOUT_MODULES) === 0) return false;

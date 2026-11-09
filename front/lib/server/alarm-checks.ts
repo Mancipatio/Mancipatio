@@ -130,6 +130,7 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
+import { PAYOUT_MODULES_DECISION_ENV, payoutModulesDecision } from "@/lib/features";
 import {
   EMERGENCY_PAUSE_BITS, PAUSE_CUSTODY_ENTRY, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags,
 } from "@/lib/pause-flags";
@@ -434,10 +435,13 @@ export async function roleChangesReport(sb: SupabaseClient, network: Network, no
 
 /**
  * payout-modules (D2, critical, mainnet only): the payout / Merkle modules bit
- * (0x40) of the mirrored Platform must stay SET on mainnet. The clear itself
- * is a critical instruction alarm; this incident stays open while the mirror
- * shows it clear. Elsewhere it passes (devnet may switch them on). Hold while
- * no Platform is mirrored; null when the mirror cannot be read.
+ * (0x40) of the mirrored Platform must stay SET on mainnet unless the owner's
+ * decision to switch them on is recorded in the build
+ * (NEXT_PUBLIC_ENABLE_PAYOUT_MODULES, lib/features.ts). The clear itself is a
+ * critical instruction alarm either way; without the decision this incident
+ * stays open while the mirror shows it clear. Elsewhere it passes (devnet may
+ * switch them on). Hold while no Platform is mirrored; null when the mirror
+ * cannot be read.
  */
 export async function payoutModulesReport(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<Report | null> {
   const base = { check: "payout-modules", severity: "critical" as const, category: "onchain" as const, source: "onchain:payout-modules" };
@@ -448,6 +452,12 @@ export async function payoutModulesReport(sb: SupabaseClient, network: Network, 
   const flags = (data as { pause_flags?: number | null } | null)?.pause_flags;
   if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
   const off = (flags & PAUSE_PAYOUT_MODULES) !== 0;
+  const decision = payoutModulesDecision();
+  if (!off && decision !== null) {
+    return { ...base, state: "pass",
+      summary: `The payout modules are switched on (0x40 clear) by the owner's decision recorded in the build (${PAYOUT_MODULES_DECISION_ENV})`,
+      evidence: { pause_flags: flags, decision } };
+  }
   return { ...base, state: off ? "pass" : "fail",
     summary: off ? "The payout modules are switched off (0x40 set)"
       : "The payout modules are switched ON on mainnet (0x40 clear): Startup raises, yield routing, Rights-Token issuances and milestones are open",
