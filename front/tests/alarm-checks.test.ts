@@ -524,6 +524,18 @@ describe("role-change-pending and payout-modules", () => {
     expect(await report([])).toMatchObject({ state: "hold" });
     expect(await report([{ pause_flags: 0 }], "devnet")).toMatchObject({ state: "pass" });
     expect(await report([{ pause_flags: 0x40 }], "mainnet", ["platforms"])).toBeNull();
+    // The owner's D2 decision recorded in the build: a clear 0x40 passes, naming it.
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", "8TEmJBkcoBsUjRPftZ3kdWb9NmZDy7Zy3a7GqFCK5Nx9");
+    onTestFinished(() => { vi.unstubAllEnvs(); });
+    expect(await report([{ pause_flags: 0x2a }])).toMatchObject({
+      state: "pass", severity: "critical", evidence: { pause_flags: 0x2a, decision: "8TEmJBkcoBsUjRPftZ3kdWb9NmZDy7Zy3a7GqFCK5Nx9" },
+      summary: expect.stringContaining("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES"),
+    });
+    expect(await report([{ pause_flags: 0x40 }])).toMatchObject({ state: "pass", summary: "The payout modules are switched off (0x40 set)" });
+    // Not an address: nothing is recorded, the clear fails again.
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", "true");
+    expect(await report([{ pause_flags: 0x2a }])).toMatchObject({ state: "fail" });
+    vi.unstubAllEnvs();
     // Recorded with the other cheap checks (devnet here).
     const { sb, rpcs } = mockSb(heartbeats);
     await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));

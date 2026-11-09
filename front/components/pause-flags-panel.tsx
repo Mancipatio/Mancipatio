@@ -15,7 +15,13 @@ import {
 } from "@/lib/generated/asset_registry";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useRole } from "@/lib/auth";
-import { kycOnly, moduleEnabled } from "@/lib/features";
+import {
+  kycOnly,
+  moduleEnabled,
+  PAYOUT_MODULES_DECISION_ENV,
+  payoutModulesAllowed,
+  payoutModulesDecision,
+} from "@/lib/features";
 import { useMaintenance } from "@/lib/maintenance-client";
 import {
   CLOSE_BOOTSTRAP_MASKS,
@@ -246,9 +252,14 @@ export function PauseFlagsPanel({
     platform.admin,
     role.isAdmin,
   );
-  // D2: the payout / Merkle modules stay off on mainnet; elsewhere the Super
-  // Admin may switch them on, in a call of its own.
-  const allowPayoutModules = detectNetwork() !== "mainnet";
+  // D2: the payout / Merkle modules stay off on mainnet unless the owner's
+  // decision recorded in this build names this Super Admin (lib/features.ts
+  // payoutModulesAllowed); elsewhere the Super Admin may switch them on.
+  // Either way only in a call of their own (6154).
+  const network = detectNetwork();
+  const onMainnet = network === "mainnet";
+  const allowPayoutModules = payoutModulesAllowed(platform.admin, network);
+  const payoutDecision = payoutModulesDecision();
   const controls = pauseControls(flags, { isAdmin, isSuperAdmin }, { allowPayoutModules });
   const areas = describePausedAreas(flags);
   const bootstrapOpen = isBootstrapOpen(flags);
@@ -459,6 +470,13 @@ export function PauseFlagsPanel({
                   </span>
                 </p>
                 <p className="text-xs text-slate-500">{flag.stops}</p>
+                {flag.bit === PAUSE_PAYOUT_MODULES && paused && !allowPayoutModules && isSuperAdmin && (
+                  <p className="mt-1 text-xs text-slate-500">
+                    {payoutDecision
+                      ? `The decision recorded in this build (${PAYOUT_MODULES_DECISION_ENV}) names ${payoutDecision}, not the Super Admin ${platform.admin}.`
+                      : `Switching them on here needs the owner's decision in the production build: ${PAYOUT_MODULES_DECISION_ENV} set to the Super Admin's address (ops/env-vars.md), then a redeploy.`}
+                  </p>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <span
@@ -563,13 +581,28 @@ export function PauseFlagsPanel({
                 No area is resumed. The reason is recorded in the audit log.
               </p>
             ) : pending.action === "resume" && pending.bits === PAUSE_PAYOUT_MODULES ? (
-              <p>
-                This switches the payout and Merkle modules <strong>on</strong>:
-                Startup raises, yield routing, Rights-Token issuances and
-                milestones. They are off on mainnet by decision (D2); do this
-                only on a test network, on purpose. The reason is recorded in
-                the audit log.
-              </p>
+              onMainnet ? (
+                <p>
+                  On mainnet, this switches the payout and Merkle modules{" "}
+                  <strong>on</strong>: Startup raises, yield routing,
+                  Rights-Token issuances and milestones. The owner&apos;s
+                  decision is recorded in this build (
+                  {PAYOUT_MODULES_DECISION_ENV}). This site offers Startup
+                  raises only with their own switch
+                  (NEXT_PUBLIC_FEATURE_STARTUP_RAISES), but the program then
+                  accepts them from an issuer signing elsewhere. Any Admin can
+                  switch the modules off again with Pause. The reason is
+                  recorded in the audit log.
+                </p>
+              ) : (
+                <p>
+                  This switches the payout and Merkle modules <strong>on</strong>:
+                  Startup raises, yield routing, Rights-Token issuances and
+                  milestones. They are off on mainnet by decision (D2); do this
+                  only on a test network, on purpose. The reason is recorded in
+                  the audit log.
+                </p>
+              )
             ) : pending.action === "pause" ? (
               <p>
                 This stops:{" "}

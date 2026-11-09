@@ -270,3 +270,33 @@ export function scopeEnabled(name: ScopeName, network: Network = detectNetwork()
 export function scopeDisabledMessage(name: ScopeName, network: Network = detectNetwork()): string {
   return isScopeArea(name) ? KYC_ONLY_MESSAGE : moduleDisabledMessage(name, network);
 }
+
+// ── D2: the payout modules (pause bit 0x40) on mainnet ──────────────────────
+//
+// On mainnet the payout / Merkle modules (Startup raises, yield routing,
+// Rights-Token issuances and milestones) stay off: 0x40 stays set. Switching
+// them on is the owner's decision, recorded in the production build as the
+// Super Admin's address typed out, as the CLI's CHAIN_ENABLE_PAYOUT_MODULES
+// asks (ops/env-vars.md). With it, /admin/platform offers that Super Admin
+// "Enable" (the clear of its own, 6154) and the alarms read a clear 0x40 as
+// intended. Off mainnet nothing is needed. The chain stays the authority.
+
+export const PAYOUT_MODULES_DECISION_ENV = "NEXT_PUBLIC_ENABLE_PAYOUT_MODULES";
+
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** The Super Admin address the recorded decision names, or null when unset or not an address. */
+export function payoutModulesDecision(): string | null {
+  // Literal process.env.NEXT_PUBLIC_* read so Next inlines it client-side.
+  const value = process.env.NEXT_PUBLIC_ENABLE_PAYOUT_MODULES?.trim() ?? "";
+  return BASE58_ADDRESS.test(value) ? value : null;
+}
+
+/**
+ * Whether the site may offer switching the payout modules on: always off
+ * mainnet; on mainnet only when the recorded decision names this Platform's
+ * Super Admin (`Platform.admin`).
+ */
+export function payoutModulesAllowed(platformAdmin: string, network: Network = detectNetwork()): boolean {
+  return network !== "mainnet" || payoutModulesDecision() === platformAdmin;
+}

@@ -9,7 +9,7 @@ import { fetchMaybePlatform, findPlatformPda } from "@/lib/generated/asset_regis
 import { SaleStatus } from "@/lib/generated/asset_registry";
 import { Skeleton } from "@/components/skeleton";
 import { EMERGENCY_PAUSE_ANCHOR } from "@/lib/distribute-guidance";
-import { moduleEnabled, scopeEnabled } from "@/lib/features";
+import { moduleEnabled, payoutModulesDecision, scopeEnabled } from "@/lib/features";
 import { detectNetwork, type Network } from "@/lib/network";
 import {
   describePausedAreas,
@@ -43,16 +43,19 @@ export type Alert = {
  * The pause bits set ON PURPOSE on this network: the pilot scope, from the
  * same switches every gate reads (lib/features.ts). Off mainnet it is 0, so
  * every paused emergency area is the critical row, as before. On mainnet:
- * the payout modules (D2) and the three window bits, cleared only for a
- * sale (0x02, 0x20) or a conversion vault's open and deposit (0x08); plus
- * Onboarding while issuance is off (KYC-only mode), Trading through Manci
- * while secondary trading is off, and Distributions while distributions,
- * rights and vesting are all off. 0x7F under KYC-only mode (ops/env-vars.md),
- * 0x7E for the plain pilot, 0x7A with OTC on.
+ * the payout modules (D2, until the owner's decision is recorded in the
+ * build: lib/features.ts payoutModulesDecision) and the three window bits,
+ * cleared only for a sale (0x02, 0x20) or a conversion vault's open and
+ * deposit (0x08); plus Onboarding while issuance is off (KYC-only mode),
+ * Trading through Manci while secondary trading is off, and Distributions
+ * while distributions, rights and vesting are all off. 0x7F under KYC-only
+ * mode (ops/env-vars.md), 0x7E for the plain pilot, 0x7A with OTC on (each
+ * without 0x40 once the decision is recorded).
  */
 export function pilotPauseMask(network: Network = detectNetwork()): number {
   if (network !== "mainnet") return 0;
-  let mask = PAUSE_PAYOUT_MODULES | PAUSE_PRIMARY | PAUSE_ISSUER_PROCEEDS | PAUSE_CUSTODY_ENTRY;
+  let mask = PAUSE_PRIMARY | PAUSE_ISSUER_PROCEEDS | PAUSE_CUSTODY_ENTRY;
+  if (payoutModulesDecision() === null) mask |= PAUSE_PAYOUT_MODULES;
   if (!scopeEnabled("issuance", network)) mask |= PAUSE_ONBOARDING;
   if (!moduleEnabled("secondaryTrading", network)) mask |= PAUSE_SECONDARY;
   if (!moduleEnabled("distributions", network) && !moduleEnabled("rights", network) && !moduleEnabled("vesting", network)) {

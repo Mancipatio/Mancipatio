@@ -6,7 +6,14 @@
 // panel with it); next.config.ts refuses any other value at build time.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FEATURE_FLAG_VALUES } from "@/next.config";
-import { featureDisabledMessage, features, parseFeatureFlag } from "@/lib/features";
+import {
+  featureDisabledMessage,
+  features,
+  parseFeatureFlag,
+  PAYOUT_MODULES_DECISION_ENV,
+  payoutModulesAllowed,
+  payoutModulesDecision,
+} from "@/lib/features";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -110,5 +117,37 @@ describe("features()", () => {
     expect(featureDisabledMessage("passportClose", "mainnet")).toBe(
       "Revoked passport closes are not enabled on Solana mainnet.",
     );
+  });
+});
+
+// D2: the owner's decision to switch the payout modules (0x40) on, recorded
+// in the build as the Super Admin's address typed out.
+describe("payoutModulesDecision / payoutModulesAllowed", () => {
+  const SA = "8TEmJBkcoBsUjRPftZ3kdWb9NmZDy7Zy3a7GqFCK5Nx9";
+  const OTHER = "21yEqwd2aN2fhcg5oGWPqUDUvSenURfg4XLq1qYAUZ7v";
+
+  it("reads the address, trimmed; anything that is not an address records nothing", () => {
+    expect(PAYOUT_MODULES_DECISION_ENV).toBe("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES");
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", "");
+    expect(payoutModulesDecision()).toBeNull();
+    for (const value of ["true", "1", "on", "yes", "0x40", `${SA}0`, "0OIl" + SA.slice(4)]) {
+      vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", value);
+      expect(payoutModulesDecision(), value).toBeNull();
+    }
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", `  ${SA}\n`);
+    expect(payoutModulesDecision()).toBe(SA);
+  });
+
+  it("off mainnet the Super Admin may always switch them on; on mainnet only the Super Admin the decision names", () => {
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", "");
+    for (const network of ["devnet", "testnet", "localnet"] as const) expect(payoutModulesAllowed(SA, network)).toBe(true);
+    expect(payoutModulesAllowed(SA, "mainnet")).toBe(false);
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", "true");
+    expect(payoutModulesAllowed(SA, "mainnet")).toBe(false);
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", OTHER);
+    expect(payoutModulesAllowed(SA, "mainnet")).toBe(false);
+    vi.stubEnv("NEXT_PUBLIC_ENABLE_PAYOUT_MODULES", SA);
+    expect(payoutModulesAllowed(SA, "mainnet")).toBe(true);
+    expect(payoutModulesAllowed(OTHER, "mainnet")).toBe(false);
   });
 });

@@ -85,7 +85,7 @@ export const PAUSE_FLAGS: readonly PauseFlag[] = [
     bit: PAUSE_PAYOUT_MODULES,
     label: "Payout modules",
     stops:
-      "Startup raises (opening a Startup sale and buying into one), yield routing, Rights-Token issuances and milestones. Off on mainnet; switching them on is a Super Admin call of its own.",
+      "Startup raises (opening a Startup sale and buying into one), yield routing, Rights-Token issuances and milestones. Off on mainnet unless the owner's decision is recorded; switching them on is a Super Admin call of its own.",
   },
 ];
 
