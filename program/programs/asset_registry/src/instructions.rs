@@ -158,3 +158,27 @@ pub mod issuer_freeze;
 pub use issuer_freeze::*;
 pub mod platform_recovery;
 pub use platform_recovery::*;
+
+// Token migration (program V2).
+pub mod cancel_migration;
+pub mod claim_migration;
+pub mod claim_migration_proof;
+pub mod close_migration;
+pub mod create_migration;
+pub mod deposit_migration;
+pub mod finalize_migration;
+pub mod fund_migration;
+pub mod open_migration;
+pub mod publish_migration_root;
+pub mod refund_migration_deposit;
+pub use cancel_migration::*;
+pub use claim_migration::*;
+pub use claim_migration_proof::*;
+pub use close_migration::*;
+pub use create_migration::*;
+pub use deposit_migration::*;
+pub use finalize_migration::*;
+pub use fund_migration::*;
+pub use open_migration::*;
+pub use publish_migration_root::*;
+pub use refund_migration_deposit::*;

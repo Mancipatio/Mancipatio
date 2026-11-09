@@ -1082,6 +1082,54 @@ source paths are clean (see "Safety rules").
 7. Refresh the verify PDA (step 8).
 8. Maintenance off.
 
+### Token migration (program V2, pending upgrade)
+
+Branch `feat/program-token-migration-v2` adds a trustless token migration to
+`asset_registry` (eleven instructions, `create_migration` …
+`close_migration`): the issuer funds a vault with exactly the units the
+campaign can deliver, holders of a legacy Solana token deposit whole lots
+during a 30–180-day window and claim one unit per lot afterwards, off-chain
+locks claim against one Merkle root, and the close returns unclaimed units
+to `return_to` and burns the escrowed old tokens. It is merged only when the
+owner decides the upgrade; until then nothing on any cluster runs it. An
+upgrade that carries it needs:
+
+1. **A release from `main`.** Tag `vX+1` and build it with
+   `.github/workflows/verifiable-build.yml` (`hashes.txt`, `solana-verify`).
+   `transfer_hook` is unchanged, so `CHAIN_SQUADS_OP=upgrade` takes only
+   `buffers.assetRegistry` (the export accepts one buffer or both).
+2. **Capacity.** `asset_registry.so` grows from 2,217,968 B to 2,440,760 B.
+   Mainnet ProgramData holds 3,145,728 B (`--max-len`, §2) and devnet
+   2,537,208 B (the program-ci budget): no `solana program extend` on
+   either (devnet headroom 96,448 B).
+3. **The Squads proposal.** Steps 1–5 above with the new Release: one vault
+   transaction, buffer bytes checked against the Release by the export.
+4. **The IDL upgrade.** Step 6. The change is additive only: eleven
+   instructions, three account types (`Migration`, `MigrationDeposit`,
+   `MigrationProofClaim`), eleven events and error codes 6156–6170
+   appended. No existing account layout changes; no account migration.
+5. **The verify PDA.** Step 7.
+6. **Front release order.** The generated client (`front/lib/generated`)
+   already carries the V2 instructions; no page builds them, so it may ship
+   before the upgrade (a V2 transaction sent earlier fails with Anchor's
+   `InstructionFallbackNotFound`). Upgrade and IDL first; only then release
+   a front that builds V2 transactions. That front must also classify them
+   in `lib/pause-gate.ts` (`MODULE_FLOWS` / `KYC_ONLY_FLOWS`), add
+   `deposit_migration`'s `holder_block_entry` to `lib/proceeds-gate.ts`,
+   append each deposit's mode proof (the share mint's meta list on an Open
+   class; its hook config, KYC registry and the holder's `KycEntry` on a
+   KycGated one) and decode the `Migration*` events in the indexer.
+7. **The pause bit.** Every V2 entry (create, fund, open, deposit, publish
+   root) reads `PAUSE_CUSTODY_ENTRY` (0x08); its exits (cancel, refund,
+   finalize, both claims, close) read no bit. On mainnet 0x08 stays set
+   between conversions, so a deposit window needs 0x08 clear for its whole
+   length, which also reopens custody-vault entry (each vault still needs
+   an Admin to open it). Plan the window with that, or give migrations a
+   bit of their own in a later version.
+8. **Rollback.** The new accounts are new types, but a build without V2
+   cannot reach a live migration's escrow or vault: never roll back while a
+   migration holds tokens (§10, fix forward).
+
 ## 10. Rollback
 
 - **Check out the previous tag `vX`** (clean) and use its Release as

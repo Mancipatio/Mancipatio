@@ -15,6 +15,7 @@ export * from "./issuerAuthorityChangeKind";
 export * from "./jurisdictionRules";
 export * from "./kybStatus";
 export * from "./kycStatus";
+export * from "./migrationStatus";
 export * from "./offerStatus";
 export * from "./otcDealStatus";
 export * from "./payoutVaultState";

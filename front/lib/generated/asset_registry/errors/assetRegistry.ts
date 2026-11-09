@@ -326,6 +326,36 @@ export const ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY = 0x1809; // 6153
 export const ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT = 0x180a; // 6154
 /** PlatformRecoveryPending: A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation */
 export const ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING = 0x180b; // 6155
+/** MigrationTermsInvalid: Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint */
+export const ASSET_REGISTRY_ERROR__MIGRATION_TERMS_INVALID = 0x180c; // 6156
+/** MigrationWindowInvalid: Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at */
+export const ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID = 0x180d; // 6157
+/** MigrationStatusInvalid: Migration is not in the status this action requires */
+export const ASSET_REGISTRY_ERROR__MIGRATION_STATUS_INVALID = 0x180e; // 6158
+/** MigrationUnderfunded: A migration opens only once units_funded equals units_cap */
+export const ASSET_REGISTRY_ERROR__MIGRATION_UNDERFUNDED = 0x180f; // 6159
+/** MigrationCapExceeded: Funding would exceed the migration's units_cap */
+export const ASSET_REGISTRY_ERROR__MIGRATION_CAP_EXCEEDED = 0x1810; // 6160
+/** MigrationAllocationExceeded: Deposits and published entitlements may not exceed the units funded */
+export const ASSET_REGISTRY_ERROR__MIGRATION_ALLOCATION_EXCEEDED = 0x1811; // 6161
+/** MigrationOutsideWindow: Migration deposits are accepted only from opens_at until closes_at */
+export const ASSET_REGISTRY_ERROR__MIGRATION_OUTSIDE_WINDOW = 0x1812; // 6162
+/** MigrationWindowNotClosed: The migration's deposit window has not closed yet */
+export const ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_NOT_CLOSED = 0x1813; // 6163
+/** MigrationNotCancellable: A migration can be cancelled only while Draft, or while Open before closes_at and before any claim */
+export const ASSET_REGISTRY_ERROR__MIGRATION_NOT_CANCELLABLE = 0x1814; // 6164
+/** MigrationNotClosable: Close needs the claim deadline passed (Open or Claimable), or a cancelled migration with every deposit refunded */
+export const ASSET_REGISTRY_ERROR__MIGRATION_NOT_CLOSABLE = 0x1815; // 6165
+/** MigrationDepositSettled: This migration deposit was already claimed or refunded */
+export const ASSET_REGISTRY_ERROR__MIGRATION_DEPOSIT_SETTLED = 0x1816; // 6166
+/** MigrationRootAlreadyPublished: The migration's off-chain entitlement root is already published */
+export const ASSET_REGISTRY_ERROR__MIGRATION_ROOT_ALREADY_PUBLISHED = 0x1817; // 6167
+/** MigrationRootMissing: The migration has no published off-chain entitlement root */
+export const ASSET_REGISTRY_ERROR__MIGRATION_ROOT_MISSING = 0x1818; // 6168
+/** MigrationRootExceeded: Claim would exceed the published root's total units */
+export const ASSET_REGISTRY_ERROR__MIGRATION_ROOT_EXCEEDED = 0x1819; // 6169
+/** MigrationClaimDeadlinePassed: The migration's claim deadline has passed */
+export const ASSET_REGISTRY_ERROR__MIGRATION_CLAIM_DEADLINE_PASSED = 0x181a; // 6170
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -405,6 +435,21 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR
   | typeof ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__MAX_SUPPLY_EXCEEDED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_ALLOCATION_EXCEEDED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_CAP_EXCEEDED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_CLAIM_DEADLINE_PASSED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_DEPOSIT_SETTLED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_NOT_CANCELLABLE
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_NOT_CLOSABLE
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_OUTSIDE_WINDOW
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_ROOT_ALREADY_PUBLISHED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_ROOT_EXCEEDED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_ROOT_MISSING
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_STATUS_INVALID
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_TERMS_INVALID
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_UNDERFUNDED
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID
+  | typeof ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_NOT_CLOSED
   | typeof ASSET_REGISTRY_ERROR__MILESTONE_LOCKED
   | typeof ASSET_REGISTRY_ERROR__MILESTONE_POOL_EXCEEDED
   | typeof ASSET_REGISTRY_ERROR__MINT_ALREADY_INITIALIZED
@@ -565,6 +610,21 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR]: `KYC entry expiry may be at most 2 years from now`,
     [ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED]: `Buy requires the mint's hook accounts (config or meta list) to prove its restriction mode`,
     [ASSET_REGISTRY_ERROR__MAX_SUPPLY_EXCEEDED]: `Mint would exceed the share class max supply`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_ALLOCATION_EXCEEDED]: `Deposits and published entitlements may not exceed the units funded`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_CAP_EXCEEDED]: `Funding would exceed the migration's units_cap`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_CLAIM_DEADLINE_PASSED]: `The migration's claim deadline has passed`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_DEPOSIT_SETTLED]: `This migration deposit was already claimed or refunded`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_NOT_CANCELLABLE]: `A migration can be cancelled only while Draft, or while Open before closes_at and before any claim`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_NOT_CLOSABLE]: `Close needs the claim deadline passed (Open or Claimable), or a cancelled migration with every deposit refunded`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_OUTSIDE_WINDOW]: `Migration deposits are accepted only from opens_at until closes_at`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_ROOT_ALREADY_PUBLISHED]: `The migration's off-chain entitlement root is already published`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_ROOT_EXCEEDED]: `Claim would exceed the published root's total units`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_ROOT_MISSING]: `The migration has no published off-chain entitlement root`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_STATUS_INVALID]: `Migration is not in the status this action requires`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_TERMS_INVALID]: `Migration terms invalid: lot, units_cap, root totals and hashes must be nonzero, return_to set, and the old mint must differ from the share-class mint`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_UNDERFUNDED]: `A migration opens only once units_funded equals units_cap`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_INVALID]: `Migration window invalid: closes_at - opens_at must be 30 to 180 days, opens_at at least now - 1 day, and claim_deadline 30 days to 2 years after closes_at`,
+    [ASSET_REGISTRY_ERROR__MIGRATION_WINDOW_NOT_CLOSED]: `The migration's deposit window has not closed yet`,
     [ASSET_REGISTRY_ERROR__MILESTONE_LOCKED]: `Vesting milestone is still locked`,
     [ASSET_REGISTRY_ERROR__MILESTONE_POOL_EXCEEDED]: `Claim would exceed the milestone pool`,
     [ASSET_REGISTRY_ERROR__MINT_ALREADY_INITIALIZED]: `Share class mint is already initialized`,

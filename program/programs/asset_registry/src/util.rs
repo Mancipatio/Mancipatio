@@ -1171,6 +1171,10 @@ pub fn require_receiver_kyc(
 ///     Open shape proves `Open` mode.
 ///
 /// A tail carrying neither fails with `KycProofRequired`.
+///
+/// `deposit_migration` uses the same proof: its old-token transfer never
+/// touches this hook either, and a holder who cannot pass receiver KYC on a
+/// KycGated class must not commit old tokens it could never claim units for.
 pub fn require_receiver_kyc_for_mint_to(
     remaining_accounts: &[AccountInfo],
     mint: &Pubkey,
@@ -1275,4 +1279,162 @@ pub fn vesting_position_entitlement(
         return 0;
     }
     ((allocation as u128) * (deliverable_cumulative as u128) / (total_allocated as u128)) as u64
+}
+
+// ── Token migration (program V2) ─────────────────────────────────────────────
+
+use crate::state::Migration;
+
+/// SPL Token's and Token-2022's native (wrapped SOL) mints: a native token
+/// account refuses `burn`, so the close could never retire such an escrow.
+const NATIVE_MINTS: [Pubkey; 2] = [
+    Pubkey::from_str_const("So11111111111111111111111111111111111111112"),
+    Pubkey::from_str_const("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP"),
+];
+
+/// The old-token policy of a token migration. Its escrow takes deposits in
+/// base units and must pay each one back exactly (cancellation) or burn the
+/// lot (close), so the old mint may carry nothing that charges a fee,
+/// rescales amounts, runs foreign code on a transfer, or lets a third party
+/// move, freeze or pause the escrow's balance. SPL Token mints pass (no
+/// extensions); Token-2022 mints pass with metadata / group pointers, a mint
+/// close authority (a mint with supply cannot be closed, and the escrow holds
+/// supply from the first deposit) and a DefaultAccountState of Initialized.
+/// Everything else — TransferFeeConfig, TransferHook, NonTransferable,
+/// PermanentDelegate, the confidential extensions, DefaultAccountState Frozen,
+/// InterestBearing, ScaledUiAmount, Pausable and any later extension — is
+/// `UnsupportedMintExtension`, and the native mints are `MigrationTermsInvalid`.
+/// Checked at creation and again at every deposit, the moment holders commit
+/// funds.
+///
+/// Not covered: a plain freeze authority on the old mint can freeze the
+/// escrow, which stalls refunds and the close burn until it thaws the
+/// account. That authority can freeze every holder's own account anyway; the
+/// issuer, which controls its legacy mint, co-signs `create_migration`.
+pub fn require_supported_old_mint(mint: &AccountInfo, token_program: &Pubkey) -> Result<()> {
+    use anchor_spl::token_2022::spl_token_2022::{
+        extension::default_account_state::DefaultAccountState, state::AccountState,
+    };
+    ensure(*mint.owner == *token_program, RegistryError::Unauthorized)?;
+    ensure(
+        !NATIVE_MINTS.contains(mint.key),
+        RegistryError::MigrationTermsInvalid,
+    )?;
+    if *token_program == anchor_spl::token::ID {
+        return Ok(());
+    }
+    ensure(
+        *token_program == token_2022::ID,
+        RegistryError::Unauthorized,
+    )?;
+    let data = mint.try_borrow_data()?;
+    let state = StateWithExtensions::<SplMint>::unpack(&data)?;
+    for extension in state.get_extension_types()? {
+        let allowed = match extension {
+            ExtensionType::Uninitialized
+            | ExtensionType::MintCloseAuthority
+            | ExtensionType::MetadataPointer
+            | ExtensionType::TokenMetadata
+            | ExtensionType::GroupPointer
+            | ExtensionType::TokenGroup
+            | ExtensionType::GroupMemberPointer
+            | ExtensionType::TokenGroupMember => true,
+            ExtensionType::DefaultAccountState => {
+                state.get_extension::<DefaultAccountState>()?.state
+                    == AccountState::Initialized as u8
+            }
+            _ => false,
+        };
+        ensure(allowed, RegistryError::UnsupportedMintExtension)?;
+    }
+    Ok(())
+}
+
+/// Size of a migration's old-token escrow, after the old-mint policy check: a
+/// plain SPL Token account, or a Token-2022 account with ImmutableOwner (no
+/// permitted old-mint extension requires an account extension).
+pub fn old_mint_escrow_space(mint: &AccountInfo, token_program: &Pubkey) -> Result<usize> {
+    require_supported_old_mint(mint, token_program)?;
+    if *token_program == anchor_spl::token::ID {
+        return Ok(165);
+    }
+    Ok(ExtensionType::try_calculate_account_len::<SplTokenAccount>(
+        &[ExtensionType::ImmutableOwner],
+    )?)
+}
+
+/// Signer seeds of a `Migration` PDA — the authority of its escrow and vault.
+pub fn migration_seeds<'a>(
+    migration: &'a Migration,
+    id: &'a [u8; 8],
+    bump: &'a [u8; 1],
+) -> [&'a [u8]; 4] {
+    [MIGRATION_SEED, migration.share_class.as_ref(), id, bump]
+}
+
+/// Moves `amount` share-class units out of a migration's vault to
+/// `destination`: a hook-aware `transfer_checked` the Migration PDA signs.
+/// Eligibility is the caller's: a claim goes through
+/// `deliver_migration_units`, the close through `split_escrow_release`.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn migration_vault_transfer<'info>(
+    migration: &Account<'info, Migration>,
+    token_program: &AccountInfo<'info>,
+    vault: &AccountInfo<'info>,
+    mint: &InterfaceAccount<'info, Mint>,
+    destination: &AccountInfo<'info>,
+    hook_accounts: &[AccountInfo<'info>],
+    amount: u64,
+) -> Result<()> {
+    let id = migration.migration_id.to_le_bytes();
+    let bump = [migration.bump];
+    let seeds = migration_seeds(migration, &id, &bump);
+    hook_transfer(
+        token_program,
+        vault,
+        &mint.to_account_info(),
+        destination,
+        &migration.to_account_info(),
+        hook_accounts,
+        amount,
+        mint.decimals,
+        &[&seeds],
+    )
+}
+
+/// A claim's delivery (`claim_migration`, `claim_migration_proof`): the
+/// receiver's KYC is re-derived on-chain from the leg's own hook tail first
+/// (`require_receiver_kyc`; a no-op on an Open class), then the units leave
+/// the vault and `units_claimed` grows. The vault owner's `EscrowIdentity`
+/// names only `return_to` as a refund route, so the hook screens the leg as
+/// well; the registry check is what holds when the claimer IS `return_to`.
+/// The callers bind `destination.owner == receiver`.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub fn deliver_migration_units<'info>(
+    migration: &mut Account<'info, Migration>,
+    token_program: &AccountInfo<'info>,
+    vault: &AccountInfo<'info>,
+    mint: &InterfaceAccount<'info, Mint>,
+    destination: &AccountInfo<'info>,
+    receiver: &Pubkey,
+    hook_accounts: &[AccountInfo<'info>],
+    amount: u64,
+) -> Result<()> {
+    require_receiver_kyc(hook_accounts, &mint.key(), receiver)?;
+    migration_vault_transfer(
+        migration,
+        token_program,
+        vault,
+        mint,
+        destination,
+        hook_accounts,
+        amount,
+    )?;
+    migration.units_claimed = migration
+        .units_claimed
+        .checked_add(amount)
+        .ok_or(RegistryError::Overflow)?;
+    Ok(())
 }
