@@ -74,6 +74,7 @@ import {
   parseFinalizeVestingSeriesInstruction,
   parseFreezeIssuerProceedsInstruction,
   parseFreezeVaultInstruction,
+  parseGrantAdminInstruction,
   parseInitializePlatformInstruction,
   parseInitializeShareClassMintInstruction,
   parseLockSupplyInstruction,
@@ -176,6 +177,7 @@ import {
   type ParsedFinalizeVestingSeriesInstruction,
   type ParsedFreezeIssuerProceedsInstruction,
   type ParsedFreezeVaultInstruction,
+  type ParsedGrantAdminInstruction,
   type ParsedInitializePlatformInstruction,
   type ParsedInitializeShareClassMintInstruction,
   type ParsedLockSupplyInstruction,
@@ -704,6 +706,7 @@ export enum AssetRegistryInstruction {
   FinalizeVestingSeries,
   FreezeIssuerProceeds,
   FreezeVault,
+  GrantAdmin,
   InitializePlatform,
   InitializeShareClassMint,
   LockSupply,
@@ -1386,6 +1389,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([195, 254, 173, 116, 39, 54, 68, 72]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.GrantAdmin;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([119, 201, 101, 45, 75, 122, 89, 3]),
       ),
       0,
@@ -2057,6 +2071,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.FreezeVault;
     } & ParsedFreezeVaultInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.GrantAdmin;
+    } & ParsedGrantAdminInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.InitializePlatform;
     } & ParsedInitializePlatformInstruction<TProgram>)
   | ({
@@ -2596,6 +2613,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.FreezeVault,
         ...parseFreezeVaultInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.GrantAdmin: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.GrantAdmin,
+        ...parseGrantAdminInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.InitializePlatform: {

@@ -575,8 +575,13 @@ fn a_bootstrap_super_admin_rotation_runs_in_one_transaction() {
 
 // ── §14.5.8: the compromised super admin ─────────────────────────────────────
 
+/// The STAGED grant of a compromised super admin is vetoed by the upgrade
+/// authority. Since `grant_admin` (owner decision 2026-11-09) the same key can
+/// seat an Admin at once instead, with no window for a veto: the accepted
+/// risk, answered by `remove_admin` after the recovery (D4 / incident build)
+/// and a critical alarm on every grant.
 #[test]
-fn a_compromised_super_admin_cannot_seat_an_admin_past_the_upgrade_authority() {
+fn a_compromised_super_admins_staged_grant_is_vetoed_but_a_direct_grant_is_not() {
     let mut t = boot(true);
     let honest = funded(&mut t.svm);
     grant_admin(&mut t.svm, &t.sa, &honest).unwrap();
@@ -644,6 +649,16 @@ fn a_compromised_super_admin_cannot_seat_an_admin_past_the_upgrade_authority() {
         "the vetoed grant cannot execute",
     );
     assert!(gone(&t.svm, &admin_pda(&attacker.pubkey())));
+    // The direct grant seats the attacker key at once: nothing is staged, so
+    // nothing is left to veto.
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[grant_admin_ix(&t.sa.pubkey(), &attacker.pubkey())],
+    )
+    .expect("the direct grant");
+    assert!(!gone(&t.svm, &admin_pda(&attacker.pubkey())));
+    assert!(gone(&t.svm, &pending_admin(&attacker.pubkey())));
 }
 
 // ── Review 8.3 findings 15b / 21 ────────────────────────────────────────────

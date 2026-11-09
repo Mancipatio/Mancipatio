@@ -17,6 +17,10 @@
 //! `remove_admin` and setting pause bits stay instant (`manage_admins.rs`,
 //! `set_pause.rs`). The timelock gives NOTICE of a grant; the terminal answer
 //! to a compromised super admin is the upgrade authority (D4 / incident build).
+//!
+//! Since 2026-11-09 the super admin can also grant at once with `grant_admin`
+//! (`manage_admins.rs`, owner decision): no notice and no proof of
+//! possession. This path stays for a grant the new key confirms itself.
 
 use anchor_lang::prelude::*;
 
