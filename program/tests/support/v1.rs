@@ -560,6 +560,7 @@ pub fn grant_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
             super_admin: *super_admin,
             platform: platform_pda(),
             admin_record: admin_pda(new_admin),
+            pending_admin: pending_admin(new_admin),
             system_program: system_program::ID,
         }
         .to_account_metas(None),

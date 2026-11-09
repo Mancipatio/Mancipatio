@@ -1208,8 +1208,10 @@ source paths are clean (see "Safety rules").
     program upgrade that adds it).** The super admin makes a key an Admin at
     once on `/admin/admins` → Add an Admin: no 48 hours, no signature of the
     new key (the super admin pays its record, about 0.0014 SOL, returned by
-    `remove_admin`). A grant still staged for the same key is cancelled in
-    the same transaction. The page offers it only where the deployed program
+    `remove_admin`). The program refuses it while a grant is staged for the
+    same key (`AdminGrantStaged`, 6156: left next to the record, that
+    proposal would let the key re-create its role after a revoke), so the
+    page cancels a staged grant in the same transaction. The page offers it only where the deployed program
     has the instruction (one simulation, nothing sent); elsewhere it keeps
     the two-step proposal above. Trade-off accepted with the decision: there
     is no veto window, so a compromised super admin seats Admins at once.

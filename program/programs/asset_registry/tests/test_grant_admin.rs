@@ -19,6 +19,8 @@ use {
 
 const ERR_UNAUTHORIZED: u32 = 6001;
 const ERR_INVALID_PROPOSED_AUTHORITY: u32 = 6112;
+const ERR_ADMIN_GRANT_STAGED: u32 = 6156;
+const ERR_ACCOUNT_NOT_INITIALIZED: u32 = 3012;
 /// System program `AccountAlreadyInUse`: the `init` of an existing record.
 const ERR_ALREADY_IN_USE: u32 = 0;
 
@@ -150,26 +152,40 @@ fn a_staged_grant_for_the_same_key_is_cancelled_in_the_same_transaction() {
     assert_eq!(record.added_by, sa.pubkey());
 }
 
+/// Review finding: a proposal left next to a directly granted record would
+/// let the key re-create its role with `add_admin` after a `remove_admin`.
+/// The direct grant is refused while a grant is staged, so a revoke sticks.
 #[test]
-fn a_staged_grant_left_behind_can_no_longer_execute_and_is_still_cancelled() {
+fn a_staged_grant_blocks_the_direct_grant_until_cancelled_so_a_revoke_sticks() {
     let (mut svm, sa, _ua) = boot_platform(true);
     let x = funded(&mut svm);
     send(&mut svm, &[&sa], &[propose_admin_ix(&sa.pubkey(), &x.pubkey())]).unwrap();
-    send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &x.pubkey())]).unwrap();
+    assert_code(
+        send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &x.pubkey())]),
+        ERR_ADMIN_GRANT_STAGED,
+        "a direct grant next to a staged one",
+    );
+    assert!(gone(&svm, &admin_pda(&x.pubkey())));
+    // Cancelled first in the same transaction, the grant lands.
+    send(
+        &mut svm,
+        &[&sa],
+        &[
+            cancel_admin_proposal_ix(&sa.pubkey(), &x.pubkey(), &sa.pubkey()),
+            grant_admin_ix(&sa.pubkey(), &x.pubkey()),
+        ],
+    )
+    .expect("cancel + grant");
+    // Revoked, the key has nothing left to execute, even inside the old window.
+    send(&mut svm, &[&sa], &[remove_admin_ix(&sa.pubkey(), &x.pubkey())]).expect("remove_admin");
     let eta = now(&svm) + asset_registry::ADMIN_TIMELOCK_SECS;
     warp_to(&mut svm, eta);
     assert_code(
         send(&mut svm, &[&x], &[add_admin_ix(&x.pubkey(), &sa.pubkey())]),
-        ERR_ALREADY_IN_USE,
-        "the executor after a direct grant",
+        ERR_ACCOUNT_NOT_INITIALIZED,
+        "the revoked key re-adds itself",
     );
-    send(
-        &mut svm,
-        &[&sa],
-        &[cancel_admin_proposal_ix(&sa.pubkey(), &x.pubkey(), &sa.pubkey())],
-    )
-    .expect("cancel the leftover");
-    assert!(gone(&svm, &pending_admin(&x.pubkey())));
+    assert!(gone(&svm, &admin_pda(&x.pubkey())));
 }
 
 #[test]

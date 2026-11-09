@@ -154,7 +154,11 @@ describe("Admin grants: the direct grant (grant_admin, owner decision 2026-11-09
     expect(parsed.accounts.superAdmin.address).toBe(SA);
     expect(parsed.accounts.platform.address).toBe((await findPlatformPda())[0]);
     expect(parsed.accounts.adminRecord.address).toBe((await findAdminRecordPda({ authority: NEW }))[0]);
+    // The program refuses the grant while this account holds a staged grant (AdminGrantStaged).
+    expect(parsed.accounts.pendingAdmin.address).toBe(await findPendingAdminPda(NEW));
     expect(parsed.data.newAdmin).toBe(NEW);
+    // The staged grant is read at confirmed (one proposed seconds ago is not missed).
+    expect(mocks.pendingAdmin).toHaveBeenCalledWith(rpc, await findPendingAdminPda(NEW), expect.objectContaining({ commitment: "confirmed" }));
     await expect(buildGrantAdmin(rpc, createNoopSigner(WALLET), NEW)).rejects.toThrow(/Only the Super Admin/);
     await expect(buildGrantAdmin(rpc, createNoopSigner(SA), "11111111111111111111111111111111" as Address)).rejects.toThrow(/default/);
     mocks.admin.mockResolvedValue(owned({ admin: NEW }));
@@ -191,8 +195,11 @@ describe("Admin grants: the direct grant (grant_admin, owner decision 2026-11-09
   });
 
   it("probeDirectGrant: one simulation; Anchor's 101 means the program has no grant_admin, anything else is unknown", async () => {
+    type Simulate = (wire: string, config: Record<string, unknown>) => { send: () => Promise<unknown> };
     const answer = (err: unknown) => ({
-      simulateTransaction: vi.fn(() => ({ send: async () => ({ value: { err, logs: [], unitsConsumed: BigInt(1) } }) })),
+      simulateTransaction: vi.fn<Simulate>(() => ({
+        send: async () => ({ value: { err, logs: [], unitsConsumed: BigInt(1) } }),
+      })),
     });
     const ok = answer(null);
     expect(await probeDirectGrant(ok as never, SA)).toBe("supported");

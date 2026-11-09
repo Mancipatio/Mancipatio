@@ -59,7 +59,9 @@ import { findProgramDataPda } from "@/lib/pdas";
 import { PROPOSAL_NOT_FINALIZED_HINT } from "@/lib/operational-authority";
 
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
+type Commitment = "confirmed" | "finalized";
 const finalized = () => ({ commitment: "finalized" as const, abortSignal: AbortSignal.timeout(10_000) });
+const readAt = (commitment: Commitment) => ({ commitment, abortSignal: AbortSignal.timeout(10_000) });
 
 export type PendingAdminRecord = PendingAdmin & {
   address: Address;
@@ -86,10 +88,14 @@ async function platformAdmin(rpc: Rpc): Promise<{ platform: Address; admin: Addr
   return { platform, admin: account.data.admin, pauseFlags: account.data.pauseFlags };
 }
 
-/** The staged grant for `newAdmin`, or null (read at finalized). */
-export async function loadPendingAdmin(rpc: Rpc, newAdmin: Address): Promise<PendingAdminRecord | null> {
+/** The staged grant for `newAdmin`, or null (read at finalized unless asked otherwise). */
+export async function loadPendingAdmin(
+  rpc: Rpc,
+  newAdmin: Address,
+  commitment: Commitment = "finalized",
+): Promise<PendingAdminRecord | null> {
   const [[pda], { admin, pauseFlags }] = await Promise.all([findPendingAdminPda({ newAdmin }), platformAdmin(rpc)]);
-  const pending = await fetchMaybePendingAdmin(rpc, pda, finalized());
+  const pending = await fetchMaybePendingAdmin(rpc, pda, readAt(commitment));
   if (!pending.exists) return null;
   if (pending.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || pending.data.newAdmin !== newAdmin)
     throw new Error("The pending Admin grant is invalid");
@@ -275,9 +281,12 @@ export async function probeDirectGrant(rpc: SimulationRpc, superAdmin: Address):
 
 /**
  * `grant_admin(new_admin)`, signed (and paid) by the live Super Admin: the
- * key is an Admin as soon as it lands. A grant still staged for the same key
- * is cancelled first in the same transaction (its rent returns to its
- * proposer), so no proposal is left behind that could never execute.
+ * key is an Admin as soon as it lands. The program refuses it while a grant
+ * is staged for the key (AdminGrantStaged: left next to the record, the
+ * proposal would let the key re-create its role after a revoke), so a staged
+ * grant is cancelled first in the same transaction (its rent returns to its
+ * proposer). The staged grant is read at `confirmed`, like the page's list,
+ * so one proposed seconds ago is not missed.
  */
 export async function buildGrantAdmin(rpc: Rpc, signer: TransactionSigner, newAdmin: Address): Promise<Instruction[]> {
   if (newAdmin === DEFAULT_ADDRESS) throw new Error("The default 1111…1111 address cannot be an Admin");
@@ -286,7 +295,7 @@ export async function buildGrantAdmin(rpc: Rpc, signer: TransactionSigner, newAd
   const [record] = await findAdminRecordPda({ authority: newAdmin });
   const existing = await fetchMaybeAdmin(rpc, record, finalized());
   if (existing.exists) throw new Error("This wallet already holds the Admin role");
-  const pending = await loadPendingAdmin(rpc, newAdmin);
+  const pending = await loadPendingAdmin(rpc, newAdmin, "confirmed");
   const grant = await getGrantAdminInstructionAsync({ superAdmin: signer, newAdmin });
   if (!pending) return [grant];
   const cancel = await getCancelAdminProposalInstructionAsync({

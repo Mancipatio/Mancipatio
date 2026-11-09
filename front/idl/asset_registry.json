@@ -8958,6 +8958,40 @@
           }
         },
         {
+          "name": "pending_admin",
+          "docs": [
+            "A grant staged for the key must be cancelled first (earlier in the",
+            "same transaction is enough): left next to the record, `add_admin`",
+            "could re-create the role from it after a later `remove_admin`."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -16331,6 +16365,11 @@
       "code": 6155,
       "name": "PlatformRecoveryPending",
       "msg": "A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation"
+    },
+    {
+      "code": 6156,
+      "name": "AdminGrantStaged",
+      "msg": "An Admin grant is staged for this key; cancel it before granting the role directly"
     }
   ],
   "types": [

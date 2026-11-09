@@ -115,18 +115,21 @@ export default function AdminsPage() {
     void loadChain();
   }, [loadChain]);
 
-  // Whether this network's program grants at once (one simulation, nothing sent).
+  // Whether this network's program grants at once (one simulation, nothing
+  // sent). The Super Admin comes from the list, or is the connected wallet
+  // when the list cannot be read, so adding never waits on the list.
   const superAdmin = directory?.superAdmin ?? null;
+  const probeAs = superAdmin ?? (isSuperAdmin && wallet ? wallet.toString() : null);
   useEffect(() => {
-    if (!superAdmin) return;
+    if (!probeAs) return;
     let live = true;
-    void probeDirectGrant(client.runtime.rpc, superAdmin).then((s) => {
+    void probeDirectGrant(client.runtime.rpc, probeAs as Address).then((s) => {
       if (live) setSupport(s);
     });
     return () => {
       live = false;
     };
-  }, [client, superAdmin]);
+  }, [client, probeAs]);
 
   const listed = useMemo(() => {
     const all = new Set<string>();

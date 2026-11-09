@@ -34,6 +34,7 @@ import {
 } from "@solana/kit";
 import {
   findAcceptPlatformAdminNewAdminRecordPda,
+  findPendingAdminPda,
   findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
@@ -56,6 +57,7 @@ export type GrantAdminInstruction<
   TAccountSuperAdmin extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
   TAccountAdminRecord extends string | AccountMeta<string> = string,
+  TAccountPendingAdmin extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -73,6 +75,9 @@ export type GrantAdminInstruction<
       TAccountAdminRecord extends string
         ? WritableAccount<TAccountAdminRecord>
         : TAccountAdminRecord,
+      TAccountPendingAdmin extends string
+        ? ReadonlyAccount<TAccountPendingAdmin>
+        : TAccountPendingAdmin,
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
@@ -118,6 +123,7 @@ export type GrantAdminAsyncInput<
   TAccountSuperAdmin extends string = string,
   TAccountPlatform extends string = string,
   TAccountAdminRecord extends string = string,
+  TAccountPendingAdmin extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   /**
@@ -128,6 +134,12 @@ export type GrantAdminAsyncInput<
   platform?: Address<TAccountPlatform>;
   /** Created here, so a key that already holds the role fails the `init`. */
   adminRecord?: Address<TAccountAdminRecord>;
+  /**
+   * A grant staged for the key must be cancelled first (earlier in the
+   * same transaction is enough): left next to the record, `add_admin`
+   * could re-create the role from it after a later `remove_admin`.
+   */
+  pendingAdmin?: Address<TAccountPendingAdmin>;
   systemProgram?: Address<TAccountSystemProgram>;
   newAdmin: GrantAdminInstructionDataArgs["newAdmin"];
 };
@@ -136,6 +148,7 @@ export async function getGrantAdminInstructionAsync<
   TAccountSuperAdmin extends string,
   TAccountPlatform extends string,
   TAccountAdminRecord extends string,
+  TAccountPendingAdmin extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -143,6 +156,7 @@ export async function getGrantAdminInstructionAsync<
     TAccountSuperAdmin,
     TAccountPlatform,
     TAccountAdminRecord,
+    TAccountPendingAdmin,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
@@ -152,6 +166,7 @@ export async function getGrantAdminInstructionAsync<
     TAccountSuperAdmin,
     TAccountPlatform,
     TAccountAdminRecord,
+    TAccountPendingAdmin,
     TAccountSystemProgram
   >
 > {
@@ -164,6 +179,7 @@ export async function getGrantAdminInstructionAsync<
     superAdmin: { value: input.superAdmin ?? null, isWritable: true },
     platform: { value: input.platform ?? null, isWritable: false },
     adminRecord: { value: input.adminRecord ?? null, isWritable: true },
+    pendingAdmin: { value: input.pendingAdmin ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -183,6 +199,11 @@ export async function getGrantAdminInstructionAsync<
       { newAdmin: expectSome(args.newAdmin) },
     );
   }
+  if (!accounts.pendingAdmin.value) {
+    accounts.pendingAdmin.value = await findPendingAdminPda({
+      newAdmin: expectSome(args.newAdmin),
+    });
+  }
   if (!accounts.systemProgram.value) {
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
@@ -194,6 +215,7 @@ export async function getGrantAdminInstructionAsync<
       getAccountMeta(accounts.superAdmin),
       getAccountMeta(accounts.platform),
       getAccountMeta(accounts.adminRecord),
+      getAccountMeta(accounts.pendingAdmin),
       getAccountMeta(accounts.systemProgram),
     ],
     data: getGrantAdminInstructionDataEncoder().encode(
@@ -205,6 +227,7 @@ export async function getGrantAdminInstructionAsync<
     TAccountSuperAdmin,
     TAccountPlatform,
     TAccountAdminRecord,
+    TAccountPendingAdmin,
     TAccountSystemProgram
   >);
 }
@@ -213,6 +236,7 @@ export type GrantAdminInput<
   TAccountSuperAdmin extends string = string,
   TAccountPlatform extends string = string,
   TAccountAdminRecord extends string = string,
+  TAccountPendingAdmin extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   /**
@@ -223,6 +247,12 @@ export type GrantAdminInput<
   platform: Address<TAccountPlatform>;
   /** Created here, so a key that already holds the role fails the `init`. */
   adminRecord: Address<TAccountAdminRecord>;
+  /**
+   * A grant staged for the key must be cancelled first (earlier in the
+   * same transaction is enough): left next to the record, `add_admin`
+   * could re-create the role from it after a later `remove_admin`.
+   */
+  pendingAdmin: Address<TAccountPendingAdmin>;
   systemProgram?: Address<TAccountSystemProgram>;
   newAdmin: GrantAdminInstructionDataArgs["newAdmin"];
 };
@@ -231,6 +261,7 @@ export function getGrantAdminInstruction<
   TAccountSuperAdmin extends string,
   TAccountPlatform extends string,
   TAccountAdminRecord extends string,
+  TAccountPendingAdmin extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -238,6 +269,7 @@ export function getGrantAdminInstruction<
     TAccountSuperAdmin,
     TAccountPlatform,
     TAccountAdminRecord,
+    TAccountPendingAdmin,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
@@ -246,6 +278,7 @@ export function getGrantAdminInstruction<
   TAccountSuperAdmin,
   TAccountPlatform,
   TAccountAdminRecord,
+  TAccountPendingAdmin,
   TAccountSystemProgram
 > {
   // Program address.
@@ -257,6 +290,7 @@ export function getGrantAdminInstruction<
     superAdmin: { value: input.superAdmin ?? null, isWritable: true },
     platform: { value: input.platform ?? null, isWritable: false },
     adminRecord: { value: input.adminRecord ?? null, isWritable: true },
+    pendingAdmin: { value: input.pendingAdmin ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -279,6 +313,7 @@ export function getGrantAdminInstruction<
       getAccountMeta(accounts.superAdmin),
       getAccountMeta(accounts.platform),
       getAccountMeta(accounts.adminRecord),
+      getAccountMeta(accounts.pendingAdmin),
       getAccountMeta(accounts.systemProgram),
     ],
     data: getGrantAdminInstructionDataEncoder().encode(
@@ -290,6 +325,7 @@ export function getGrantAdminInstruction<
     TAccountSuperAdmin,
     TAccountPlatform,
     TAccountAdminRecord,
+    TAccountPendingAdmin,
     TAccountSystemProgram
   >);
 }
@@ -308,7 +344,13 @@ export type ParsedGrantAdminInstruction<
     platform: TAccountMetas[1];
     /** Created here, so a key that already holds the role fails the `init`. */
     adminRecord: TAccountMetas[2];
-    systemProgram: TAccountMetas[3];
+    /**
+     * A grant staged for the key must be cancelled first (earlier in the
+     * same transaction is enough): left next to the record, `add_admin`
+     * could re-create the role from it after a later `remove_admin`.
+     */
+    pendingAdmin: TAccountMetas[3];
+    systemProgram: TAccountMetas[4];
   };
   data: GrantAdminInstructionData;
 };
@@ -321,7 +363,7 @@ export function parseGrantAdminInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedGrantAdminInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 4) {
+  if (instruction.accounts.length < 5) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -337,6 +379,7 @@ export function parseGrantAdminInstruction<
       superAdmin: getNextAccount(),
       platform: getNextAccount(),
       adminRecord: getNextAccount(),
+      pendingAdmin: getNextAccount(),
       systemProgram: getNextAccount(),
     },
     data: getGrantAdminInstructionDataDecoder().decode(instruction.data),

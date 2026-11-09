@@ -51,6 +51,7 @@ import {
   ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED,
   ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT,
   ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING,
+  ASSET_REGISTRY_ERROR__ADMIN_GRANT_STAGED,
   ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED,
   ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED,
   ASSET_REGISTRY_ERROR__RECEIVER_KYC_EXPIRED,
@@ -498,6 +499,11 @@ export const REGISTRY_ERROR_HINTS: ReadonlyMap<number, string> = new Map<number,
     "The payout modules (0x40) can only be switched on in a call of their own. Resume the other areas separately; nothing was changed (PayoutModulesClearNotExplicit).",
   ],
   [ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING, PLATFORM_RECOVERY_PENDING_HINT],
+  // The 2026-11 upgrade (grant_admin) appended 6156.
+  [
+    ASSET_REGISTRY_ERROR__ADMIN_GRANT_STAGED,
+    "A grant is still staged for this wallet, so it cannot be added directly. On /admin/admins use Add now: it cancels the staged grant and adds the wallet in one transaction (AdminGrantStaged).",
+  ],
 ]);
 
 /** transfer_hook custom errors (6000–6020), worded for the person sending. */

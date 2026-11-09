@@ -12,8 +12,8 @@ const errors = (file: string) =>
     (e) => `${e.code}:${e.name}`,
   );
 
-// RegistryError 6000-6155 (156 variants), frozen for the mainnet candidate
-// (v1.0.0-rc appended 6143-6155).
+// RegistryError 6000-6156 (157 variants), frozen for the mainnet candidate
+// (v1.0.0-rc appended 6143-6155; the 2026-11 upgrade, grant_admin, 6156).
 const REGISTRY_ERRORS = [
   "6000:PlatformPaused", "6001:Unauthorized", "6002:IssuerNotVerified", "6003:AssetNotDraft", "6004:InvalidAssetId",
   "6005:InvalidText", "6006:TooManyShareClasses", "6007:InvalidShareClassIndex", "6008:InvalidFeeBps",
@@ -56,6 +56,7 @@ const REGISTRY_ERRORS = [
   "6137:ClawbackHolderNotBlocked", "6138:HookConfigInvalid", "6139:EscrowNotEmpty", "6140:AccountNotClosable",
   "6141:BeneficiaryNotAllowed", "6142:VaultTypeRetired",
   "6143:IssuerProceedsFrozen", "6144:PartyBlocklisted", "6145:SaleDurationInvalid", "6146:KycExpiryTooFar", "6147:VotingPeriodTooShort", "6148:DeliveryDeadlineOutOfRange", "6149:DealExpiryOutOfRange", "6150:TimelockActive", "6151:ProposalExpired", "6152:InvalidAdminProposal", "6153:InvalidPlatformRecovery", "6154:PayoutModulesClearNotExplicit", "6155:PlatformRecoveryPending",
+  "6156:AdminGrantStaged",
 ];
 
 // transfer_hook HookError 6000-6020 (21 variants; v1.0.0-rc appended 6017-6020).
@@ -70,7 +71,7 @@ const HOOK_ERRORS = [
 
 describe("program error tables (golden)", () => {
   it.each([
-    ["asset_registry.json", REGISTRY_ERRORS, 156],
+    ["asset_registry.json", REGISTRY_ERRORS, 157],
     ["transfer_hook.json", HOOK_ERRORS, 21],
   ] as const)("%s keeps its pinned code:name prefix; new variants may only be appended", (file, pinned, count) => {
     expect(pinned).toHaveLength(count);

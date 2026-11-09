@@ -112,10 +112,13 @@ describe("POST /api/admin/wallet-labels (read)", () => {
   });
 
   it("without 0092 there are no names but the accounts still show", async () => {
-    state.fail.admin_wallet_labels = { code: "42P01", message: "relation does not exist" };
     state.params = { wallets: [A, B] };
-    const body = await json(await READ(req()));
-    expect(body.data).toMatchObject({ available: false, labels: {}, accounts: { [B]: { displayName: "Marko" } } });
+    // Postgres' undefined_table and PostgREST's "table not found" alike.
+    for (const code of ["42P01", "PGRST205"]) {
+      state.fail.admin_wallet_labels = { code, message: "missing" };
+      const body = await json(await READ(req()));
+      expect(body.data, code).toMatchObject({ available: false, labels: {}, accounts: { [B]: { displayName: "Marko" } } });
+    }
     state.fail.admin_wallet_labels = { code: "57014", message: "statement timeout" };
     expect((await READ(req())).status).toBe(503);
   });
@@ -165,10 +168,12 @@ describe("POST /api/admin/wallet-labels/set (write)", () => {
       state.params = params;
       expect((await SET(req())).status).toBe(400);
     }
-    state.fail.admin_wallet_labels = { code: "42P01", message: "relation does not exist" };
     state.params = { wallet: A, label: "Ops" };
-    const response = await SET(req());
-    expect(response.status).toBe(503);
-    expect((await json(response)).error).toBe(LABELS_NOT_SET_UP);
+    for (const code of ["42P01", "PGRST205"]) {
+      state.fail.admin_wallet_labels = { code, message: "missing" };
+      const response = await SET(req());
+      expect(response.status, code).toBe(503);
+      expect((await json(response)).error, code).toBe(LABELS_NOT_SET_UP);
+    }
   });
 });

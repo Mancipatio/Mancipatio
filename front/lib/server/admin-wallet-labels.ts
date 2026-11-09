@@ -14,8 +14,8 @@ import {
 } from "@/lib/admin-wallet-labels";
 import { SiwsError } from "@/lib/server/siws";
 
-/** Postgres "undefined_table": 0092 is not applied on this database. */
-const UNDEFINED_TABLE = "42P01";
+/** 0092 is not applied: Postgres "undefined_table", or PostgREST's "table not found" (as in fee-schedule.ts). */
+const MISSING_TABLE: ReadonlySet<string> = new Set(["42P01", "PGRST205"]);
 
 export const LABELS_NOT_SET_UP = "Wallet names are not set up on this network yet (database migration 0092).";
 
@@ -53,7 +53,7 @@ export async function readWalletLabelRows(
     .eq("network", network)
     .in("wallet", wallets);
   if (named.error) {
-    if (named.error.code !== UNDEFINED_TABLE) throw new SiwsError(503, "Wallet names are temporarily unavailable");
+    if (!MISSING_TABLE.has(named.error.code ?? "")) throw new SiwsError(503, "Wallet names are temporarily unavailable");
     available = false;
   } else {
     for (const row of (named.data ?? []) as Array<{ wallet: string; label: string; set_by: string; updated_at: string }>) {
@@ -97,7 +97,7 @@ export async function writeWalletLabelRow(
         .from("admin_wallet_labels")
         .upsert({ network, wallet, label, set_by: setBy }, { onConflict: "network,wallet" });
   if (result.error) {
-    if (result.error.code === UNDEFINED_TABLE) throw new SiwsError(503, LABELS_NOT_SET_UP);
+    if (MISSING_TABLE.has(result.error.code ?? "")) throw new SiwsError(503, LABELS_NOT_SET_UP);
     throw new SiwsError(503, "The name could not be saved — try again");
   }
   return label === "" ? null : label;

@@ -354,7 +354,7 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
   // The Super Admin's direct grant (owner decision 2026-11-09): no timelock
   // and no signature of the new key, so this alarm is the only notice.
   { name: "grant_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(GRANT_ADMIN_DISCRIMINATOR),
-    decode: dec(getGrantAdminInstructionDataDecoder()), accounts: { super_admin: 0, platform: 1, admin_record: 2 }, format: "platform",
+    decode: dec(getGrantAdminInstructionDataDecoder()), accounts: { super_admin: 0, platform: 1, admin_record: 2, pending_admin: 3 }, format: "platform",
     fallback: "critical",
     classify: ({ args, account, events }) => ({ source: "onchain:admin-record", severity: "critical",
       summary: `Admin added: ${String(args?.newAdmin)} (granted at once by the Super Admin ${account(0)}, no waiting period)`,

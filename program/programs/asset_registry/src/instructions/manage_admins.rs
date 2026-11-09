@@ -31,16 +31,29 @@ pub struct GrantAdmin<'info> {
     )]
     pub admin_record: Account<'info, Admin>,
 
+    /// A grant staged for the key must be cancelled first (earlier in the
+    /// same transaction is enough): left next to the record, `add_admin`
+    /// could re-create the role from it after a later `remove_admin`.
+    /// CHECK: address pinned by seeds; only its emptiness is read.
+    #[account(
+        seeds = [PENDING_ADMIN_SEED, new_admin.as_ref()],
+        bump,
+        constraint = pending_admin.data_is_empty() @ RegistryError::AdminGrantStaged,
+    )]
+    pub pending_admin: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
 /// Super admin grants the admin role to `new_admin` at once: no timelock and
 /// no signature of the new key (owner decision 2026-11-09). It sits beside
 /// the D3 path (`propose_admin` → 48 h → `add_admin` by the new key), which
-/// stays for a grant the new key should confirm itself. Without the 48 h
-/// there is no window for a veto: a compromised super admin can add Admins
-/// at once, and the answer is `remove_admin` after the recovery (D4 /
-/// incident build), so every grant is a critical alarm.
+/// stays for a grant the new key should confirm itself; a key with a grant
+/// still staged is refused (AdminGrantStaged) until that grant is cancelled,
+/// so no proposal outlives a direct grant. Without the 48 h there is no
+/// window for a veto: a compromised super admin can add Admins at once, and
+/// the answer is `remove_admin` after the recovery (D4 / incident build), so
+/// every grant is a critical alarm.
 pub fn handle_grant_admin(ctx: Context<GrantAdmin>, new_admin: Pubkey) -> Result<()> {
     require!(
         new_admin != Pubkey::default(),
