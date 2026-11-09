@@ -48,8 +48,12 @@ fn the_super_admin_grants_at_once_without_the_new_key() {
     let (mut svm, sa, _ua) = boot_platform(true);
     assert!(!bootstrap_open(&svm));
     let x = Keypair::new();
-    let logs = send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &x.pubkey())])
-        .expect("grant_admin");
+    let logs = send(
+        &mut svm,
+        &[&sa],
+        &[grant_admin_ix(&sa.pubkey(), &x.pubkey())],
+    )
+    .expect("grant_admin");
 
     let record: Admin = load(&svm, &admin_pda(&x.pubkey()));
     assert_eq!((record.admin, record.added_by), (x.pubkey(), sa.pubkey()));
@@ -65,8 +69,12 @@ fn the_super_admin_grants_at_once_without_the_new_key() {
 
     // It is an Admin at once: it may set a pause bit (any Admin may).
     svm.airdrop(&x.pubkey(), 1_000_000_000).unwrap();
-    send(&mut svm, &[&x], &[set_pause_flags_ix(&x.pubkey(), PAUSE_PRIMARY, 0)])
-        .expect("an Admin pauses");
+    send(
+        &mut svm,
+        &[&x],
+        &[set_pause_flags_ix(&x.pubkey(), PAUSE_PRIMARY, 0)],
+    )
+    .expect("an Admin pauses");
     assert_eq!(pause_byte(&svm) & PAUSE_PRIMARY, PAUSE_PRIMARY);
 }
 
@@ -75,15 +83,28 @@ fn only_the_live_super_admin_grants() {
     let (mut svm, sa, ua) = boot_platform(true);
     let stranger = funded(&mut svm);
     assert_code(
-        send(&mut svm, &[&stranger], &[grant_admin_ix(&stranger.pubkey(), &bare())]),
+        send(
+            &mut svm,
+            &[&stranger],
+            &[grant_admin_ix(&stranger.pubkey(), &bare())],
+        ),
         ERR_UNAUTHORIZED,
         "a stranger grants",
     );
     // An Admin is not enough, nor is the program upgrade authority.
     let admin = funded(&mut svm);
-    send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &admin.pubkey())]).unwrap();
+    send(
+        &mut svm,
+        &[&sa],
+        &[grant_admin_ix(&sa.pubkey(), &admin.pubkey())],
+    )
+    .unwrap();
     assert_code(
-        send(&mut svm, &[&admin], &[grant_admin_ix(&admin.pubkey(), &bare())]),
+        send(
+            &mut svm,
+            &[&admin],
+            &[grant_admin_ix(&admin.pubkey(), &bare())],
+        ),
         ERR_UNAUTHORIZED,
         "an Admin grants",
     );
@@ -106,12 +127,20 @@ fn never_twice_nor_to_the_default_key() {
     );
     // The super admin already holds its own Admin record.
     assert_code(
-        send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &sa.pubkey())]),
+        send(
+            &mut svm,
+            &[&sa],
+            &[grant_admin_ix(&sa.pubkey(), &sa.pubkey())],
+        ),
         ERR_ALREADY_IN_USE,
         "the super admin itself",
     );
     assert_code(
-        send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &Pubkey::default())]),
+        send(
+            &mut svm,
+            &[&sa],
+            &[grant_admin_ix(&sa.pubkey(), &Pubkey::default())],
+        ),
         ERR_INVALID_PROPOSED_AUTHORITY,
         "the default key",
     );
@@ -137,7 +166,12 @@ fn a_granted_admin_is_removed_at_once_and_the_rent_returns() {
 fn a_staged_grant_for_the_same_key_is_cancelled_in_the_same_transaction() {
     let (mut svm, sa, _ua) = boot_platform(true);
     let x = funded(&mut svm);
-    send(&mut svm, &[&sa], &[propose_admin_ix(&sa.pubkey(), &x.pubkey())]).unwrap();
+    send(
+        &mut svm,
+        &[&sa],
+        &[propose_admin_ix(&sa.pubkey(), &x.pubkey())],
+    )
+    .unwrap();
     send(
         &mut svm,
         &[&sa],
@@ -159,9 +193,18 @@ fn a_staged_grant_for_the_same_key_is_cancelled_in_the_same_transaction() {
 fn a_staged_grant_blocks_the_direct_grant_until_cancelled_so_a_revoke_sticks() {
     let (mut svm, sa, _ua) = boot_platform(true);
     let x = funded(&mut svm);
-    send(&mut svm, &[&sa], &[propose_admin_ix(&sa.pubkey(), &x.pubkey())]).unwrap();
+    send(
+        &mut svm,
+        &[&sa],
+        &[propose_admin_ix(&sa.pubkey(), &x.pubkey())],
+    )
+    .unwrap();
     assert_code(
-        send(&mut svm, &[&sa], &[grant_admin_ix(&sa.pubkey(), &x.pubkey())]),
+        send(
+            &mut svm,
+            &[&sa],
+            &[grant_admin_ix(&sa.pubkey(), &x.pubkey())],
+        ),
         ERR_ADMIN_GRANT_STAGED,
         "a direct grant next to a staged one",
     );
@@ -177,7 +220,12 @@ fn a_staged_grant_blocks_the_direct_grant_until_cancelled_so_a_revoke_sticks() {
     )
     .expect("cancel + grant");
     // Revoked, the key has nothing left to execute, even inside the old window.
-    send(&mut svm, &[&sa], &[remove_admin_ix(&sa.pubkey(), &x.pubkey())]).expect("remove_admin");
+    send(
+        &mut svm,
+        &[&sa],
+        &[remove_admin_ix(&sa.pubkey(), &x.pubkey())],
+    )
+    .expect("remove_admin");
     let eta = now(&svm) + asset_registry::ADMIN_TIMELOCK_SECS;
     warp_to(&mut svm, eta);
     assert_code(
@@ -211,6 +259,10 @@ fn a_former_super_admin_no_longer_grants() {
         ERR_UNAUTHORIZED,
         "the former super admin grants",
     );
-    send(&mut svm, &[&next], &[grant_admin_ix(&next.pubkey(), &bare())])
-        .expect("the new super admin grants");
+    send(
+        &mut svm,
+        &[&next],
+        &[grant_admin_ix(&next.pubkey(), &bare())],
+    )
+    .expect("the new super admin grants");
 }
