@@ -210,6 +210,11 @@ export default function AssetDetailPage({
   const country = countryLabel(issuerFacts?.jurisdiction);
   const verified = issuerFacts?.kybStatus === 1;
   const companyShares = asset.assetType === AssetType.Equity;
+  // The document that sets the token's terms, fixed on chain by its SHA-256 (none recorded: all zeros).
+  const legalDocBytes = Array.from(asset.legalDocHash);
+  const legalDocHash = legalDocBytes.some((byte) => byte !== 0)
+    ? legalDocBytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")
+    : null;
 
   return (
     <section>
@@ -247,6 +252,7 @@ export default function AssetDetailPage({
         oneTokenPercent={unitPercent(profile?.token_percent_e4)}
         conversionHref={profile?.convertible !== false && navHrefVisible("/portfolio/conversion") ? "/portfolio/conversion" : null}
         verified={verified}
+        legalDocRecorded={legalDocHash !== null}
       />
 
       <AssetProfileBlock profile={profile} />
@@ -288,6 +294,7 @@ export default function AssetDetailPage({
             }
           />
           <Field label="Name on chain" value={asset.name} />
+          {legalDocHash && <Field label="Legal document SHA-256" value={legalDocHash} mono />}
           <Field label="Asset ID" value={asset.assetId} mono />
           <Field label="Token symbol prefix" value={asset.symbolPrefix} mono />
           <div>

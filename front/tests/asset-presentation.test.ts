@@ -139,6 +139,14 @@ describe("Who gets what (components/asset-roles.tsx)", () => {
     expect(markup).toContain("The rights set out in the token&#x27;s documents, and nothing beyond them.");
   });
 
+  it("points to the legal document's SHA-256 only when one is recorded on chain", () => {
+    expect(html(createElement(AssetRoles, equity))).not.toContain("fixed on Solana by its SHA-256");
+    expect(html(createElement(AssetRoles, { ...equity, legalDocRecorded: true }))).toContain("The token&#x27;s legal document is fixed on Solana by its SHA-256, under On-chain details");
+    const page = source("app/marketplace/assets/[id]/page.tsx");
+    expect(page).toContain('label="Legal document SHA-256"');
+    expect(page.indexOf('label="Legal document SHA-256"')).toBeGreaterThan(page.indexOf("On-chain details"));
+  });
+
   it("promises nothing: no fee figure, no return, no price", () => {
     const markup = html(createElement(AssetRoles, equity));
     expect(markup).not.toMatch(/no fee|free|guarantee|return on|profit|€|\$/i);

@@ -25,6 +25,7 @@ export function AssetRoles({
   oneTokenPercent,
   conversionHref,
   verified,
+  legalDocRecorded = false,
 }: {
   /** The token's public name. */
   name: string;
@@ -36,6 +37,8 @@ export function AssetRoles({
   conversionHref: string | null;
   /** Whether the issuer's verification is complete. */
   verified: boolean;
+  /** Whether the token's legal document is fixed on chain by its SHA-256 (shown under On-chain details). */
+  legalDocRecorded?: boolean;
 }) {
   const holder: ReactNode[] = companyShares
     ? [
@@ -88,7 +91,7 @@ export function AssetRoles({
       </div>
       <p className="mt-3 text-xs leading-relaxed text-mx-ink-faint [&_a]:underline [&_a]:underline-offset-2">
         A summary of {name}, not its terms: the token&apos;s documents and the{" "}
-        <Link href="/legal/terms">Terms of Service</Link> decide. Read the{" "}
+        <Link href="/legal/terms">Terms of Service</Link> decide.{legalDocRecorded ? " The token's legal document is fixed on Solana by its SHA-256, under On-chain details: whoever holds a copy can check it is that document." : ""} Read the{" "}
         <Link href="/risks">risk disclosure</Link> and the <Link href="/pricing">fees and costs</Link> before you take part.
       </p>
     </section>
