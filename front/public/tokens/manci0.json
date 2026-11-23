@@ -1,7 +1,7 @@
 {
-  "name": "MANCI 17.5% · Class 0",
+  "name": "MANCI",
   "symbol": "MANCI0",
-  "description": "Share-class token of Mancipatio d.o.o. Beograd (Serbia), issued on the Manci platform by Mladen Rakić from his 70 % stake. 1 token = 0.01 % of the company; 10,000 tokens = 100 %; capped at 1,750 tokens = 17.5 %. Rights: voting, dividend, transferable; conversion into company shares subject to KYC.",
+  "description": "MANCI is the company token of Mancipatio d.o.o. Beograd (Serbia), issued on the Manci platform by Mladen Rakić from his stake in the company. 1 token = 0.01 % of the company; 10,000 tokens = 100 %; at most 1,750 tokens (17.5 %) can be issued. Each token is a documented right to acquire that share: conversion into registered company shares requires identity verification. Rights: voting, dividend, transferable.",
   "image": "https://raw.githubusercontent.com/Mancipatio/Mancipatio/main/front/public/tokens/manci0.png",
   "external_url": "https://www.manci.io",
   "attributes": [

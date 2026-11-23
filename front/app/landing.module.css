@@ -116,6 +116,7 @@
   .logo :global(.brand-logo) { width:118px; }
   .nav { gap:20px; font-size:12px; }
   .nav .navCta { gap:12px; padding:10px 13px; }
+  .nav .navFounders { display:none; }
   .hero { grid-template-columns:1fr; padding-top:45px; padding-bottom:38px; }
   .hero h1 { font-size:72px; letter-spacing:-3.5px; }
   .lead { max-width:490px; font-size:18px; }
