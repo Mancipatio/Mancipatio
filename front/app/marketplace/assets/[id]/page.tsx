@@ -4,6 +4,7 @@ import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useSolanaClient } from "@solana/react-hooks";
 import {
+  AssetType,
   findIssuerPda,
   type Asset,
   SaleStatus,
@@ -23,7 +24,6 @@ import {
 } from "@/lib/asset-links";
 import {
   ASSET_STATUS_LABEL,
-  ASSET_TYPE_LABEL,
   fromBytes32,
   safeHttpUrl,
 } from "@/lib/format";
@@ -46,6 +46,17 @@ import { useArchivedSet } from "@/lib/archive-client";
 import { isWithdrawn } from "@/lib/archive";
 import { WithdrawnNotice } from "@/components/withdrawn-notice";
 import { SupplyConversionsPanel } from "@/components/supply-conversions-panel";
+import { AssetLogo } from "@/components/asset-logo";
+import { AssetRoles } from "@/components/asset-roles";
+import {
+  assetKindLabel,
+  countryLabel,
+  publicAssetName,
+  publicAssetSummary,
+  shareClassLabel,
+  unitPercent,
+  verificationLabel,
+} from "@/lib/asset-presentation";
 
 export default function AssetDetailPage({
   params,
@@ -57,6 +68,8 @@ export default function AssetDetailPage({
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [issuerLegalId, setIssuerLegalId] = useState<string>("—");
+  // The issuer's on-chain record: its country and verification, shown in words.
+  const [issuerFacts, setIssuerFacts] = useState<{ jurisdiction: number; kybStatus: number } | null>(null);
   const [profile, setProfile] = useState<PublicAssetProfile | null>(null);
   // The route param is the asset PDA (public identity). A bare assetId is
   // honoured only when unique — the program allows the same id per issuer.
@@ -87,7 +100,10 @@ export default function AssetDetailPage({
               legalEntityId: i.legalEntityId,
             });
             if (pda.toString() === asset.issuer.toString()) {
-              if (!cancelled) setIssuerLegalId(fromBytes32(i.legalEntityId));
+              if (!cancelled) {
+                setIssuerLegalId(fromBytes32(i.legalEntityId));
+                setIssuerFacts({ jurisdiction: i.jurisdiction, kybStatus: i.kybStatus });
+              }
               break;
             }
           }
@@ -187,6 +203,13 @@ export default function AssetDetailPage({
     );
   }
 
+  const assetPda = lookup.kind === "found" ? lookup.address : null;
+  const name = publicAssetName(asset.name, profile);
+  const summary = publicAssetSummary(profile);
+  const country = countryLabel(issuerFacts?.jurisdiction);
+  const verified = issuerFacts?.kybStatus === 1;
+  const companyShares = asset.assetType === AssetType.Equity;
+
   return (
     <section>
       <Link
@@ -195,69 +218,92 @@ export default function AssetDetailPage({
       >
         ← Marketplace
       </Link>
-      <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
-        <div>
+      <div className="mt-4 flex flex-wrap items-start gap-5">
+        <AssetLogo assetPda={assetPda} name={name} size={72} />
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
-            Asset
+            {assetKindLabel(asset.assetType)}{country ? ` · ${country}` : ""}
           </p>
           <h1 className="mt-1 text-3xl font-semibold text-mx-ink">
-            {profile?.display_name || asset.name}
+            {name}
           </h1>
-          <p className="mt-1 text-sm text-mx-ink-faint">
-            {asset.assetId} · {asset.symbolPrefix} ·{" "}
-            <Link
-              href={`/marketplace/issuers/${encodeURIComponent(issuerLegalId)}`}
-              className="text-mx-ink-soft underline-offset-2 hover:underline"
-            >
-              {issuerLegalId}
-            </Link>
-          </p>
-          {profile?.summary && (
+          {summary && (
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-mx-ink-soft">
-              {profile.summary}
+              {summary}
+            </p>
+          )}
+          {issuerFacts && (
+            <p className={`mt-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${verified ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+              {verificationLabel(issuerFacts.kybStatus)}
             </p>
           )}
         </div>
-        <span className="rounded-full bg-mx-indigo-soft px-3 py-1 text-xs font-semibold uppercase tracking-wider text-mx-ink-soft">
-          {ASSET_TYPE_LABEL[asset.assetType] ?? "?"}
-        </span>
       </div>
 
-      <TokenInformationBlock profile={profile} />
+      <AssetRoles
+        name={name}
+        companyShares={companyShares}
+        oneTokenPercent={unitPercent(profile?.token_percent_e4)}
+        conversionHref={profile?.convertible !== false && navHrefVisible("/portfolio/conversion") ? "/portfolio/conversion" : null}
+        verified={verified}
+      />
 
       <AssetProfileBlock profile={profile} />
 
-      {/* Investor relations (lib/issuer-updates.ts): published updates; holders-only ones after an on-chain balance check. */}
-      {lookup.kind === "found" && <AssetUpdatesBlock assetPda={lookup.address} issuerPda={asset.issuer.toString()} />}
+      {/* The record: what is issued, what was converted and where it was registered. */}
+      {assetPda && <SupplyConversionsPanel assetPda={assetPda} />}
 
       <ShareClassesBlock asset={asset} data={data} hidden={conversionTargets} />
 
-      {lookup.kind === "found" && <SupplyConversionsPanel assetPda={lookup.address} />}
+      <TokenInformationBlock profile={profile} />
 
-      {/* Asset metadata */}
+      {/* Investor relations (lib/issuer-updates.ts): published updates; holders-only ones after an on-chain balance check. */}
+      {assetPda && <AssetUpdatesBlock assetPda={assetPda} issuerPda={asset.issuer.toString()} />}
+
+      {/* The registry's identifiers, in one place, for whoever checks the records on Solana. */}
       <section className="mt-10">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
-          Asset metadata
+          On-chain details
         </h2>
+        <p className="mt-2 max-w-2xl text-xs leading-relaxed text-mx-ink-faint">
+          The identifiers of this token&apos;s records on Solana ({detectNetwork()}), for checking them in an explorer.
+        </p>
         <dl className="mt-4 grid gap-3 rounded-[3px] border border-mx-rule bg-white p-6 text-sm sm:grid-cols-2">
-          <Field label="Status" value={ASSET_STATUS_LABEL[asset.status] ?? "?"} />
+          <Field label="Registry status" value={ASSET_STATUS_LABEL[asset.status] ?? "?"} />
           <Field
             label="Share classes"
-            value={String(lookup.kind === "found" ? visibleClassCount(lookup.address, asset.shareClassesCount, conversionTargets) : asset.shareClassesCount)}
+            value={String(assetPda ? visibleClassCount(assetPda, asset.shareClassesCount, conversionTargets) : asset.shareClassesCount)}
           />
           <Field
-            label="Allow P2P"
-            value={asset.jurisdictionRules.allowP2p ? "Yes" : "No"}
+            label="Transfers between holders"
+            value={asset.jurisdictionRules.allowP2p ? "Allowed" : "Not allowed"}
           />
           <Field
-            label="Max holders"
+            label="Limit on the number of holders"
             value={
               asset.jurisdictionRules.maxHolders === 0
-                ? "unlimited"
+                ? "None"
                 : String(asset.jurisdictionRules.maxHolders)
             }
           />
-          <Field label="Issuer PDA" value={asset.issuer.toString()} mono />
+          <Field label="Name on chain" value={asset.name} />
+          <Field label="Asset ID" value={asset.assetId} mono />
+          <Field label="Token symbol prefix" value={asset.symbolPrefix} mono />
+          <div>
+            <dt className="text-xs font-medium uppercase tracking-wide text-mx-ink-faint">
+              Issuer record
+            </dt>
+            <dd className="mt-0.5 break-all font-mono text-xs text-mx-ink">
+              <Link
+                href={`/marketplace/issuers/${encodeURIComponent(issuerLegalId)}`}
+                className="underline-offset-2 hover:underline"
+              >
+                {issuerLegalId}
+              </Link>
+            </dd>
+          </div>
+          {assetPda && <Field label="Asset account" value={assetPda} mono />}
+          <Field label="Issuer account" value={asset.issuer.toString()} mono />
         </dl>
       </section>
     </section>
@@ -517,41 +563,29 @@ function ShareClassesBlock({
             <table className="w-full text-sm">
               <thead className="border-b border-mx-rule bg-mx-paper text-left text-xs uppercase tracking-wider text-mx-ink-faint">
                 <tr>
-                  <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">Class</th>
-                  <th className="px-4 py-3 text-right font-medium">Circulating</th>
-                  <th className="px-4 py-3 font-medium">Mint</th>
+                  <th className="px-4 py-3 text-right font-medium">In circulation</th>
+                  <th className="px-4 py-3 font-medium">Token address</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-mx-rule">
                 {shareClasses.map((sc) => {
                   const status = sc.supplyLocked
-                    ? "Locked"
+                    ? "Supply locked"
                     : sc.mintInitialized
                       ? "Active"
-                      : "Pending mint";
+                      : "Token not created yet";
                   return (
                     <tr key={shareClassKey(sc.asset, sc.classIndex)} className="text-mx-ink-soft">
-                      <td className="px-4 py-3 font-mono">#{sc.classIndex}</td>
                       <td className="px-4 py-3">
-                        {[
-                          "Common",
-                          "Pref A",
-                          "Pref B",
-                          "Sr debt",
-                          "Jr debt",
-                          "Rev",
-                          "Royalty",
-                        ][sc.classType] ?? "?"}
+                        {shareClassLabel(sc.classType)}
                       </td>
                       <td className="px-4 py-3 text-right font-mono">
                         {String(sc.circulatingSupply)}
                       </td>
-                      <td className="px-4 py-3 font-mono text-[11px] text-mx-ink-faint">
-                        {sc.mintInitialized
-                          ? `${sc.mint.toString().slice(0, 6)}…${sc.mint.toString().slice(-4)}`
-                          : "—"}
+                      <td className="break-all px-4 py-3 font-mono text-[11px] text-mx-ink-faint">
+                        {sc.mintInitialized ? sc.mint.toString() : "—"}
                       </td>
                       <td className="px-4 py-3 text-xs">{status}</td>
                     </tr>
@@ -576,8 +610,7 @@ function ShareClassesBlock({
               >
                 <div className="flex items-baseline justify-between gap-3">
                   <p className="text-sm font-semibold text-emerald-900">
-                    Sale #{String(s.saleId)} — {String(s.sold)} /{" "}
-                    {String(s.totalForSale)} sold
+                    {String(s.sold)} of {String(s.totalForSale)} tokens sold
                   </p>
                   <Link
                     href={saleHref(

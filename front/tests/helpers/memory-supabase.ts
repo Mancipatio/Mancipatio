@@ -190,8 +190,10 @@ export function memorySupabase(): MemorySupabase {
       gt: (c: string, v: never) => cmp(c, (a) => (a as never) > v),
       gte: (c: string, v: never) => cmp(c, (a) => (a as never) >= v),
       is: (c: string, v: unknown) => cmp(c, (a) => (a ?? null) === v),
-      not: (c: string, operator: string, value: string) => {
-        if (operator !== "in") throw new Error(`memory supabase: not ${operator} is not supported`);
+      not: (c: string, operator: string, value: string | null) => {
+        // `.not(column, "is", null)`: IS NOT NULL.
+        if (operator === "is" && value === null) return cmp(c, (a) => (a ?? null) !== null);
+        if (operator !== "in" || value === null) throw new Error(`memory supabase: not ${operator} is not supported`);
         const values = value.replace(/[()]/g, "").split(",");
         return cmp(c, (a) => !values.includes(String(a)));
       },

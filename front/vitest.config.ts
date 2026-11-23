@@ -58,6 +58,7 @@ const KYC_ONLY_OPEN_SUITES = [
   // Read-only browsing (an asset's public supply figures), the admin
   // console's cap table and an issuer's read of its own.
   "tests/cap-table-routes.test.ts",
+  "tests/activity.test.ts",
   // Purchase recovery, custody recording and the exits of existing positions.
   "tests/chain-record-recovery.test.ts",
   "tests/custody-evidence-server.test.ts",

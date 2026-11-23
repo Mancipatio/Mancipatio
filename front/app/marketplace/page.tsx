@@ -12,15 +12,22 @@ import {
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { withoutArchived } from "@/lib/archive-client";
-import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
+import { fromBytes32 } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
 import { SkeletonTable } from "@/components/skeleton";
 import { assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
 import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
-import { visibleClassCount } from "@/lib/conversion-target";
-import { useConversionTargets } from "@/lib/use-conversion-targets";
+import { listAssetProfiles, type PublicAssetProfile } from "@/lib/asset-profiles";
 import {
-  Badge,
+  assetKindLabel,
+  countryLabel,
+  publicAssetName,
+  publicAssetSummary,
+  unitPercent,
+  verificationLabel,
+} from "@/lib/asset-presentation";
+import { AssetLogo } from "@/components/asset-logo";
+import {
   Card,
   EmptyState,
   Grid,
@@ -39,16 +46,21 @@ export default function MarketplacePage() {
   const client = useSolanaClient();
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
+  // Published profiles by asset PDA: the name and summary a visitor reads (lib/asset-presentation.ts).
+  const [profiles, setProfiles] = useState<Map<string, PublicAssetProfile>>(new Map());
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
 
   const refresh = useCallback(async () => {
     try {
       // Archived issuers and assets are not offered (lib/archive.ts).
-      const network = await withoutArchived(
-        await loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
-      );
+      const [network, published] = await Promise.all([
+        loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)).then(withoutArchived),
+        // The registry is still shown, under its on-chain names, when the published profiles cannot be read.
+        listAssetProfiles().catch(() => [] as PublicAssetProfile[]),
+      ]);
       setData(network);
+      setProfiles(new Map(published.map((profile) => [profile.asset_pda, profile])));
     } catch {
       setFailed(true);
     }
@@ -67,8 +79,6 @@ export default function MarketplacePage() {
   const [assetPdaMap, setAssetPdaMap] = useState<Map<Asset, string>>(
     new Map(),
   );
-  // A conversion target (the marker class, capped at 0) is not a share class anyone can hold.
-  const conversionTargets = useConversionTargets(data?.shareClasses);
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -96,19 +106,17 @@ export default function MarketplacePage() {
   const filteredAssets = useMemo(() => {
     if (!data) return [];
     const q = query.trim().toLowerCase();
+    const nameOf = (a: Asset) => publicAssetName(a.name, profiles.get(assetPdaMap.get(a) ?? ""));
     return data.assets
       .filter((a) => {
         if (typeFilter !== "all" && String(a.assetType) !== typeFilter)
           return false;
         if (!q) return true;
-        return (
-          a.name.toLowerCase().includes(q) ||
-          a.assetId.toLowerCase().includes(q) ||
-          a.symbolPrefix.toLowerCase().includes(q)
-        );
+        // The identifiers stay searchable for whoever knows them; they are not printed on the cards.
+        return [nameOf(a), a.name, a.assetId, a.symbolPrefix].some((field) => field.toLowerCase().includes(q));
       })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [data, query, typeFilter]);
+      .sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  }, [data, query, typeFilter, profiles, assetPdaMap]);
 
   const stats = useMemo(() => {
     if (!data) return null;
@@ -116,21 +124,21 @@ export default function MarketplacePage() {
       issuers: data.issuers.length,
       verifiedIssuers: data.issuers.filter((i) => i.kybStatus === 1).length,
       assets: data.assets.length,
-      shareClasses: data.shareClasses.length - conversionTargets.size,
       activeSales: data.sales.filter((s) => s.status === SaleStatus.Open).length,
     };
-  }, [data, conversionTargets]);
+  }, [data]);
 
   // Primary sales paused (KYC-only mode, lib/pilot-scope.ts): no sales count,
   // card or link, as on the overview.
   const salesOn = navHrefVisible("/marketplace/launchpad");
+  // A count of zero says nothing about a company: once the registry is read, it is not shown.
   const statItems = [
-    { k: "Issuers", v: stats?.issuers },
-    { k: "Verified issuers", v: stats?.verifiedIssuers },
-    { k: "Assets", v: stats?.assets },
-    { k: "Share classes", v: stats?.shareClasses },
-    ...(salesOn ? [{ k: "Active sales", v: stats?.activeSales }] : []),
-  ];
+    { k: "Companies", v: stats?.issuers },
+    { k: "Verified companies", v: stats?.verifiedIssuers },
+    { k: "Tokens listed", v: stats?.assets },
+    ...(salesOn ? [{ k: "Open sales", v: stats?.activeSales }] : []),
+  ].filter((item) => item.v === undefined || item.v > 0);
+  const statColumns = ["", "sm:grid-cols-1", "sm:grid-cols-2", "sm:grid-cols-3", "sm:grid-cols-4"][statItems.length] ?? "sm:grid-cols-4";
   const marketCards = [
     { href: "/marketplace/launchpad", title: "Primary sales", body: "Buy share-class units directly from issuers on the launchpad." },
     { href: "/marketplace/otc", title: "OTC offers", body: "Buy from existing token holders through hook-aware OTC offers." },
@@ -146,8 +154,8 @@ export default function MarketplacePage() {
       />
 
       {/* Live stats */}
-      <Section>
-        <dl className={`grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule ${salesOn ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+      {statItems.length > 0 && <Section>
+        <dl className={`grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule ${statColumns}`}>
           {statItems.map((s) => (
             <div key={s.k} className="bg-mx-surface px-4 py-3.5">
               <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
@@ -159,19 +167,19 @@ export default function MarketplacePage() {
             </div>
           ))}
         </dl>
-      </Section>
+      </Section>}
 
       {/* Assets */}
       <Section>
         <SectionHead
-          eyebrow="Assets"
-          title="Registered assets"
+          eyebrow="Tokens"
+          title="Listed on Manci"
         />
         <div className="mb-5 mt-6 flex flex-wrap items-center gap-3">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by asset name, ID or symbol…"
+            placeholder="Search by name…"
             className="min-w-[280px] flex-1 rounded-[3px] border border-mx-rule-strong bg-mx-surface px-3 py-2 text-sm text-mx-ink outline-none placeholder:text-mx-ink-faint focus:border-mx-indigo"
           />
           <select
@@ -204,63 +212,74 @@ export default function MarketplacePage() {
         ) : (
           <Grid cols={3}>
             {filteredAssets.map((a) => {
+              const pda = assetPdaMap.get(a) ?? "";
+              const profile = profiles.get(pda);
+              const name = publicAssetName(a.name, profile);
+              const summary = publicAssetSummary(profile);
               const issuerLegal = issuerPdaMap.get(a.issuer.toString());
               const issuer = data.issuers.find(
                 (i) => fromBytes32(i.legalEntityId) === issuerLegal,
               );
+              const country = countryLabel(issuer?.jurisdiction);
+              const oneToken = unitPercent(profile?.token_percent_e4);
+              // Tokens held outside the issuer's cap: the circulating supply of the asset's classes.
+              const circulating = data.shareClasses
+                .filter((sc) => pda !== "" && sc.asset.toString() === pda)
+                .reduce((sum, sc) => sum + sc.circulatingSupply, BigInt(0));
               return (
                 <Link
-                  key={assetPdaMap.get(a) ?? `${a.issuer.toString()}:${a.assetId}`}
+                  key={pda || `${a.issuer.toString()}:${a.assetId}`}
                   // Until PDAs resolve, the legacy assetId link still lands on
                   // the detail page, which disambiguates duplicates itself.
-                  href={assetHref(assetPdaMap.get(a) ?? a.assetId)}
+                  href={assetHref(pda || a.assetId)}
                   className="mx-card mx-card--link block"
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
+                  <div className="flex items-start gap-3">
+                    <AssetLogo assetPda={pda} name={name} size={44} />
+                    <div className="min-w-0">
                       <p className="text-base font-semibold text-mx-ink">
-                        {a.name}
+                        {name}
                       </p>
-                      <p className="mt-0.5 font-mono text-xs text-mx-ink-faint">
-                        {a.assetId} · {a.symbolPrefix}
+                      <p className="mt-0.5 text-xs text-mx-ink-faint">
+                        {assetKindLabel(a.assetType)}{country ? ` · ${country}` : ""}
                       </p>
                     </div>
-                    <Badge>{ASSET_TYPE_LABEL[a.assetType] ?? "?"}</Badge>
                   </div>
+                  {summary && (
+                    <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-mx-ink-soft">
+                      {summary}
+                    </p>
+                  )}
                   <dl className="mt-4 space-y-1.5 text-xs">
+                    {oneToken && (
+                      <div className="flex justify-between gap-3">
+                        <dt className="text-mx-ink-faint">One token</dt>
+                        <dd className="font-medium text-mx-ink-soft">
+                          {oneToken} % of the company
+                        </dd>
+                      </div>
+                    )}
                     <div className="flex justify-between gap-3">
-                      <dt className="text-mx-ink-faint">Issuer</dt>
+                      <dt className="text-mx-ink-faint">In circulation</dt>
                       <dd className="font-medium text-mx-ink-soft">
-                        {issuerLegal ?? "—"}
+                        {circulating.toLocaleString("en-US")} {circulating === BigInt(1) ? "token" : "tokens"}
                       </dd>
                     </div>
                     <div className="flex justify-between gap-3">
-                      <dt className="text-mx-ink-faint">Share classes</dt>
-                      <dd className="font-mono text-mx-ink-soft">
-                        {visibleClassCount(assetPdaMap.get(a) ?? "", a.shareClassesCount, conversionTargets)}
-                      </dd>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <dt className="text-mx-ink-faint">Jurisdiction</dt>
-                      <dd className="font-mono text-mx-ink-soft">
-                        {issuer?.jurisdiction ?? "—"}
-                      </dd>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <dt className="text-mx-ink-faint">KYB</dt>
+                      <dt className="text-mx-ink-faint">Verification</dt>
                       <dd
-                        className={`text-xs font-semibold ${
+                        className={`text-right font-semibold ${
                           issuer?.kybStatus === 1
                             ? "text-emerald-700"
                             : "text-mx-amber"
                         }`}
                       >
-                        {issuer ? KYB_LABEL[issuer.kybStatus] : "—"}
+                        {verificationLabel(issuer?.kybStatus)}
                       </dd>
                     </div>
                   </dl>
                   <p className="mt-4 text-xs text-mx-indigo underline-offset-2">
-                    Open profile →
+                    View token →
                   </p>
                 </Link>
               );
