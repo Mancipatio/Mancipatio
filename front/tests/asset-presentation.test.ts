@@ -75,6 +75,9 @@ describe("names instead of codes (lib/asset-presentation.ts)", () => {
   it("falls back to initials for an asset without an approved logo", () => {
     expect(assetInitials("MANCI")).toBe("MA");
     expect(assetInitials("Acme Industries")).toBe("AI");
+    expect(assetInitials("HERC 10%")).toBe("HE");
+    expect(assetInitials("MANCI 17.5%")).toBe("MA");
+    expect(assetInitials("2026")).toBe("20");
     expect(assetInitials("Mancipatio d.o.o. · 17.5 %")).toBe("MD");
     expect(assetInitials("  ")).toBe("?");
   });

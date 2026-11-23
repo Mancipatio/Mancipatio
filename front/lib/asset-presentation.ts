@@ -74,6 +74,8 @@ export function unitPercent(tokenPercentE4: string | null | undefined): string |
 export function assetInitials(name: string): string {
   const words = name.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return "?";
-  const letters = words.length === 1 ? words[0].slice(0, 2) : words[0][0] + words[1][0];
+  // Letters before figures: "HERC 10%" is "HE", not "H1".
+  const lettered = words.filter((word) => /^\p{L}/u.test(word));
+  const letters = lettered.length >= 2 ? lettered[0][0] + lettered[1][0] : (lettered[0] ?? words[0]).slice(0, 2);
   return letters.toUpperCase();
 }

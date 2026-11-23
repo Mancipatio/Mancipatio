@@ -109,7 +109,8 @@ export default function AssetDetailPage({
           }
           // Off-chain category profile (degrade gracefully when absent).
           // Only published profiles are public; drafts stay private to admin/issuer.
-          const row = await getAssetProfile(found.address);
+          // An unreadable profile leaves the page on its on-chain facts; it does not blank it.
+          const row = await getAssetProfile(found.address).catch(() => null);
           if (!cancelled) setProfile(row && row.is_published ? row : null);
         }
       } catch {
