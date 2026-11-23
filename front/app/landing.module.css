@@ -42,6 +42,27 @@
 .assetBand p .assetName { display:inline-flex; align-items:center; gap:22px; color:#d0dccd; }
 .assetBand a { margin-left:auto; display:grid; place-items:center; width:36px; height:36px; flex-shrink:0; border:1px solid #ffffff28; border-radius:50%; }
 .assetBand a:hover { background:#ffffff12; }
+.listed { padding:70px 0 0; background:var(--landing-cream); color:#18352a; }
+.listed .eyebrow { color:#65765e; }
+.listedHeading { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; }
+.listed h2 { margin-top:16px; font-size:40px; line-height:1.15; letter-spacing:-1.8px; font-weight:500; }
+.listedBody { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr); gap:28px; align-items:start; }
+.listedGrid { margin-top:34px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+.listedGridNarrow { grid-template-columns:1fr; }
+.listedCard { display:flex; flex-direction:column; gap:14px; padding:26px; background:#fff; border:1px solid #d8ded1; border-radius:8px; color:#18352a; transition:border-color .2s, transform .2s; }
+.listedCard:hover { border-color:#244d34; transform:translateY(-2px); }
+.listedCardTop { display:flex; align-items:center; gap:14px; }
+.listedCard h3 { font-size:24px; letter-spacing:-.6px; font-weight:500; }
+.listedCard p { font-size:13px; line-height:1.8; color:#586653; }
+.listedFact { color:#426747; font-family:var(--font-geist-mono),monospace; font-size:10px; letter-spacing:.3px; }
+.listedMore { margin-top:auto; padding-top:6px; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:#244d34; }
+.listedRecord { margin-top:34px; padding:26px; background:#e7ecdf; border-radius:8px; }
+.listedRecord ol { margin:14px 0 0; padding:0; list-style:none; }
+.listedRecord li { padding:14px 0; border-top:1px solid #cdd5c7; }
+.listedRecord time { display:block; color:#65765e; font-family:var(--font-geist-mono),monospace; font-size:10px; letter-spacing:.3px; }
+.listedRecord a { display:inline-block; margin-top:5px; font-size:14px; font-weight:500; line-height:1.5; color:#18352a; }
+.listedRecord a:hover { text-decoration:underline; text-underline-offset:3px; }
+.listedRecord li p { margin-top:4px; font-size:12px; line-height:1.7; color:#63705c; }
 .about { padding:76px 0 70px; background:var(--landing-cream); color:#18352a; scroll-margin-top:24px; }
 .aboutHeading { display:grid; grid-template-columns:1fr 1fr; gap:70px; align-items:end; }
 .about .eyebrow { color:#65765e; }
@@ -117,6 +138,10 @@
   .nav { gap:20px; font-size:12px; }
   .nav .navCta { gap:12px; padding:10px 13px; }
   .nav .navFounders { display:none; }
+  .listed { padding-top:50px; }
+  .listed h2 { font-size:32px; }
+  .listedBody, .listedGrid { grid-template-columns:1fr; }
+  .listedHeading { flex-direction:column; align-items:flex-start; gap:14px; }
   .hero { grid-template-columns:1fr; padding-top:45px; padding-bottom:38px; }
   .hero h1 { font-size:72px; letter-spacing:-3.5px; }
   .lead { max-width:490px; font-size:18px; }

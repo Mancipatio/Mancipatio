@@ -70,6 +70,16 @@ export function unitPercent(tokenPercentE4: string | null | undefined): string |
   return e4 > BigInt(0) ? formatPercent(e4) : null;
 }
 
+/**
+ * The share of the company `units` tokens are ("2.5"), exact, from the same
+ * figure; null without it or past the whole company.
+ */
+export function stakePercent(units: bigint, tokenPercentE4: string | null | undefined): string | null {
+  if (!tokenPercentE4 || !/^\d+$/.test(tokenPercentE4) || units <= BigInt(0)) return null;
+  const e4 = units * BigInt(tokenPercentE4);
+  return e4 > BigInt(0) && e4 <= BigInt(1_000_000) ? formatPercent(e4) : null;
+}
+
 /** Up to two initials for an asset without an approved logo. */
 export function assetInitials(name: string): string {
   const words = name.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);

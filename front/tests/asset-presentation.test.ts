@@ -21,6 +21,7 @@ import {
   publicAssetName,
   publicAssetSummary,
   shareClassLabel,
+  stakePercent,
   unitPercent,
   verificationLabel,
 } from "@/lib/asset-presentation";
@@ -70,6 +71,12 @@ describe("names instead of codes (lib/asset-presentation.ts)", () => {
     expect(unitPercent("0")).toBeNull();
     expect(unitPercent("0.01")).toBeNull();
     expect(unitPercent(null)).toBeNull();
+    // A holding's share: 250 tokens of 0.01 % each are 2.5 % of the company.
+    expect(stakePercent(BigInt(250), "100")).toBe("2.5");
+    expect(stakePercent(BigInt(1), "1")).toBe("0.0001");
+    expect(stakePercent(BigInt(10_001), "100")).toBeNull();
+    expect(stakePercent(BigInt(0), "100")).toBeNull();
+    expect(stakePercent(BigInt(250), null)).toBeNull();
   });
 
   it("falls back to initials for an asset without an approved logo", () => {
@@ -132,6 +139,14 @@ describe("Who gets what (components/asset-roles.tsx)", () => {
     expect(markup).toContain("The rights set out in the token&#x27;s documents, and nothing beyond them.");
   });
 
+  it("points to the legal document's SHA-256 only when one is recorded on chain", () => {
+    expect(html(createElement(AssetRoles, equity))).not.toContain("fixed on Solana by its SHA-256");
+    expect(html(createElement(AssetRoles, { ...equity, legalDocRecorded: true }))).toContain("The token&#x27;s legal document is fixed on Solana by its SHA-256, under On-chain details");
+    const page = source("app/marketplace/assets/[id]/page.tsx");
+    expect(page).toContain('label="Legal document SHA-256"');
+    expect(page.indexOf('label="Legal document SHA-256"')).toBeGreaterThan(page.indexOf("On-chain details"));
+  });
+
   it("promises nothing: no fee figure, no return, no price", () => {
     const markup = html(createElement(AssetRoles, equity));
     expect(markup).not.toMatch(/no fee|free|guarantee|return on|profit|€|\$/i);
@@ -146,6 +161,14 @@ describe("the public pages print names, not registry codes", () => {
       // The KYB status and the jurisdiction are shown in words (lib/asset-presentation.ts).
       expect(source(page), page).not.toMatch(/KYB_LABEL|ISO-3166|>\s*Jurisdiction\s*</);
     }
+  });
+
+  it("the portfolio names a holding by its token and says what share of the company it is", () => {
+    const page = source("app/portfolio/page.tsx");
+    expect(page).toContain("publicAssetName(h.assetName, profile)");
+    expect(page).toContain("stakePercent(h.balance, profile?.token_percent_e4)");
+    expect(page).toContain("<AssetLogo");
+    expect(page).not.toMatch(/#\{h\.classIndex\}|\{h\.assetId\}/);
   });
 
   it("the cards carry no asset id, symbol prefix or issuer legal id", () => {
@@ -167,5 +190,17 @@ describe("the public pages print names, not registry codes", () => {
     expect(page.indexOf("value={asset.assetId}")).toBeGreaterThan(details);
     expect(page.indexOf("value={asset.symbolPrefix}")).toBeGreaterThan(details);
     expect(page.indexOf('label="Asset ID"')).toBeGreaterThan(details);
+  });
+});
+
+describe("the landing page's companies (app/landing-companies.tsx)", () => {
+  it("is built from the two open reads only and links nothing but tokens and the marketplace", () => {
+    const text = source("app/landing-companies.tsx");
+    expect(text).toContain("listAssetProfiles(");
+    expect(text).toContain('fetch("/api/activity/public"');
+    expect([...text.matchAll(/href=\{?"?([^"}\s]+)/g)].map((match) => match[1]).sort()).toEqual(["/marketplace", "assetHref(item.asset_pda)", "assetHref(profile.asset_pda)"]);
+    // Shown only once a profile is published: the landing page is unchanged without one.
+    expect(text).toContain("if (named.length === 0) return null;");
+    expect(source("app/page.tsx")).toContain("<LandingCompanies />");
   });
 });
