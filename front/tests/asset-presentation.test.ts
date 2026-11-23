@@ -21,6 +21,7 @@ import {
   publicAssetName,
   publicAssetSummary,
   shareClassLabel,
+  stakePercent,
   unitPercent,
   verificationLabel,
 } from "@/lib/asset-presentation";
@@ -70,6 +71,12 @@ describe("names instead of codes (lib/asset-presentation.ts)", () => {
     expect(unitPercent("0")).toBeNull();
     expect(unitPercent("0.01")).toBeNull();
     expect(unitPercent(null)).toBeNull();
+    // A holding's share: 250 tokens of 0.01 % each are 2.5 % of the company.
+    expect(stakePercent(BigInt(250), "100")).toBe("2.5");
+    expect(stakePercent(BigInt(1), "1")).toBe("0.0001");
+    expect(stakePercent(BigInt(10_001), "100")).toBeNull();
+    expect(stakePercent(BigInt(0), "100")).toBeNull();
+    expect(stakePercent(BigInt(250), null)).toBeNull();
   });
 
   it("falls back to initials for an asset without an approved logo", () => {
@@ -146,6 +153,14 @@ describe("the public pages print names, not registry codes", () => {
       // The KYB status and the jurisdiction are shown in words (lib/asset-presentation.ts).
       expect(source(page), page).not.toMatch(/KYB_LABEL|ISO-3166|>\s*Jurisdiction\s*</);
     }
+  });
+
+  it("the portfolio names a holding by its token and says what share of the company it is", () => {
+    const page = source("app/portfolio/page.tsx");
+    expect(page).toContain("publicAssetName(h.assetName, profile)");
+    expect(page).toContain("stakePercent(h.balance, profile?.token_percent_e4)");
+    expect(page).toContain("<AssetLogo");
+    expect(page).not.toMatch(/#\{h\.classIndex\}|\{h\.assetId\}/);
   });
 
   it("the cards carry no asset id, symbol prefix or issuer legal id", () => {

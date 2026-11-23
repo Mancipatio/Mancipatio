@@ -33,6 +33,9 @@ import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { useToast } from "@/lib/toast";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { PortfolioUpdates } from "@/components/issuer-updates/portfolio-updates";
+import { getAssetProfiles, type PublicAssetProfile } from "@/lib/asset-profiles";
+import { publicAssetName, stakePercent } from "@/lib/asset-presentation";
+import { AssetLogo } from "@/components/asset-logo";
 
 // Only jurisdictions the server actually accepts (/api/passport/submit
 // validates against DEFAULT_APPROVED_JURISDICTIONS — offering the full ISO
@@ -74,6 +77,8 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
   const router = useRouter();
   const toast = useToast();
   const [enriched, setEnriched] = useState<PortfolioHolding[] | null>(null);
+  // Published profiles of the held tokens: their names and the share of the company one token is.
+  const [profiles, setProfiles] = useState<Map<string, PublicAssetProfile>>(new Map());
   const [failed, setFailed] = useState(false);
   const [passport, setPassport] = useState<PassportState>({ phase: "loading" });
   const now = Number(useChainClock());
@@ -101,7 +106,12 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
           loadHoldings(client.runtime.rpc, wallet),
         ]);
         const rows = await enrichPortfolioHoldings(network, holdings);
+        // The holdings are shown under their on-chain names when the published profiles cannot be read.
+        const published = rows.length
+          ? await getAssetProfiles([...new Set(rows.map((row) => row.assetPda))]).catch(() => new Map<string, PublicAssetProfile>())
+          : new Map<string, PublicAssetProfile>();
         if (!cancelled) {
+          setProfiles(published);
           setEnriched(rows);
           setLastLoadedAt(new Date());
         }
@@ -258,20 +268,31 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
             <table className="w-full text-sm">
               <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                 <tr>
-                  <th className="px-4 py-3 font-medium">Asset / class</th>
-                  <th className="px-4 py-3 font-medium">Type</th>
+                  <th className="px-4 py-3 font-medium">Token</th>
+                  <th className="px-4 py-3 font-medium">Class</th>
                   <th className="px-4 py-3 text-right font-medium">Balance</th>
-                  <th className="px-4 py-3 font-medium">Mint</th>
+                  <th className="px-4 py-3 font-medium">Token address</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {enriched.map((h) => (
+                {enriched.map((h) => {
+                  const profile = profiles.get(h.assetPda);
+                  const name = publicAssetName(h.assetName, profile);
+                  const stake = stakePercent(h.balance, profile?.token_percent_e4);
+                  return (
                   <tr key={h.mint} className="text-slate-700">
                     <td className="px-4 py-3">
-                      <Link href={assetHref(h.assetPda)} className="font-medium text-brand-700 hover:underline">{h.assetName}</Link>
-                      <p className="mt-0.5 text-xs text-slate-500">
-                        #{h.classIndex} · {h.assetId}
-                      </p>
+                      <div className="flex items-center gap-3">
+                        <AssetLogo assetPda={h.assetPda} name={name} size={34} />
+                        <div>
+                          <Link href={assetHref(h.assetPda)} className="font-medium text-brand-700 hover:underline">{name}</Link>
+                          {stake && (
+                            <p className="mt-0.5 text-xs text-slate-500">
+                              {stake} % of the company
+                            </p>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3">{h.className}</td>
                     <td className="px-4 py-3 text-right font-mono text-slate-700">
@@ -281,7 +302,8 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
                       {h.mint.slice(0, 6)}…{h.mint.slice(-4)}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
