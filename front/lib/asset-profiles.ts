@@ -29,6 +29,22 @@ export type AssetProfile = {
   status: "draft" | "published" | "archived";
   is_published: boolean;
 
+  // The company behind the token (migration 0093, lib/company-profile.ts):
+  // deliberately public fields. Optional: rows read before 0093 is applied do
+  // not carry the columns.
+  company_name?: string | null;
+  /** One "Name — Role" per person. */
+  team?: string[] | null;
+  link_x?: string | null;
+  link_linkedin?: string | null;
+  link_github?: string | null;
+  // The company's logo (0093): a file under logos/<asset PDA>/ in the public
+  // bucket, shown to the public only once an admin approved it.
+  logo_path?: string | null;
+  logo_sha256?: string | null;
+  logo_approved_at?: string | null;
+  logo_approved_by?: string | null;
+
   // SPV linkage (migration 0018) + whitepaper / basic token information (0019)
   spv_id: string | null;
   whitepaper_path: string | null;

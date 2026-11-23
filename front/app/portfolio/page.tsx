@@ -283,7 +283,7 @@ function PortfolioForWallet({ wallet }: { wallet: Address }) {
                   <tr key={h.mint} className="text-slate-700">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <AssetLogo assetPda={h.assetPda} name={name} size={34} />
+                        <AssetLogo assetPda={h.assetPda} name={name} logoPath={profile?.logo_path} size={34} />
                         <div>
                           <Link href={assetHref(h.assetPda)} className="font-medium text-brand-700 hover:underline">{name}</Link>
                           {stake && (

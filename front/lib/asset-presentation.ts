@@ -12,7 +12,7 @@ import { countryName } from "@/lib/countries";
 import { ASSET_TYPES, SHARE_CLASS_TYPE_LABELS } from "@/lib/asset-types";
 import { formatPercent } from "@/lib/tokenize-shares";
 
-type NamedProfile = { display_name?: string | null; summary?: string | null } | null | undefined;
+type NamedProfile = { display_name?: string | null; summary?: string | null; company_name?: string | null } | null | undefined;
 
 /** The name shown for an asset: the published profile's, else the on-chain name. */
 export function publicAssetName(onChainName: string, profile?: NamedProfile): string {
@@ -23,6 +23,11 @@ export function publicAssetName(onChainName: string, profile?: NamedProfile): st
 /** The published one-line summary, or null. */
 export function publicAssetSummary(profile?: NamedProfile): string | null {
   return profile?.summary?.trim() || null;
+}
+
+/** The company behind the token, as its published profile names it, or null. */
+export function publicCompanyName(profile?: NamedProfile): string | null {
+  return profile?.company_name?.trim() || null;
 }
 
 /**

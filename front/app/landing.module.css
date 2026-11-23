@@ -53,6 +53,7 @@
 .listedCard:hover { border-color:#244d34; transform:translateY(-2px); }
 .listedCardTop { display:flex; align-items:center; gap:14px; }
 .listedCard h3 { font-size:24px; letter-spacing:-.6px; font-weight:500; }
+.listedCompany { display:block; margin-top:2px; font-size:12px; color:#65765e; }
 .listedCard p { font-size:13px; line-height:1.8; color:#586653; }
 .listedFact { color:#426747; font-family:var(--font-geist-mono),monospace; font-size:10px; letter-spacing:.3px; }
 .listedMore { margin-top:auto; padding-top:6px; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:#244d34; }

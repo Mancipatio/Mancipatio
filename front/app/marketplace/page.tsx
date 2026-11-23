@@ -23,6 +23,7 @@ import {
   countryLabel,
   publicAssetName,
   publicAssetSummary,
+  publicCompanyName,
   unitPercent,
   verificationLabel,
 } from "@/lib/asset-presentation";
@@ -113,7 +114,8 @@ export default function MarketplacePage() {
           return false;
         if (!q) return true;
         // The identifiers stay searchable for whoever knows them; they are not printed on the cards.
-        return [nameOf(a), a.name, a.assetId, a.symbolPrefix].some((field) => field.toLowerCase().includes(q));
+        const company = publicCompanyName(profiles.get(assetPdaMap.get(a) ?? "")) ?? "";
+        return [nameOf(a), company, a.name, a.assetId, a.symbolPrefix].some((field) => field.toLowerCase().includes(q));
       })
       .sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
   }, [data, query, typeFilter, profiles, assetPdaMap]);
@@ -216,6 +218,7 @@ export default function MarketplacePage() {
               const profile = profiles.get(pda);
               const name = publicAssetName(a.name, profile);
               const summary = publicAssetSummary(profile);
+              const company = publicCompanyName(profile);
               const issuerLegal = issuerPdaMap.get(a.issuer.toString());
               const issuer = data.issuers.find(
                 (i) => fromBytes32(i.legalEntityId) === issuerLegal,
@@ -235,13 +238,13 @@ export default function MarketplacePage() {
                   className="mx-card mx-card--link block"
                 >
                   <div className="flex items-start gap-3">
-                    <AssetLogo assetPda={pda} name={name} size={44} />
+                    <AssetLogo assetPda={pda} name={name} logoPath={profile?.logo_path} size={44} />
                     <div className="min-w-0">
                       <p className="text-base font-semibold text-mx-ink">
                         {name}
                       </p>
                       <p className="mt-0.5 text-xs text-mx-ink-faint">
-                        {assetKindLabel(a.assetType)}{country ? ` · ${country}` : ""}
+                        {company ?? assetKindLabel(a.assetType)}{country ? ` · ${country}` : ""}
                       </p>
                     </div>
                   </div>
