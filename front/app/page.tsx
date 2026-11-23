@@ -13,6 +13,7 @@ import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 import { siteUrl } from "@/lib/site-url";
 import { jsonLdScript, organizationJsonLd } from "@/lib/structured-data";
 import styles from "./landing.module.css";
+import { LandingCompanies } from "./landing-companies";
 
 const brandFont = Montserrat({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-brand", display: "swap" });
 
@@ -101,6 +102,9 @@ export default function HomePage() {
           <div className={styles.assetBand}>
             <div className={styles.container}><span className={styles.assetBandLabel}>UNDERSTAND THE ASSET</span><p>{assetTypes.map((asset, index) => <span className={styles.assetName} key={asset.slug}>{index > 0 && <span aria-hidden="true">/</span>}{asset.title}</span>)}</p><Link href={assetGuide} aria-label={assetTypes.length === 1 ? "Read the asset guide" : "Explore offered asset types"}><IconArrowUpRight size={20} /></Link></div>
           </div>
+
+          {/* The published tokens and the public record; renders nothing until a profile is published. */}
+          <LandingCompanies />
 
           <section id="ownership-path" className={styles.about} aria-labelledby="about-title">
             <div className={styles.container}>

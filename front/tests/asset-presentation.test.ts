@@ -169,3 +169,15 @@ describe("the public pages print names, not registry codes", () => {
     expect(page.indexOf('label="Asset ID"')).toBeGreaterThan(details);
   });
 });
+
+describe("the landing page's companies (app/landing-companies.tsx)", () => {
+  it("is built from the two open reads only and links nothing but tokens and the marketplace", () => {
+    const text = source("app/landing-companies.tsx");
+    expect(text).toContain("listAssetProfiles(");
+    expect(text).toContain('fetch("/api/activity/public"');
+    expect([...text.matchAll(/href=\{?"?([^"}\s]+)/g)].map((match) => match[1]).sort()).toEqual(["/marketplace", "assetHref(item.asset_pda)", "assetHref(profile.asset_pda)"]);
+    // Shown only once a profile is published: the landing page is unchanged without one.
+    expect(text).toContain("if (named.length === 0) return null;");
+    expect(source("app/page.tsx")).toContain("<LandingCompanies />");
+  });
+});
