@@ -74,6 +74,26 @@ const AFTER_ISSUANCE = [
   },
 ].filter((card) => navHrefVisible(card.href));
 
+// What each side has once a company's token is issued. Each line restates the
+// Terms of Service (the issuer is responsible for its instrument; the Operator
+// is not the issuer and takes no legal title; issuers pay what their
+// engagement agreement provides) or the landing page's four steps. The token
+// page says the same to a holder (components/asset-roles.tsx).
+const WHO_GETS_WHAT = [
+  {
+    title: "Your company",
+    body: "Issues a token for the stake it chooses, up to a cap recorded on Solana, and stays responsible for the token, its documents and its disclosures. When a holder converts, the company completes the legal transfer and the entry in the official register.",
+  },
+  {
+    title: "Your token holders",
+    body: "Hold a documented right to acquire a share, in their own wallets, and can transfer it. Holding a token alone does not make them registered shareholders: where you offer conversion and it is available, they verify their identity, and the registered share replaces the burned tokens.",
+  },
+  {
+    title: "Manci",
+    body: "Verifies the company, runs issuance and conversion on Solana and publishes the record of each register entry next to the token. Manci is not the issuer and takes no legal title to what backs the token. The company pays what its engagement agreement provides.",
+  },
+];
+
 export default function HowItWorksPage() {
   return (
     <>
@@ -95,6 +115,19 @@ export default function HowItWorksPage() {
         <p className="mt-5">
           <Link className="mx-link" href="/legal-structure">
             Read about the legal structure →
+          </Link>
+        </p>
+      </Section>
+      <Section id="who-gets-what">
+        <H2>Who gets what</H2>
+        <Grid cols={3} className="mt-5">
+          {WHO_GETS_WHAT.map((card) => (
+            <Card key={card.title} title={card.title} body={card.body} />
+          ))}
+        </Grid>
+        <p className="mt-5">
+          <Link className="mx-link" href="/pricing">
+            Fees and costs →
           </Link>
         </p>
       </Section>

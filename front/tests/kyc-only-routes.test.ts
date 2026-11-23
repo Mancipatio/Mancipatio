@@ -409,6 +409,9 @@ describe("every API route is classified", () => {
     "account/wallets/attach": "account", "account/wallets/cancel": "account", "account/wallets/complete": "account",
     "account/wallets/primary": "account", "account/wallets/remove": "account", "account/wallets/start": "account",
     "account/wallets/transaction": "account",
+    // The overview's activity feed: register entries and public issuer updates,
+    // the non-personal columns the asset pages already show one asset at a time.
+    "activity/public": "read",
     "applications/capacity": "read", "applications/eligibility": "read", "applications/mine": "read", "applications/public": "read",
     "archive/check": "read", "archive/list": "read",
     "assistant": "support",

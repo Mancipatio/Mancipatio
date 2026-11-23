@@ -66,6 +66,28 @@ body {
    a consistent shell without each one re-spelling padding + shadow. */
 
 @layer components {
+  /* A company's mark next to its token (components/asset-logo.tsx): the
+     approved logo, or the initials of the name on a quiet tile. */
+  .asset-logo {
+    display: inline-grid;
+    place-content: center;
+    flex: none;
+    overflow: hidden;
+    border-radius: 22%;
+    border: 1px solid rgb(0 0 0 / 0.06);
+    background: #e3ecdf;
+    color: #18352a;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1;
+  }
+  .asset-logo img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
   .panel {
     @apply rounded-xl border border-slate-200/80 bg-white shadow-card;
   }

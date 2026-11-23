@@ -70,6 +70,7 @@ export default function HomePage() {
         <header className={`${styles.container} ${styles.header}`}>
           <Link href="/" className={styles.logo}><BrandLogo /></Link>
           <nav className={styles.nav} aria-label="Main navigation">
+            <Link href="/how-it-works" className={styles.navFounders}>For founders</Link>
             <Link href="/about">About</Link>
             <Link href="/docs">Docs</Link>
             <a href={MANCI_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Manci on X (opens in a new tab)">X <IconArrowUpRight size={13} /></a>
@@ -142,7 +143,7 @@ export default function HomePage() {
       </div>
 
       <footer className={styles.footer}>
-        <div className={`${styles.container} ${styles.footerTop}`}><Link href="/" className={styles.logo}><BrandLogo /></Link><p>From token to registered owner.</p><nav aria-label="Footer navigation"><Link href="/about">About</Link><Link href="/docs">Docs</Link><a href={MANCI_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Manci on X (opens in a new tab)">X <IconArrowUpRight size={13} /></a><Link href="/contact">Contact</Link></nav></div>
+        <div className={`${styles.container} ${styles.footerTop}`}><Link href="/" className={styles.logo}><BrandLogo /></Link><p>From token to registered owner.</p><nav aria-label="Footer navigation"><Link href="/how-it-works">For founders</Link><Link href="/about">About</Link><Link href="/docs">Docs</Link><a href={MANCI_X_URL} target="_blank" rel="noopener noreferrer" aria-label="Manci on X (opens in a new tab)">X <IconArrowUpRight size={13} /></a><Link href="/contact">Contact</Link></nav></div>
         <div className={`${styles.container} ${styles.footerBottom}`}><span>© {new Date().getFullYear()} Manci</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/privacy">Privacy</Link><Link href="/legal/company">Company &amp; licence</Link></div></div>
         {operatorLine && <p className={`${styles.container} ${styles.operatorLine}`}>{operatorLine}</p>}
       </footer>

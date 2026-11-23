@@ -12,12 +12,21 @@ import {
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { detectNetwork } from "@/lib/network";
-import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/format";
+import { fromBytes32, toBytes32 } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
 import { visibleClassCount } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { fetchArchivedSet } from "@/lib/archive-client";
 import { WithdrawnNotice } from "@/components/withdrawn-notice";
+import { getAssetProfiles, type PublicAssetProfile } from "@/lib/asset-profiles";
+import {
+  assetKindLabel,
+  countryLabel,
+  publicAssetName,
+  publicAssetSummary,
+  verificationLabel,
+} from "@/lib/asset-presentation";
+import { AssetLogo } from "@/components/asset-logo";
 
 const KYB_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -37,6 +46,8 @@ export default function IssuerProfilePage({
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [myAssets, setMyAssets] = useState<AddressedAsset<Asset>[]>([]);
+  // Published profiles of this issuer's tokens: the names a visitor reads (lib/asset-presentation.ts).
+  const [profiles, setProfiles] = useState<Map<string, PublicAssetProfile>>(new Map());
   // Archived issuer (lib/archive.ts): its PDA, shown as withdrawn.
   const [withdrawn, setWithdrawn] = useState<string | null>(null);
   // Conversion targets (a class capped at 0) are not counted as share classes.
@@ -63,9 +74,14 @@ export default function IssuerProfilePage({
           const mine = (await withAssetAddresses(
             network.assets.filter((a) => a.issuer.toString() === pda.toString()),
           )).filter((a) => !archived.assets.has(a.address));
+          // Shown under their on-chain names when the published profiles cannot be read.
+          const published = mine.length
+            ? await getAssetProfiles(mine.map((a) => a.address)).catch(() => new Map<string, PublicAssetProfile>())
+            : new Map<string, PublicAssetProfile>();
           if (cancelled) return;
           setWithdrawn(archived.issuers.has(pda.toString()) ? pda.toString() : null);
           setMyAssets(mine);
+          setProfiles(published);
         } else {
           // Re-derive PDA from the URL slug as a fallback.
           const [pda] = await findIssuerPda({
@@ -129,6 +145,10 @@ export default function IssuerProfilePage({
     );
   }
 
+  const country = countryLabel(issuer.jurisdiction);
+  const names = myAssets.map(({ asset, address }) => publicAssetName(asset.name, profiles.get(address)));
+  const title = names.length === 0 ? "Issuer" : names.length <= 2 ? `Issuer of ${names.join(" and ")}` : `Issuer of ${names.length} tokens`;
+
   return (
     <section>
       <Link
@@ -140,64 +160,78 @@ export default function IssuerProfilePage({
       <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
-            Issuer
+            Issuer{country ? ` · ${country}` : ""}
           </p>
           <h1 className="mt-1 text-3xl font-semibold text-mx-ink">
-            {legalId}
+            {title}
           </h1>
-          <p className="mt-1 text-sm text-mx-ink-faint">
-            Jurisdiction (ISO-3166): <span className="font-mono">{issuer.jurisdiction}</span> ·
-            Authority:{" "}
-            <code className="font-mono text-xs">
-              {issuer.authority.toString().slice(0, 6)}…
-              {issuer.authority.toString().slice(-4)}
-            </code>
-          </p>
         </div>
         <span
           className={`shrink-0 rounded-full border px-3 py-1 text-xs font-semibold ${KYB_BADGE[issuer.kybStatus] ?? KYB_BADGE[0]}`}
         >
-          KYB: {KYB_LABEL[issuer.kybStatus] ?? "Unknown"}
+          {verificationLabel(issuer.kybStatus)}
         </span>
       </div>
 
       <section className="mt-10">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
-          Assets ({myAssets.length})
+          Tokens ({myAssets.length})
         </h2>
         {myAssets.length === 0 ? (
           <p className="mt-4 text-sm text-mx-ink-faint">
-            This issuer hasn&apos;t registered any assets yet.
+            This issuer hasn&apos;t registered any tokens yet.
           </p>
         ) : (
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            {myAssets.map(({ asset: a, address }) => (
-              <Link
-                key={address}
-                href={assetHref(address)}
-                className="rounded-[3px] border border-mx-rule bg-white p-5 transition-colors hover:border-mx-rule-strong"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-base font-semibold text-mx-ink">
-                      {a.name}
-                    </p>
-                    <p className="mt-0.5 text-xs text-mx-ink-faint">
-                      {a.assetId} · {a.symbolPrefix}
-                    </p>
+            {myAssets.map(({ asset: a, address }) => {
+              const profile = profiles.get(address);
+              const name = publicAssetName(a.name, profile);
+              const summary = publicAssetSummary(profile);
+              const classes = visibleClassCount(address, a.shareClassesCount, conversionTargets);
+              return (
+                <Link
+                  key={address}
+                  href={assetHref(address)}
+                  className="rounded-[3px] border border-mx-rule bg-white p-5 transition-colors hover:border-mx-rule-strong"
+                >
+                  <div className="flex items-start gap-3">
+                    <AssetLogo assetPda={address} name={name} size={44} />
+                    <div className="min-w-0">
+                      <p className="text-base font-semibold text-mx-ink">
+                        {name}
+                      </p>
+                      <p className="mt-0.5 text-xs text-mx-ink-faint">
+                        {assetKindLabel(a.assetType)} · {classes} share class{classes === 1 ? "" : "es"}
+                      </p>
+                    </div>
                   </div>
-                  <span className="rounded-full bg-mx-indigo-soft px-2 py-0.5 text-[10px] uppercase tracking-wider text-mx-ink-soft">
-                    {ASSET_TYPE_LABEL[a.assetType] ?? "?"}
-                  </span>
-                </div>
-                <p className="mt-3 text-xs text-mx-ink-faint">
-                  {visibleClassCount(address, a.shareClassesCount, conversionTargets)} share class
-                  {visibleClassCount(address, a.shareClassesCount, conversionTargets) === 1 ? "" : "es"}
-                </p>
-              </Link>
-            ))}
+                  {summary && (
+                    <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-mx-ink-soft">
+                      {summary}
+                    </p>
+                  )}
+                </Link>
+              );
+            })}
           </div>
         )}
+      </section>
+
+      {/* The registry's identifiers, in one place, for whoever checks the record on Solana. */}
+      <section className="mt-10">
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
+          On-chain details
+        </h2>
+        <dl className="mt-4 grid gap-3 rounded-[3px] border border-mx-rule bg-white p-6 text-sm sm:grid-cols-2">
+          <div>
+            <dt className="text-xs font-medium uppercase tracking-wide text-mx-ink-faint">Issuer ID</dt>
+            <dd className="mt-0.5 break-all font-mono text-xs text-mx-ink">{legalId}</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-medium uppercase tracking-wide text-mx-ink-faint">Issuer authority</dt>
+            <dd className="mt-0.5 break-all font-mono text-xs text-mx-ink">{issuer.authority.toString()}</dd>
+          </div>
+        </dl>
       </section>
     </section>
   );
