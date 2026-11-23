@@ -11,6 +11,13 @@ describe("immutable document integrity",()=>{
     expect(documentDestination(path,sha,"devnet")).toBe(path);
     expect(documentDestination(path,sha,"mainnet")).not.toBe(path);
   });
+  it("binds the full hash and network in a company logo's path",()=>{
+    const path=documentDestination(`logos/${asset}/${sha.slice(0,8)}-logo.png`,sha,"devnet");
+    expect(path).toBe(`logos/${asset}/devnet/${sha}/logo.png`);
+    expect(documentDestination(`logos/${asset}/logo.png`,sha,"mainnet")).toBe(`logos/${asset}/mainnet/${sha}/logo.png`);
+    // One file directly under the asset: no other shape, no folder that is not an asset.
+    for(const bad of [`logos/${asset}/deep/logo.png`,"logos/not-an-asset/logo.png",`logos/${asset}`]) expect(()=>documentDestination(bad,sha,"devnet"),bad).toThrow();
+  });
   it("preserves separate SSC decision versions",()=>{
     expect(documentDestination(`whitepapers/${asset}/ssc-decision/terms.pdf`,sha,"devnet")).toBe(`whitepapers/${asset}/devnet/ssc-decision/${sha}/terms.pdf`);
   });

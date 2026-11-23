@@ -26,6 +26,7 @@ export const LEGACY_KYC_BUCKET = PUBLIC_BUCKET;
  */
 const REPOSITORY_PREFIXES: ReadonlySet<string> = new Set([
   "whitepapers",
+  "logos",
   "legal",
   "kyb-template",
   "issuer-agreement",

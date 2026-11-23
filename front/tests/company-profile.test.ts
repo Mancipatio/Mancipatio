@@ -1,7 +1,9 @@
 // The public company fields of a token's profile (lib/company-profile.ts):
 // the company's name, its team, its links and the path of its logo. One set
 // of rules for writing, projecting and showing a value.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { projectPublicAssetProfile } from "@/lib/profile-public";
+import { uploadedLogoUrl } from "@/lib/asset-branding";
 import {
   COMPANY_NAME_MAX,
   TEAM_ENTRY_MAX,
@@ -86,5 +88,63 @@ describe("logo path", () => {
       `logos/${ASSET}/a b.png`, `https://evil.example/logos/${ASSET}/a.png`, null, 7,
     ]) expect(isLogoPathOf(ASSET, bad), String(bad)).toBe(false);
     expect(isLogoPathOf("", "logos//a.png")).toBe(false);
+  });
+});
+
+describe("the public projection of the company fields (lib/profile-public.ts)", () => {
+  const row = {
+    asset_pda: ASSET, network: "mainnet", is_published: true, status: "published", category: "equity", display_name: "MANCI",
+    company_name: " Mancipatio d.o.o. ", team: ["Mladen Rakić — CEO & CTO", "  "],
+    link_x: "https://x.com/Manci_rwa", link_linkedin: "https://linkedin.com.evil.example/manci", link_github: null,
+    logo_path: `logos/${ASSET}/mainnet/${"ab".repeat(32)}/logo.png`, logo_sha256: "ab".repeat(32),
+    logo_approved_at: "2026-11-24T10:00:00Z", logo_approved_by: "AdminWallet1111111111111111111111111111111",
+  };
+
+  it("publishes the name, the team and the links that pass their rules", () => {
+    expect(projectPublicAssetProfile(row)).toMatchObject({
+      company_name: "Mancipatio d.o.o.", team: ["Mladen Rakić — CEO & CTO"], link_x: "https://x.com/Manci_rwa", link_linkedin: null, link_github: null,
+    });
+  });
+
+  it("publishes an approved logo of this asset, never who approved it or its hash", () => {
+    const profile = projectPublicAssetProfile(row);
+    expect(profile).toMatchObject({ logo_path: row.logo_path, logo_approved_at: row.logo_approved_at });
+    expect(profile).not.toHaveProperty("logo_approved_by");
+    expect(profile).not.toHaveProperty("logo_sha256");
+    expect(JSON.stringify(profile)).not.toContain("AdminWallet");
+  });
+
+  it("publishes no logo that is unapproved or is another asset's file", () => {
+    expect(projectPublicAssetProfile({ ...row, logo_approved_at: null })).toMatchObject({ logo_path: null, logo_approved_at: null });
+    expect(projectPublicAssetProfile({ ...row, logo_path: "logos/OtherAsset/mainnet/x/logo.png" })).toMatchObject({ logo_path: null, logo_approved_at: null });
+    expect(projectPublicAssetProfile({ ...row, logo_path: "https://evil.example/logo.png" })?.logo_path).toBeNull();
+  });
+
+  it("a row without the columns (before 0093) projects as a profile without a company", () => {
+    const bare = { asset_pda: ASSET, network: "mainnet", is_published: true, status: "published", category: "equity", display_name: "MANCI" };
+    expect(projectPublicAssetProfile(bare)).toMatchObject({ company_name: null, team: [], link_x: null, logo_path: null });
+  });
+
+  it("a draft publishes none of it", () => {
+    expect(projectPublicAssetProfile({ ...row, status: "draft" })).toBeNull();
+  });
+});
+
+describe("the address of an uploaded logo (lib/asset-branding.ts)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const path = `logos/${ASSET}/mainnet/${"ab".repeat(32)}/logo.png`;
+
+  it("is the public bucket's object for this asset's path, and nothing for any other", () => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://project.supabase.co/");
+    expect(uploadedLogoUrl(ASSET, path)).toBe(`https://project.supabase.co/storage/v1/object/public/documents/${path}`);
+    expect(uploadedLogoUrl(ASSET, "logos/OtherAsset/a.png")).toBeNull();
+    expect(uploadedLogoUrl(ASSET, "https://evil.example/a.png")).toBeNull();
+    expect(uploadedLogoUrl(ASSET, null)).toBeNull();
+    expect(uploadedLogoUrl(null, path)).toBeNull();
+  });
+
+  it("is nothing without the storage base", () => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    expect(uploadedLogoUrl(ASSET, path)).toBeNull();
   });
 });

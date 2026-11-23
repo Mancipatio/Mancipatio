@@ -3683,6 +3683,35 @@ the order against the front does not matter (test networks never select
 the columns, and the admin form sends them only when an admin edits them).
 The mainnet project gets it with the rest of the chain.
 
+**The company behind a token (0093).** The profile also carries the
+company's name, its team, its pages on X, LinkedIn and GitHub, and a logo
+(Admin or Issuer → asset → Edit, and the *Company logo* card). The issuer or
+an admin uploads the logo (PNG or JPEG, at most 1 MB, to `logos/<asset>/` in
+the public bucket); the public pages show it only after an admin clicked
+*Approve logo*, and a new or removed file is unapproved again
+(`asset_logo_approve` / `asset_logo_approval_withdraw` audit events). Look at
+the image before approving: a logo is the fastest way to pass one company off
+as another. The columns come from `0093_asset_profile_company.sql`
+(expand-only). Unlike 0076 the order matters: the public profile read selects
+the new columns, so apply it **before** the front that ships them, on devnet
+(before the merge to `main`) and on mainnet (before the release push);
+without it `/api/profiles/public` answers 503 and the lists fall back to
+on-chain names. Hash first (`shasum -a 256
+supabase/migrations/0093_asset_profile_company.sql`), then, devnet:
+
+```
+bash scripts/ops/backup.sh devnet pre-0093
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0093_asset_profile_company.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0093','asset_profile_company') on conflict (version) do nothing"
+MANCI_TARGET=devnet bash scripts/db.sh -Atc "select (select count(*) from information_schema.columns where table_schema='public' and table_name='asset_profiles' and column_name in ('company_name','team','link_x','link_linkedin','link_github','logo_path','logo_sha256','logo_approved_at','logo_approved_by')) as columns, (select count(*) from pg_constraint where conrelid='public.asset_profiles'::regclass and conname in ('asset_profiles_company_fields','asset_profiles_logo_complete')) as checks"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Mainnet: the same with `MANCI_ALLOW_MAINNET=1` (`export` it for the block,
+`unset` it after). Pass: `9|2`, and the identity preflight still shows
+`tables_without_guard` `[]` and `defaults_not_dynamic` `{}`. The migration
+seeds nothing and grants nothing: `asset_profiles` stays service-role only.
+
 ## 18. Domain cutover: `www.manci.io` to mainnet, devnet to `devnet.manci.io`
 
 Today `www.manci.io` serves devnet, and the three devnet cron jobs (retry,

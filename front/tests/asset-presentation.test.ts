@@ -100,9 +100,11 @@ describe("approved logos (lib/asset-branding.ts)", () => {
     expect(approvedAssetLogo(null, "mainnet")).toBeNull();
   });
 
-  it("never takes a logo from a profile field or a remote address", () => {
+  it("takes a logo only from the operator's file or an approved upload of the asset, never a free-form address", () => {
     const text = source("lib/asset-branding.ts") + source("components/asset-logo.tsx");
     expect(text).not.toMatch(/cover_image_path|logo_gradient|https?:\/\//);
+    // The uploaded logo's path is checked against the asset before an address is built from it.
+    expect(source("lib/asset-branding.ts")).toContain("isLogoPathOf(assetPda, logoPath)");
   });
 });
 

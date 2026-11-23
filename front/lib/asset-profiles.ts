@@ -150,6 +150,12 @@ export type AssetProfile = {
 export type NewAssetProfile = Partial<AssetProfile> & {
   asset_pda: string;
   category: CategorySlug;
+  /**
+   * Admin only: approve (true) or withdraw the approval of (false) the stored
+   * logo. A patch key, never a column: the server stamps logo_approved_at /
+   * _by (POST /api/profiles/upsert).
+   */
+  logo_approved?: boolean;
 };
 
 /** Public reads expose only published, explicitly allowlisted product fields. */

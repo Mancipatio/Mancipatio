@@ -9,7 +9,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireProfileOwner } from "@/lib/server/profile-read";
 import { requireArea } from "@/lib/server/feature-gate";
-import { documentDestination,DOCUMENT_MAX_BYTES,DOCUMENT_STAGING_BUCKET,ISSUER_UPDATE_PREFIX } from "@/lib/document-integrity";
+import { documentDestination,DOCUMENT_MAX_BYTES,DOCUMENT_STAGING_BUCKET,ISSUER_UPDATE_PREFIX,LOGO_MAX_BYTES,LOGO_MIME_TYPES,LOGO_PREFIX } from "@/lib/document-integrity";
 import { bucketForPrefix } from "../_lib";
 
 const MIME_ALLOWLIST=new Set(["application/pdf","image/png","image/jpeg","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
@@ -23,14 +23,15 @@ async function requireUploader(wallet:string,path:string) {
     await requireProfileOwner(wallet,parts[1],"issuer");
     return;
   }
-  if(parts[0] !== "whitepapers") {
+  // A company logo (0093) is the asset's, like its whitepaper: an admin, or the asset's issuer authority.
+  if(parts[0] !== "whitepapers" && parts[0] !== LOGO_PREFIX) {
     if(!ADMIN_PREFIXES.has(parts[0])) throw new SiwsError(400,"Unknown document category");
     await requireAdmin(wallet);return;
   }
   try {await requireAdmin(wallet);return;} catch(error) {
     if(!(error instanceof SiwsError) || error.status !== 403) throw error;
   }
-  // KYC-only mode (lib/features.ts): an issuer's whitepaper upload is an issuance entry (KYC documents use /api/clients/upload).
+  // KYC-only mode (lib/features.ts): an issuer's whitepaper or logo upload is an issuance entry (KYC documents use /api/clients/upload).
   requireArea("issuance");
   await requireProfileOwner(wallet,parts[1],"asset");
 }
@@ -43,6 +44,8 @@ export async function POST(request:Request) {
     try {path=documentDestination(params.path,params.sha256,detectNetwork());} catch(error) {throw new SiwsError(400,(error as Error).message);}
     if(typeof params.contentType !== "string" || !MIME_ALLOWLIST.has(params.contentType)) throw new SiwsError(400,"Unsupported document type");
     if(typeof params.size !== "number" || !Number.isInteger(params.size) || params.size <= 0 || params.size > DOCUMENT_MAX_BYTES) throw new SiwsError(400,"File must be between 1 byte and 25 MB");
+    // A logo is a small image: PNG or JPEG, at most 1 MB (the size is signed and verified again at finalize).
+    if(path.split("/")[0] === LOGO_PREFIX && (!LOGO_MIME_TYPES.includes(params.contentType) || params.size > LOGO_MAX_BYTES)) throw new SiwsError(400,"A logo must be a PNG or JPEG of at most 1 MB");
     await requireUploader(wallet,path);
     const id=randomUUID(),bucket=bucketForPrefix(path.split("/")[0]),stagingPath=detectNetwork()+"/"+wallet+"/"+id;
     const sb=getSupabaseAdmin();
