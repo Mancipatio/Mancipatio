@@ -7,7 +7,7 @@ import { AssetLogo } from "@/components/asset-logo";
 import { listAssetProfiles, type PublicAssetProfile } from "@/lib/asset-profiles";
 import { activityDate, activityText, type PublicActivity } from "@/lib/activity";
 import { assetHref } from "@/lib/asset-links";
-import { publicAssetSummary, unitPercent } from "@/lib/asset-presentation";
+import { publicAssetSummary, publicCompanyName, unitPercent } from "@/lib/asset-presentation";
 import styles from "./landing.module.css";
 
 /** Cards shown on the landing page; the marketplace lists every token. */
@@ -65,7 +65,7 @@ export function LandingCompanies() {
               const oneToken = unitPercent(profile.token_percent_e4);
               return (
                 <Link key={profile.asset_pda} href={assetHref(profile.asset_pda)} className={styles.listedCard}>
-                  <div className={styles.listedCardTop}><AssetLogo assetPda={profile.asset_pda} name={name} size={52} /><h3>{name}</h3></div>
+                  <div className={styles.listedCardTop}><AssetLogo assetPda={profile.asset_pda} name={name} logoPath={profile.logo_path} size={52} /><div><h3>{name}</h3>{publicCompanyName(profile) && <span className={styles.listedCompany}>{publicCompanyName(profile)}</span>}</div></div>
                   {summary && <p>{summary}</p>}
                   {oneToken && <span className={styles.listedFact}>1 token = {oneToken} % of the company</span>}
                   <span className={styles.listedMore}>View token <IconArrowUpRight size={15} /></span>

@@ -48,11 +48,13 @@ import { WithdrawnNotice } from "@/components/withdrawn-notice";
 import { SupplyConversionsPanel } from "@/components/supply-conversions-panel";
 import { AssetLogo } from "@/components/asset-logo";
 import { AssetRoles } from "@/components/asset-roles";
+import { AssetCompany } from "@/components/asset-company";
 import {
   assetKindLabel,
   countryLabel,
   publicAssetName,
   publicAssetSummary,
+  publicCompanyName,
   shareClassLabel,
   unitPercent,
   verificationLabel,
@@ -207,6 +209,7 @@ export default function AssetDetailPage({
   const assetPda = lookup.kind === "found" ? lookup.address : null;
   const name = publicAssetName(asset.name, profile);
   const summary = publicAssetSummary(profile);
+  const companyName = publicCompanyName(profile);
   const country = countryLabel(issuerFacts?.jurisdiction);
   const verified = issuerFacts?.kybStatus === 1;
   const companyShares = asset.assetType === AssetType.Equity;
@@ -225,7 +228,7 @@ export default function AssetDetailPage({
         ← Marketplace
       </Link>
       <div className="mt-4 flex flex-wrap items-start gap-5">
-        <AssetLogo assetPda={assetPda} name={name} size={72} />
+        <AssetLogo assetPda={assetPda} name={name} logoPath={profile?.logo_path} size={72} />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
             {assetKindLabel(asset.assetType)}{country ? ` · ${country}` : ""}
@@ -233,6 +236,11 @@ export default function AssetDetailPage({
           <h1 className="mt-1 text-3xl font-semibold text-mx-ink">
             {name}
           </h1>
+          {companyName && (
+            <p className="mt-1 text-sm text-mx-ink-soft">
+              The token of {companyName}
+            </p>
+          )}
           {summary && (
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-mx-ink-soft">
               {summary}
@@ -253,6 +261,15 @@ export default function AssetDetailPage({
         conversionHref={profile?.convertible !== false && navHrefVisible("/portfolio/conversion") ? "/portfolio/conversion" : null}
         verified={verified}
         legalDocRecorded={legalDocHash !== null}
+        companyName={companyName}
+      />
+
+      <AssetCompany
+        companyName={companyName}
+        country={country}
+        website={profile?.website}
+        links={{ link_x: profile?.link_x, link_linkedin: profile?.link_linkedin, link_github: profile?.link_github }}
+        team={profile?.team}
       />
 
       <AssetProfileBlock profile={profile} />

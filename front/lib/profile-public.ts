@@ -1,5 +1,6 @@
 import type { AssetProfile } from "@/lib/asset-profiles";
 import { companyFiguresFrom } from "@/lib/distribution-rows";
+import { COMPANY_LINKS, companyLinkHref, isLogoPathOf, normalizeCompanyName, normalizeTeam } from "@/lib/company-profile";
 
 // Deliberately excludes arbitrary fields JSON, internal bookkeeping, draft
 // document paths, private contracts, storage/custody locations and contact data.
@@ -7,6 +8,9 @@ export const PUBLIC_ASSET_PROFILE_FIELDS = [
   "asset_pda", "network", "issuer_pda", "category", "display_name", "summary",
   "description", "cover_image_path", "logo_letter", "logo_gradient", "website",
   "jurisdiction", "tags", "status", "is_published", "updated_at",
+  // The company behind the token (0093). logo_approved_at is read to decide
+  // whether logo_path may be shown; who approved it is never selected.
+  "company_name", "team", "link_x", "link_linkedin", "link_github", "logo_path", "logo_approved_at",
   "pre_money_valuation", "share_price", "total_shares", "liquidation_pref_bps",
   "has_voting", "dividend_policy", "convertible", "round_series",
   "revenue_pct_bps", "revenue_basis", "cap_multiple", "trigger_threshold",
@@ -75,6 +79,16 @@ export function projectPublicAssetProfile(row: Record<string, unknown>): PublicA
       out.ssc_decision_version_id = null;
     }
   }
+  // The company fields pass the rules they were written under, or are dropped
+  // (lib/company-profile.ts): a row edited behind the route cannot publish a
+  // look-alike link, and a logo is public only once an admin approved it.
+  try { out.company_name = normalizeCompanyName(row.company_name); } catch { out.company_name = null; }
+  try { out.team = normalizeTeam(row.team); } catch { out.team = []; }
+  for (const link of COMPANY_LINKS) out[link.column] = companyLinkHref(link.column, row[link.column]);
+  const approved = typeof row.logo_approved_at === "string" && row.logo_approved_at.length > 0;
+  const logoPath = approved && isLogoPathOf(String(row.asset_pda ?? ""), row.logo_path) ? row.logo_path : null;
+  out.logo_path = logoPath;
+  out.logo_approved_at = logoPath ? String(row.logo_approved_at) : null;
   out.spv_name = null;
   out.token_percent_e4 = companyFiguresFrom(row.tokenize)?.tokenE4.toString() ?? null;
   return out as PublicAssetProfile;

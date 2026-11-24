@@ -24,6 +24,7 @@ import {
   countryLabel,
   publicAssetName,
   publicAssetSummary,
+  publicCompanyName,
   verificationLabel,
 } from "@/lib/asset-presentation";
 import { AssetLogo } from "@/components/asset-logo";
@@ -147,7 +148,11 @@ export default function IssuerProfilePage({
 
   const country = countryLabel(issuer.jurisdiction);
   const names = myAssets.map(({ asset, address }) => publicAssetName(asset.name, profiles.get(address)));
-  const title = names.length === 0 ? "Issuer" : names.length <= 2 ? `Issuer of ${names.join(" and ")}` : `Issuer of ${names.length} tokens`;
+  // The company's name, when the published profiles of its tokens state one and the same.
+  const companies = new Set(myAssets.map(({ address }) => publicCompanyName(profiles.get(address))).filter((name): name is string => name !== null));
+  const title = companies.size === 1
+    ? [...companies][0]
+    : names.length === 0 ? "Issuer" : names.length <= 2 ? `Issuer of ${names.join(" and ")}` : `Issuer of ${names.length} tokens`;
 
   return (
     <section>
@@ -195,7 +200,7 @@ export default function IssuerProfilePage({
                   className="rounded-[3px] border border-mx-rule bg-white p-5 transition-colors hover:border-mx-rule-strong"
                 >
                   <div className="flex items-start gap-3">
-                    <AssetLogo assetPda={address} name={name} size={44} />
+                    <AssetLogo assetPda={address} name={name} logoPath={profile?.logo_path} size={44} />
                     <div className="min-w-0">
                       <p className="text-base font-semibold text-mx-ink">
                         {name}

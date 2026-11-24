@@ -28,6 +28,8 @@ import { TokenizeChecklist } from "@/components/tokenize-checklist";
 import { CONVERSION_TARGET_LABEL, UNLINKED_TARGET_LABEL, classKey, unlinkedMarkerKeys } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useToast } from "@/lib/toast";
+import { AssetLogoCard } from "@/components/asset-logo-card";
+import { COMPANY_LINKS, COMPANY_NAME_MAX, TEAM_MAX, companyLinkHref, teamFromLines } from "@/lib/company-profile";
 import { navHrefVisible } from "@/lib/pilot-scope";
 import { scopeEnabled } from "@/lib/features";
 import { COUNTRIES, countryName } from "@/lib/countries";
@@ -216,6 +218,10 @@ export function AssetDetail({
   const [editDescription, setEditDescription] = useState("");
   const [editWebsite, setEditWebsite] = useState("");
   const [editJurisdiction, setEditJurisdiction] = useState("");
+  // The company behind the token (0093, lib/company-profile.ts).
+  const [editCompanyName, setEditCompanyName] = useState("");
+  const [editTeam, setEditTeam] = useState("");
+  const [editLinks, setEditLinks] = useState<Record<string, string>>({});
   const [catValues, setCatValues] = useState<CategoryValues>({});
   const [saving, setSaving] = useState(false);
 
@@ -237,6 +243,9 @@ export function AssetDetail({
     setEditDescription(profile?.description ?? "");
     setEditWebsite(profile?.website ?? "");
     setEditJurisdiction(profile?.jurisdiction ?? "");
+    setEditCompanyName(profile?.company_name ?? "");
+    setEditTeam((profile?.team ?? []).join("\n"));
+    setEditLinks(Object.fromEntries(COMPANY_LINKS.map((link) => [link.column, profile?.[link.column] ?? ""])));
     const next: CategoryValues = {};
     for (const f of fields) {
       const stored = (profile as Record<string, unknown> | null)?.[f.key];
@@ -307,6 +316,16 @@ export function AssetDetail({
         website: editWebsite.trim() || null,
         jurisdiction: editJurisdiction || null,
       };
+      // The company fields travel only when they changed, so a database that
+      // predates 0093 keeps saving the rest of the form.
+      const companyName = editCompanyName.trim() || null;
+      if (companyName !== (profile?.company_name ?? null)) row.company_name = companyName;
+      const team = teamFromLines(editTeam);
+      if (team.join("\n") !== (profile?.team ?? []).join("\n")) row.team = team;
+      for (const link of COMPANY_LINKS) {
+        const value = (editLinks[link.column] ?? "").trim() || null;
+        if (value !== (profile?.[link.column] ?? null)) row[link.column] = value;
+      }
       Object.assign(row, profileFields);
       const ok = await upsertAssetProfile(conn.wallet, row);
       if (!ok) throw new Error("Upsert returned false");
@@ -576,6 +595,46 @@ export function AssetDetail({
                   className={inputClass}
                 />
               </label>
+              <label className="block sm:col-span-2">
+                <span className={labelSpan}>Company name</span>
+                <input
+                  value={editCompanyName}
+                  onChange={(e) => setEditCompanyName(e.target.value)}
+                  maxLength={COMPANY_NAME_MAX}
+                  placeholder="The company as it is named publicly, e.g. Acme d.o.o."
+                  className={inputClass}
+                />
+              </label>
+              <label className="block sm:col-span-2">
+                <span className={labelSpan}>Team (one person per line, at most {TEAM_MAX})</span>
+                <textarea
+                  value={editTeam}
+                  onChange={(e) => setEditTeam(e.target.value)}
+                  rows={4}
+                  placeholder={"Name — Role\nName — Role"}
+                  className={inputClass}
+                />
+              </label>
+              {COMPANY_LINKS.map((link) => {
+                const value = editLinks[link.column] ?? "";
+                const invalid = value.trim() !== "" && companyLinkHref(link.column, value) === null;
+                return (
+                  <label key={link.column} className="block">
+                    <span className={labelSpan}>{link.label}</span>
+                    <input
+                      value={value}
+                      onChange={(e) => setEditLinks((prev) => ({ ...prev, [link.column]: e.target.value }))}
+                      placeholder={`https://${link.hosts[0]}/…`}
+                      className={inputClass}
+                    />
+                    {invalid && (
+                      <span className="mt-1 block text-[11px] text-red-600">
+                        Must be an https page on {link.hosts.join(" or ")}.
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
             </div>
 
             {fields.length > 0 && (
@@ -642,6 +701,11 @@ export function AssetDetail({
               value={profile.website || "—"}
               wide
             />
+            <Field label="Company name" value={profile.company_name || "—"} wide />
+            <Field label="Team" value={(profile.team ?? []).join(" · ") || "—"} wide />
+            {COMPANY_LINKS.map((link) => (
+              <Field key={link.column} label={link.label} value={profile[link.column] || "—"} />
+            ))}
             {profile.legal_doc_sha256 && (
               <Field
                 label="Legal doc SHA-256"
@@ -678,6 +742,17 @@ export function AssetDetail({
 
       {/* Whitepaper & disclosure (admin always; issuer for their own asset —
           the issuer variant already early-returns when the asset isn't theirs) */}
+      {/* The company's logo (0093): uploaded here, public once an admin approved it. */}
+      <AssetLogoCard
+        variant={variant}
+        editable={issuerEntriesOn}
+        assetPda={id}
+        issuerPda={asset.issuer.toString()}
+        category={category}
+        profile={profile}
+        onSaved={refresh}
+      />
+
       <WhitepaperCard
         variant={variant}
         editable={issuerEntriesOn}

@@ -26,6 +26,7 @@ export function AssetRoles({
   conversionHref,
   verified,
   legalDocRecorded = false,
+  companyName = null,
 }: {
   /** The token's public name. */
   name: string;
@@ -39,6 +40,8 @@ export function AssetRoles({
   verified: boolean;
   /** Whether the token's legal document is fixed on chain by its SHA-256 (shown under On-chain details). */
   legalDocRecorded?: boolean;
+  /** The company as its published profile names it; the column is headed with it. */
+  companyName?: string | null;
 }) {
   const holder: ReactNode[] = companyShares
     ? [
@@ -70,7 +73,7 @@ export function AssetRoles({
   ];
   const columns = [
     { title: "You, the token holder", lead: "What you have", items: holder },
-    { title: "The company", lead: "What the issuer does", items: issuer },
+    { title: companyName?.trim() || "The company", lead: "What the issuer does", items: issuer },
     { title: "Manci", lead: "What the platform does", items: platform },
   ];
   return (

@@ -22,6 +22,15 @@
 //     admin-only too, and recording one needs the SUPER admin; the server
 //     stamps offering_exemption_recorded_by / _at and writes an audit event.
 //
+// The company fields (0093, lib/company-profile.ts): company_name, team and
+// the link_* columns are validated here under the rules the public projection
+// applies again; either tier may write them. The logo (logo_path +
+// logo_sha256) must be this asset's verified upload under logos/<asset>/;
+// either tier may set or remove it, but ONLY an admin approves it
+// (`logo_approved: true`, a patch key and never a column): the server stamps
+// logo_approved_at / _by, and a new or removed file clears them, so the
+// public never sees a logo nobody at the platform looked at.
+//
 // Archive (lib/archive.ts, /api/archive/set): a patch can neither set status
 // "archived" nor write to an archived profile (409: unarchive first), and
 // `fields.archive` is the archive route's alone (kept like sale_request).
@@ -45,6 +54,13 @@ import { requireProfileOwner } from "@/lib/server/profile-read";
 import { requireArea } from "@/lib/server/feature-gate";
 import { protectSaleRequest } from "@/lib/server/sale-requests";
 import { protectArchive } from "@/lib/archive";
+import {
+  COMPANY_LINKS,
+  isLogoPathOf,
+  normalizeCompanyLink,
+  normalizeCompanyName,
+  normalizeTeam,
+} from "@/lib/company-profile";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const WHITEPAPER_STATUSES = new Set([
@@ -104,7 +120,13 @@ const EXEMPTION_FIELDS = new Set(["offering_exemption_ref", "offering_exemption_
 const STRIPPED_FIELDS = new Set([
   "network", "created_by", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
   "offering_exemption_recorded_by", "offering_exemption_recorded_at",
+  "logo_approved_at", "logo_approved_by",
 ]);
+
+/** The logo's file (0093): a patch names both or neither. */
+const LOGO_FIELDS = new Set(["logo_path", "logo_sha256"]);
+/** An admin's decision on the stored logo: a patch key, never a column. */
+const LOGO_APPROVAL_KEY = "logo_approved";
 
 /** Validates an exemption patch: both fields strings (set) or both null (clear). */
 function exemptionPatch(cleaned: Record<string, unknown>): { ref: string; reason: string } | null {
@@ -202,6 +224,39 @@ export async function POST(request: Request) {
     }
     cleaned.asset_pda = assetPda;
 
+    // The admin's logo decision travels in the patch and is not a column.
+    const logoApproval = cleaned[LOGO_APPROVAL_KEY];
+    delete cleaned[LOGO_APPROVAL_KEY];
+    if (logoApproval !== undefined && typeof logoApproval !== "boolean") {
+      throw new SiwsError(400, "logo_approved must be true or false");
+    }
+    // The company fields, under the rules the public projection applies again
+    // (lib/company-profile.ts). Only a patch that names them touches the 0093
+    // columns, so a database that predates 0093 keeps saving every other field.
+    try {
+      if ("company_name" in cleaned) cleaned.company_name = normalizeCompanyName(cleaned.company_name);
+      if ("team" in cleaned) {
+        const team = normalizeTeam(cleaned.team);
+        cleaned.team = team.length > 0 ? team : null;
+      }
+      for (const link of COMPANY_LINKS) {
+        if (link.column in cleaned) cleaned[link.column] = normalizeCompanyLink(link.column, cleaned[link.column]);
+      }
+    } catch (error) {
+      throw new SiwsError(400, error instanceof Error ? error.message : "Invalid company field");
+    }
+    const touchesLogo = Object.keys(cleaned).some((k) => LOGO_FIELDS.has(k));
+    if (touchesLogo) {
+      const path = cleaned.logo_path ?? null;
+      const sha = cleaned.logo_sha256 ?? null;
+      if (path === null || path === "") {
+        cleaned.logo_path = null;
+        cleaned.logo_sha256 = null;
+      } else if (!isLogoPathOf(assetPda, path) || typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha)) {
+        throw new SiwsError(400, "The logo must be this asset's uploaded file, with its SHA-256");
+      }
+    }
+
     const whitepaperStatus =
       typeof cleaned.whitepaper_status === "string"
         ? cleaned.whitepaper_status
@@ -237,6 +292,9 @@ export async function POST(request: Request) {
       }
       if (touchesExemption) {
         throw new SiwsError(403, "An offering exemption can only be recorded by the platform");
+      }
+      if (logoApproval !== undefined) {
+        throw new SiwsError(403, "A logo can only be approved by the platform");
       }
       await requireProfileOwner(wallet,assetPda,"asset");
       // SPV assignment is a Manci-team operation (SPVs are incorporated
@@ -281,6 +339,34 @@ export async function POST(request: Request) {
       const storedFields: unknown = existing?.fields;
       const stored = isPlainObject(storedFields) ? storedFields : null;
       cleaned.fields = protectArchive(protectSaleRequest(cleaned.fields, stored), stored);
+    }
+    // The logo (0093): its bytes are a verified upload; an approval is of
+    // exactly the stored file, so a new or removed file is unapproved again.
+    // Read apart from the row above, and only for a patch that names the logo.
+    let logoDecision: "approved" | "withdrawn" | null = null;
+    if (touchesLogo || logoApproval !== undefined) {
+      const stored = await sb.from("asset_profiles").select("logo_path,logo_sha256,logo_approved_at")
+        .eq("asset_pda",assetPda).eq("network",detectNetwork()).maybeSingle();
+      if (stored.error) throw new SiwsError(503, "Current logo unavailable");
+      const storedPath: unknown = stored.data?.logo_path ?? null;
+      const storedSha: unknown = stored.data?.logo_sha256 ?? null;
+      const path = touchesLogo ? cleaned.logo_path : storedPath;
+      const sha = touchesLogo ? cleaned.logo_sha256 : storedSha;
+      const changedLogo = touchesLogo && (path !== storedPath || sha !== storedSha);
+      if (typeof path === "string") {
+        if (!isLogoPathOf(assetPda, path) || typeof sha !== "string") throw new SiwsError(409, "The stored logo is not this asset's file");
+        await requireDocumentVersion("documents", path, sha);
+      }
+      if (logoApproval === true) {
+        if (typeof path !== "string") throw new SiwsError(409, "Upload a logo before approving it");
+        cleaned.logo_approved_at = new Date().toISOString();
+        cleaned.logo_approved_by = wallet;
+        logoDecision = "approved";
+      } else if (logoApproval === false || changedLogo) {
+        cleaned.logo_approved_at = null;
+        cleaned.logo_approved_by = null;
+        if (logoApproval === false && stored.data?.logo_approved_at) logoDecision = "withdrawn";
+      }
     }
     const changedFile = cleaned.whitepaper_path !== undefined && cleaned.whitepaper_path !== existing?.whitepaper_path;
     if(changedFile && existing?.whitepaper_status === "ssc_approved" && (!admin || !cleaned.ssc_decision_ref)) {
@@ -370,6 +456,27 @@ export async function POST(request: Request) {
       } catch (auditErr) {
         console.warn(
           "[api/profiles/upsert] exemption audit event not written:",
+          auditErr instanceof Error ? auditErr.message : String(auditErr),
+        );
+      }
+    }
+
+    // An admin's logo decision, on the record like the exemption (best effort:
+    // the row already carries who approved and when).
+    if (logoDecision) {
+      try {
+        await writeServerAudit(sb, {
+          ix_name: logoDecision === "approved" ? "asset_logo_approve" : "asset_logo_approval_withdraw",
+          category: "assets",
+          actor_wallet: wallet,
+          actor_source: actorSourceOf(via),
+          reason: logoDecision === "approved" ? "Company logo approved for public display" : "Company logo approval withdrawn",
+          target_label: assetPda,
+          metadata: { network: detectNetwork() },
+        });
+      } catch (auditErr) {
+        console.warn(
+          "[api/profiles/upsert] logo audit event not written:",
           auditErr instanceof Error ? auditErr.message : String(auditErr),
         );
       }
