@@ -441,7 +441,7 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
   );
 }
 
-/** Public-facing off-chain product profile: description, website, and the
+/** Public-facing off-chain product profile: the description and the
  *  category-specific facts. Renders nothing when there's no profile so the
  *  page degrades gracefully for assets created without one. */
 function AssetProfileBlock({ profile }: { profile: PublicAssetProfile | null }) {
@@ -457,7 +457,8 @@ function AssetProfileBlock({ profile }: { profile: PublicAssetProfile | null }) 
     }))
     .filter((f) => f.value !== "—");
 
-  const hasAbout = Boolean(profile.description || profile.website);
+  // The website is under "The company" (components/asset-company.tsx); About is the description.
+  const hasAbout = Boolean(profile.description);
   if (!hasAbout && facts.length === 0) return null;
 
   return (
@@ -472,18 +473,6 @@ function AssetProfileBlock({ profile }: { profile: PublicAssetProfile | null }) 
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-mx-ink-soft">
                 {profile.description}
               </p>
-            )}
-            {safeHttpUrl(profile.website) && (
-              <a
-                href={safeHttpUrl(profile.website)!}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={`inline-flex text-sm text-mx-ink-soft underline-offset-2 hover:underline ${
-                  profile.description ? "mt-4" : ""
-                }`}
-              >
-                {profile.website} ↗
-              </a>
             )}
           </div>
         </section>
