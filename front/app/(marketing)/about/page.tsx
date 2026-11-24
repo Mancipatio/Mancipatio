@@ -3,8 +3,10 @@ import {
   Body,
   Button,
   ButtonRow,
+  Card,
   Eyebrow,
   Facts,
+  Grid,
   H2,
   MX_NETWORK_STAGE_LABEL,
   MX_ROUTES,
@@ -27,10 +29,10 @@ import {
  * "About" — prototype `#page-about`.
  *
  * The prototype's headline ("Three people, one thesis.") and its team section
- * are a brief, not content: they require three real names, roles and a line on
- * who wrote the legal framework. None of that exists in this repository, and
- * the prototype's own rule is that an unsupported claim renders as nothing —
- * so no headcount is asserted and no team block is stubbed. Everything below
+ * were a brief, not content: they needed real names and roles, and the
+ * prototype's own rule is that an unsupported claim renders as nothing. The
+ * team below is the owner's own list of who holds which role (2026-11-24);
+ * no headcount line and no biography is asserted beyond it. Everything else
  * is copy this site already carried, or a statement the prototype itself makes.
  *
  * The two pieces of the brief that *can* be honoured are here: one paragraph
@@ -42,6 +44,14 @@ export const metadata: Metadata = {
   description:
     "Why Manci starts with the legal structure rather than the token, and where the platform actually is today.",
 };
+
+/** Who holds which role at Manci, as the company states it. */
+const TEAM = [
+  { name: "Mladen Rakić", role: "CEO and CTO" },
+  { name: "Vladimir Rajković", role: "Chief Legal Officer" },
+  { name: "Miloš Pavlović", role: "COO" },
+  { name: "Dušan Romčević", role: "Co-founder" },
+];
 
 const NETWORK = detectNetwork();
 const OPERATOR = operatorFor(NETWORK);
@@ -125,6 +135,15 @@ export default function AboutPage() {
             How compliance is enforced →
           </TextLink>
         </p>
+      </Section>
+
+      <Section id="team">
+        <H2>The team</H2>
+        <Grid cols={4} className="mt-5">
+          {TEAM.map((person) => (
+            <Card key={person.name} title={person.name} body={person.role} />
+          ))}
+        </Grid>
       </Section>
 
       <Section variant="dark">
