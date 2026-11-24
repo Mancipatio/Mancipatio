@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import {
   Body,
+  Bullets,
   Button,
   ButtonRow,
   Card,
@@ -31,8 +32,9 @@ import {
  * The prototype's headline ("Three people, one thesis.") and its team section
  * were a brief, not content: they needed real names and roles, and the
  * prototype's own rule is that an unsupported claim renders as nothing. The
- * team below is the owner's own list of who holds which role (2026-11-24);
- * no headcount line and no biography is asserted beyond it. Everything else
+ * team below is the company's own statement (2026-11-24): who holds which
+ * role, and each person's lines as the company gave them, word for word.
+ * Manci is operated by the entity lib/legal/operator.ts names. Everything else
  * is copy this site already carried, or a statement the prototype itself makes.
  *
  * The two pieces of the brief that *can* be honoured are here: one paragraph
@@ -45,12 +47,41 @@ export const metadata: Metadata = {
     "Why Manci starts with the legal structure rather than the token, and where the platform actually is today.",
 };
 
-/** Who holds which role at Manci, as the company states it. */
+/** Who holds which role at Manci and what each brings, as the company states it. */
 const TEAM = [
-  { name: "Mladen Rakić", role: "CEO and CTO" },
-  { name: "Vladimir Rajković", role: "Chief Legal Officer" },
-  { name: "Miloš Pavlović", role: "COO" },
-  { name: "Dušan Romčević", role: "Co-founder" },
+  {
+    name: "Mladen Rakić",
+    role: "CEO and CTO",
+    lines: [
+      "Founded and exited two companies: betting and data/video distribution",
+      "Designed and built both Solana programs and the full platform",
+    ],
+  },
+  {
+    name: "Vladimir Rajković",
+    role: "Chief Legal Officer",
+    lines: [
+      "Lawyer; legal advisor to Superteam Balkan",
+      "Legal structuring, white papers and the regulatory path",
+    ],
+  },
+  {
+    name: "Miloš Pavlović",
+    role: "COO",
+    lines: [
+      "Angel investor in crypto",
+      "Based in New York: operations, partnerships and the issuer pipeline",
+    ],
+  },
+  {
+    name: "Dušan Romčević",
+    role: "Co-founder",
+    lines: [
+      "Ex-securities regulator; drafted Serbia's Digital Assets Act",
+      "Based in London: Head of Legal at an FCA-authorised EMI",
+      "Legal lead in the UK, Italy, Panama, El Salvador and Mauritius",
+    ],
+  },
 ];
 
 const NETWORK = detectNetwork();
@@ -139,9 +170,11 @@ export default function AboutPage() {
 
       <Section id="team">
         <H2>The team</H2>
-        <Grid cols={4} className="mt-5">
+        <Grid cols={2} className="mt-5">
           {TEAM.map((person) => (
-            <Card key={person.name} title={person.name} body={person.role} />
+            <Card key={person.name} title={person.name} body={person.role}>
+              <Bullets className="mt-3" items={person.lines} />
+            </Card>
           ))}
         </Grid>
       </Section>
