@@ -73,15 +73,6 @@ const TEAM = [
       "Based in New York: operations, partnerships and the issuer pipeline",
     ],
   },
-  {
-    name: "Dušan Romčević",
-    role: "Co-founder",
-    lines: [
-      "Ex-securities regulator; drafted Serbia's Digital Assets Act",
-      "Based in London: Head of Legal at an FCA-authorised EMI",
-      "Legal lead in the UK, Italy, Panama, El Salvador and Mauritius",
-    ],
-  },
 ];
 
 const NETWORK = detectNetwork();
