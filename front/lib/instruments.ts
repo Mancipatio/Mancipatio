@@ -91,8 +91,8 @@ export type InstrumentContent = {
   /** Prose paragraphs under a "What it is" heading. */
   whatItIs?: string[];
   whoItsFor?: string[];
-  factSheetEyebrow: string;
-  factSheetTitle: string;
+  factSheetEyebrow?: string;
+  factSheetTitle?: string;
   factSheet: FactCard[];
   /** One card per set of terms. Real estate carries two (rental income and
    *  ownership answer differently); "Other" carries none. */
@@ -130,73 +130,24 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
   equity: {
     slug: "equity",
     label: "Company ownership",
-    headline: "Convertible into real shares",
-    lede: "A token carrying the right to become an actual shareholder in your company, issued through a Serbian SPV.",
-    blurb: "Convertible into real shares in the company.",
+    headline: "Own the company.",
+    lede: "Your token converts into real equity.",
+    blurb: "Own the company. Your token converts into real equity.",
     ctas: [APPLY, COMPARE],
-    whatItIs: [
-      "Holders buy a token that can carry a documented right to become a shareholder: where the issuer offers conversion and it is available, at a time they choose, through the standard legal share-transfer procedure. Where structured that way, the token can also carry dividend or revenue payments.",
-    ],
-    whoItsFor: [
-      "An early-stage company raising without setting a valuation",
-      "A company that wants its community on the cap table",
-      "A founder who wants token distribution without issuing a token that means nothing",
-    ],
-    factSheetEyebrow: "Fact sheet",
-    factSheetTitle: "What this instrument covers",
-    factSheet: [
-      {
-        heading: "Why convertible",
-        points: [
-          "Most tokens give holders no real benefit and no share in the business behind them",
-          "Even when the business succeeds, a plain token can be worth no more than its liquidity pool",
-          "A token convertible into shares lets holders capture the actual upside",
-          "That makes buying it closer to traditional investing, with protections that otherwise don't exist here",
-        ],
-      },
-      {
-        heading: "Becoming a shareholder",
-        points: [
-          "Where the issuer offers conversion and it is available, holders can convert at a time of their choosing",
-          "Buying the token needs no identity verification unless the class is KYC-gated (then the receiving wallet needs an investor passport); converting into shares requires it (KYC)",
-          "Conversion goes through the standard legal share-transfer procedure",
-          "If the company or its founders fail to facilitate the transfer, holders have legal recourse",
-          "Holders can sell instead of converting — the right travels with the token",
-        ],
-      },
-      {
-        heading: "Structure & protections",
-        points: [
-          "Issued through a Serbian SPV, incorporated for you if you don't have one",
-          "Maximum issuance EUR 3 million per year per SPV",
-          "A share pledge can be registered for the benefit of token holders",
-          "Freely transferable and tradeable",
-          "Can carry dividend or revenue payments, structured per issuance",
-        ],
-      },
-    ],
+    factSheet: [],
     terms: [
       {
         title: "Company ownership",
-        right: "Conversion into company shares",
+        right: "Right to convert into equity, plus optional payouts set per issuance",
         terms: {
-          spv: "Required",
-          cap: EUR_CAP,
-          distributions: "Optional · issuer-push",
-          conversion: "Yes · off-chain",
-          pledge: "Available",
+          spv: "A Serbian company, or a Serbian SPV",
+          cap: "EUR 3,000,000 per issuer, any 12 months",
+          distributions: "Optional payouts set per issuance",
+          conversion: "Whenever you choose",
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },
       },
-    ],
-    typicalUse:
-      "an early-stage software company raising without setting a valuation.",
-    differs: [
-      "Issuance follows the same six steps as every standard instrument. Two things are specific here: conversion into shares, and registration of a share pledge in holders' favour. Both happen off-chain, through the legal process.",
-    ],
-    recourse: [
-      "Conversion runs through the standard legal share-transfer procedure, and the holder's right to it is binding on the issuer. If the company or its founders won't facilitate the transfer, the holder has legal recourse against them. The registered share pledge is what makes that recourse worth something.",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },
@@ -415,7 +366,6 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Issued through a Serbian SPV, incorporated for you if you don't have one",
           "Maximum issuance EUR 3 million per year per SPV",
-          "A share pledge can be registered for the benefit of token holders",
           "Once the issuer deposits the funds, each holder's portion is distributed automatically to their wallet",
           "Freely transferable and tradeable",
         ],
@@ -430,7 +380,6 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           cap: EUR_CAP,
           distributions: "Yes · issuer-push",
           conversion: "Optional",
-          pledge: "Available",
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },
@@ -634,15 +583,14 @@ export function termLabel(key: TermKey): string {
 
 /**
  * The legal anchors that *are* settled, each traceable to a value above:
- * `spv` / `cap` on equity, debt and revenue share; `pledge` on equity and
- * revenue share; `delivery` on the two deliverable instruments; `recourse`
+ * `spv` / `cap` on equity, debt and revenue share; `delivery` on the two
+ * deliverable instruments; `recourse`
  * wherever it is answered. Nothing here claims anything about an instrument
  * it does not name.
  */
 export const SETTLED_ANCHORS: string[] = [
   "Company ownership, debt instruments and revenue share are issued through a Serbian SPV",
   "EUR 3,000,000 maximum issuance per SPV per year",
-  "A share pledge can be registered for company ownership and revenue share",
   "Property ownership is structured case by case with the legal team",
   "Fungible and non-fungible assets are redeemed by deposit, confirmation and burn",
   "Legal recourse against the issuer on every instrument that pays or converts",

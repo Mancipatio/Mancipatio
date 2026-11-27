@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { EquityGuide } from "./equity-guide";
 import {
   Body,
   Bullets,
@@ -113,6 +114,17 @@ export default async function InstrumentPage({
           <Button href={MX_ROUTES.instruments} variant="ghost">See the asset types</Button>
         </ButtonRow>
       </PageHeader>
+    );
+  }
+
+  if (instrument.slug === "equity") {
+    return (
+      <>
+        <PageHeader eyebrow={instrument.label} title={instrument.headline} lede={instrument.lede}>
+          <Ctas items={instrument.ctas} />
+        </PageHeader>
+        <EquityGuide />
+      </>
     );
   }
 

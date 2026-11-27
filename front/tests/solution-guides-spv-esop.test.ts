@@ -100,9 +100,9 @@ describe("/solutions/serbian-spv", () => {
     expect(html).not.toContain("data-pilot-module-notice");
     expect(hrefs(html)).toContain("/apply");
     expect(hrefs(html)).toContain("/contact");
-    expect(html).toContain("What you will need to provide");
-    expect(html).toContain("quoted per engagement before any work starts");
-    expect(html).toContain("Serbian Business Registers Agency (APR)");
+    expect(html).toContain("What you&#x27;ll need");
+    expect(html).toContain("Third-party costs are quoted before any work starts.");
+    expect(html).toContain("Serbian Business Registers Agency (BRA)");
     expect(navHrefVisible("/solutions/serbian-spv")).toBe(true);
     expect(docs()).toContain("/solutions/serbian-spv");
   });

@@ -328,7 +328,7 @@ describe("the About page (its honest line and its way in)", () => {
 
   it("mode on: issuer applications are named as paused, never as open; the way in is verification", async () => {
     const page = await about();
-    expect(page).toContain("Sign-up and identity verification open; launchpad, issuer applications, OTC settlement, governance and vesting paused for now");
+    expect(page).toContain("Sign-up and identity verification open; launchpad, issuer applications, DeFi OTC, governance and vesting paused for now");
     expect(page).not.toContain("Issuer applications are open");
     expect(page).not.toContain("Issuers apply");
     expect(page).toContain(KYC_ONLY_MESSAGE);
@@ -340,7 +340,8 @@ describe("the About page (its honest line and its way in)", () => {
     network("mainnet", "off");
     const page = await about();
     expect(page).toContain("Issuer applications are open and read by a person");
-    expect(page).toContain("Two ways in.");
+    expect(page).toContain("See the asset types");
+    expect(page).toContain("See the MANCI case study");
     expect(hrefs(page)).toContain("/apply");
   });
 });

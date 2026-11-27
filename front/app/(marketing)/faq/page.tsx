@@ -1,111 +1,179 @@
-import {
-  Card,
-  Grid,
-  MX_ROUTES,
-  PageHeader,
-  Section,
-  TextLink,
-} from "@/components/mx";
+import { Button, ButtonRow, Card, Grid, H2, PageHeader, Section, TextLink } from "@/components/mx";
+import { MANCI_CASE_STUDY_URL } from "@/lib/manci-token";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Quick answers — Manci",
-  description:
-    `Find the right guide for buying, verification, token documents, ${navHrefVisible("/portfolio/vesting") ? "vesting " : ""}and issuing on Manci.`,
+  description: "Short answers to what people ask most. Each one links to the full explanation.",
 };
 
-const QUESTIONS = [
+type Question = {
+  question: string;
+  answer: string;
+  link?: { label: string; href: string };
+  guide?: string;
+};
+
+const GROUPS: { title: string; questions: Question[]; availableAt?: string }[] = [
   {
-    question: "Where should I start as a buyer?",
-    answer:
-      "Start with the investor guide for the route from finding an asset to reviewing it and opening your portfolio.",
-    href: MX_ROUTES.invest,
-    link: "Investor guide",
+    title: "Manci and the structure",
+    questions: [
+      {
+        question: "Is Manci an offshore structure?",
+        answer: "The platform is operated by Manci International Ltd (BVI). The equity behind the tokens sits in Serbian companies, recorded in Serbian public registers. When you convert, your ownership is recorded in the Serbian register, not with the operator.",
+        link: { label: "Legal structure", href: "/legal-structure" },
+      },
+      {
+        question: "What does a token give me?",
+        answer: "A right to convert into equity in a Serbian company. Some issuances add payouts while you hold. The exact terms are in each issuance's documents.",
+        link: { label: "Asset types", href: "/markets/types" },
+      },
+      {
+        question: "Is a token the same as equity?",
+        answer: "No. The token gives you the right to convert. You become a member of the company when the BRA (a government agency) records the transfer.",
+        link: { label: "Company ownership", href: "/markets/types/equity" },
+      },
+      {
+        question: "Who is legally responsible for my token rights?",
+        answer: "The token issuer is bound by the issuance documents. Manci provides the infrastructure, while the issuer is responsible for fulfilling its obligations.",
+        link: { label: "Legal structure", href: "/legal-structure" },
+      },
+      {
+        question: "How do I check a company before I buy?",
+        answer: "Look it up in the BRA register using the registration number in the issuance documents, and check the token on Solana.",
+        link: { label: "See the MANCI case study", href: MANCI_CASE_STUDY_URL },
+      },
+    ],
   },
   {
-    question: "What does a particular token give me?",
-    answer:
-      "Read the documents attached to that issuance. The asset guide explains the available instrument; an issuance's own documents describe its specific terms.",
-    href: MX_ROUTES.whitepapers,
-    link: "Find token documents",
+    title: "Buying and holding",
+    questions: [
+      {
+        question: "Do I need KYC to buy?",
+        guide: "/solutions/compliance",
+        answer: "Not unless the issuance requires it. You verify your identity when you convert.",
+      },
+      {
+        question: "Can I invest if I live outside Serbia?",
+        guide: "/solutions/compliance",
+        answer: "Yes, provided your jurisdiction and the terms of the issuance allow it. You don't need to be a Serbian citizen to own equity in a Serbian d.o.o. (LLC).",
+      },
+      {
+        question: "Can I sell my tokens?",
+        answer: "Yes, subject to the issuance's transfer rules. Transfer them or trade them peer to peer on DeFi OTC. There is no guaranteed buyer or price.",
+        link: { label: "OTC trading", href: "/solutions/otc" },
+      },
+      {
+        question: "Do I get voting rights or dividends?",
+        guide: "/markets/types/equity",
+        answer: "Once you convert, you vote as a member, and the company decides on profit distribution. Before that, you get payouts only as per the issuance documents.",
+      },
+      {
+        question: "What if the founders refuse to transfer the equity?",
+        answer: "Where a lien has been registered, it can be enforced under the issuance documents. Please note that the enforcement can be lengthy and may not cover your full investment.",
+        link: { label: "Risk disclosure", href: "/risks" },
+      },
+      {
+        question: "What if the company fails?",
+        answer: "The token can lose all its value. Where a registered lien secures conversion, it protects you if the issuer refuses to convert, not if the business fails.",
+        link: { label: "Risk disclosure", href: "/risks" },
+      },
+      {
+        question: "What if Manci stops operating?",
+        answer: "After conversion, your ownership is recorded in the government register and doesn't depend on Manci. Before conversion, your rights are set in the issuance documents, but trading, escrow and conversion process through the platform may be affected.",
+        link: { label: "Risk disclosure", href: "/risks" },
+      },
+      {
+        question: "Does Manci guarantee my investment?",
+        answer: "No. Manci verifies issuers, but verification is not an endorsement of the business or a guarantee of returns.",
+        link: { label: "Risk disclosure", href: "/risks" },
+      },
+    ],
   },
   {
-    question: "Do I need to verify my identity to buy tokens?",
-    answer:
-      `Buying tokens does not require identity verification unless the class is KYC-gated. Buying or receiving a KYC-gated class requires an approved investor passport for the receiving wallet.${navHrefVisible("/portfolio/conversion") ? " Converting tokens into company shares requires KYC." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
-    href: MX_ROUTES.security,
-    link: "Verification and transfer rules",
+    title: "Converting",
+    availableAt: "/portfolio/conversion",
+    questions: [
+      {
+        question: "How does conversion work?",
+        answer: "Request it on the platform, pass KYC, and send your tokens into the escrow. You and the token issuer sign the transfer, BRA registers it, and the tokens are burned.",
+        link: { label: "Company ownership", href: "/markets/types/equity" },
+      },
+      {
+        question: "How long does it take?",
+        guide: "/markets/types/equity",
+        answer: "BRA makes decisions within five working days of a proper filing.",
+      },
+    ],
   },
   {
-    question: "Where can I sell tokens I already hold?",
-    answer:
-      "The OTC guide explains creating, funding and filling an offer, with a direct link to the trading screen.",
-    href: "/solutions/otc",
-    link: "OTC trading guide",
+    title: "For issuers",
+    questions: [
+      {
+        question: "Can a company outside Serbia issue?",
+        answer: "Yes, through a Serbian SPV.",
+        link: { label: "Issuing through a Serbian SPV", href: "/solutions/serbian-spv" },
+      },
+      {
+        question: "Do I have to use your lawyers?",
+        guide: "/legal-structure",
+        answer: "No. Our partners in Serbia can set everything up, or you can choose your own lawyer.",
+      },
+      {
+        question: "What does it cost?",
+        answer: "Fees and costs are quoted individually for each issuance, before any work begins.",
+        link: { label: "Fees & costs", href: "/pricing" },
+      },
+      {
+        question: "How do I apply?",
+        answer: "Verify your account and submit an application. A real person reviews every application, and if our model isn't right for your project, we will tell you.",
+        link: { label: "Apply to issue", href: "/apply" },
+      },
+    ],
   },
   {
-    question: "Can I convert tokens I own into company shares?",
-    answer: "Verified holders can request conversion for eligible holdings. Review the issuance terms and track the request in Portfolio; ownership of a token does not complete the legal conversion by itself.",
-    href: "/portfolio/conversion",
-    link: "Token conversion",
-  },
-  {
-    question: "Where do I check my vesting?",
-    answer:
-      "Open Vesting in your portfolio to review your positions, unlock schedule and available claims.",
-    href: "/portfolio/vesting",
-    link: "Open my vesting",
-  },
-  {
-    question:
-      "My wallet submitted a transaction but the app still shows pending. What now?",
-    answer:
-      "Keep the receipt and use the available retry-record action. First verify the existing purchase, deposit or sale address; do not send the same funds again just to update the app record.",
-    href: "/docs/pilot",
-    link: "Recovery and testing guide",
-  },
-  {
-    question: "Where are the risks and legal terms explained?",
-    answer:
-      "Read the risk disclosure before deciding to participate, alongside the documents for the selected issuance.",
-    href: MX_ROUTES.risks,
-    link: "Risk disclosure",
-  },
-  {
-    question: "How do I submit an asset for issuance?",
-    answer:
-      "The issuance guide covers the shared process and directs you to the application.",
-    href: MX_ROUTES.howItWorks,
-    link: "Issuance guide",
-  },
-  {
-    question: "I need help with a specific case. Where do I go?",
-    answer:
-      "Use the contact form for questions about your project or a step in the app.",
-    href: MX_ROUTES.contact,
-    link: "Contact the team",
+    title: "Technical",
+    questions: [
+      {
+        question: "Which blockchain and token standard?",
+        guide: "/solutions/share-classes",
+        answer: "Solana, with Token-2022 mints.",
+      },
+      {
+        question: "Has the code been audited?",
+        guide: "/security",
+        answer: "Not yet. Manci's smart contracts have had internal security reviews only.",
+      },
+      {
+        question: "My transaction went through but the app still shows pending. What now?",
+        answer: "Keep the receipt and use the retry-record action. Check the purchase, deposit or sale first, and don't send the same funds again.",
+        link: { label: "Pilot operator guide", href: "/docs/pilot" },
+      },
+    ],
   },
 ];
 
 export default function FaqPage() {
   return (
     <>
-      <PageHeader
-        eyebrow="Help"
-        title="Quick answers"
-        lede="Find the relevant guide or open the part of the app you need."
-      />
+      <PageHeader eyebrow="Help" title="Quick answers" lede={metadata.description} />
+      {GROUPS.filter((group) => !group.availableAt || navHrefVisible(group.availableAt)).map((group) => (
+        <Section key={group.title}>
+          <H2 className="mb-6">{group.title}</H2>
+          <Grid cols={2}>
+            {group.questions.filter(({ link }) => !link || navHrefVisible(link.href)).map((item) => (
+              <Card key={item.question} title={item.question} body={item.answer} href={item.guide && navHrefVisible(item.guide) ? item.guide : undefined}>
+                {item.link && (
+                  <p className="mt-4"><TextLink href={item.link.href}>{item.link.label}</TextLink></p>
+                )}
+              </Card>
+            ))}
+          </Grid>
+        </Section>
+      ))}
       <Section>
-        <Grid cols={2}>
-          {/* No answer that points into a module switched off on this network (lib/pilot-scope.ts). */}
-          {QUESTIONS.filter((item) => navHrefVisible(item.href)).map((item) => (
-            <Card key={item.question} title={item.question} body={item.answer}>
-              <p className="mt-4">
-                <TextLink href={item.href}>{item.link} →</TextLink>
-              </p>
-            </Card>
-          ))}
-        </Grid>
+        <H2>Still have a question?</H2>
+        <ButtonRow><Button href="/contact">Contact the team</Button></ButtonRow>
       </Section>
     </>
   );

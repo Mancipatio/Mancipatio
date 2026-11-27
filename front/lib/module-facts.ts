@@ -9,7 +9,7 @@ import type { Network } from "@/lib/network";
 
 /** The modules the About page names, each behind its switch. */
 const SHIPPED_MODULES: ReadonlyArray<readonly [string, PilotModule]> = [
-  ["OTC settlement", "secondaryTrading"],
+  ["DeFi OTC", "secondaryTrading"],
   ["governance", "governance"],
   ["vesting", "vesting"],
 ];

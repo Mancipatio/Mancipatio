@@ -9,6 +9,7 @@ import { detectNetwork, networkLabel } from "@/lib/network";
 import { KYC_ONLY_MESSAGE, kycOnly, scopeEnabled } from "@/lib/features";
 import { offeredAssetClasses } from "@/lib/pilot-scope";
 import { ASSET_TYPES } from "@/lib/asset-types";
+import { MANCI_CASE_STUDY_URL } from "@/lib/manci-token";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 import { siteUrl } from "@/lib/site-url";
 import { jsonLdScript, organizationJsonLd } from "@/lib/structured-data";
@@ -16,11 +17,11 @@ import styles from "./landing.module.css";
 import { LandingCompanies } from "./landing-companies";
 
 const brandFont = Montserrat({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-brand", display: "swap" });
+const INTRO = "Tokens that convert into real equity in European companies.";
 
 export const metadata: Metadata = {
   title: "Manci — From token to registered owner",
-  description:
-    "Company shares tokenized on Solana. Discover Manci's documented path from eligible company-share tokens through verification, conversion and registration to ownership.",
+  description: INTRO,
 };
 
 const ownershipSteps = [
@@ -28,34 +29,31 @@ const ownershipSteps = [
     number: "01",
     icon: IconCoins,
     title: "Token",
-    description: "An eligible company-share token carries a documented right to acquire a real share.",
-    detail: "A claim to a share",
+    description: "A right to convert into equity.",
   },
   {
     number: "02",
     icon: IconLock,
     title: "Convert",
-    description: "Complete KYC and place eligible tokens in escrow for the conversion process.",
-    detail: "Verification + escrow",
+    description: "Start it on the platform. KYC, then your tokens go into escrow.",
   },
   {
     number: "03",
     icon: IconBuilding,
     title: "Register",
-    description: "Complete the legal transfer and enter the share ownership in the official register.",
-    detail: "Legal registration",
+    description: "Complete the legal transfer and become a registered member of the company in Serbia's Business Register (BRA).",
   },
   {
     number: "04",
     icon: IconCheck,
     title: "Burn",
-    description: "After registration is confirmed, the escrowed tokens are burned. The registered share remains.",
-    detail: "Registered ownership",
+    description: "The tokens are burned. The equity stays with you.",
   },
 ];
 
 export default function HomePage() {
   const network = detectNetwork();
+  const issuanceOpen = scopeEnabled("issuance", network);
   const offered = offeredAssetClasses(network);
   const assetTypes = ASSET_TYPES.filter((asset) => offered.includes(asset.slug as typeof offered[number]));
   const assetGuide = assetTypes.length === 1 ? `/markets/types/${assetTypes[0].slug}` : "/markets/types";
@@ -82,20 +80,24 @@ export default function HomePage() {
         <main id="main-content" tabIndex={-1}>
           <section className={`${styles.container} ${styles.hero}`} aria-labelledby="intro-title">
             <div>
-              <p className={styles.eyebrow}><span /> PRIVATE COMPANY SHARES · ON SOLANA</p>
+              <p className={styles.eyebrow}><span /> TOKENIZED EQUITY · EUROPE · ON SOLANA</p>
               <h1 id="intro-title">From token to<br />registered<br /><span>owner.</span></h1>
-              <p className={styles.lead}>Company shares tokenized on Solana, end to end.</p>
-              <p className={styles.heroCopy}>A documented path from a company-share token to registered ownership, through verification, conversion and legal registration.</p>
+              <p className={styles.lead}>{INTRO}</p>
               <div className={styles.actions}>
-                <Link href="/app" className={styles.primary}>Explore the app <IconArrowUpRight size={19} /></Link>
-                <a href="#ownership-path" className={styles.textLink}>How it works <span aria-hidden="true">↓</span></a>
+                <Link href="/marketplace" className={styles.primary}>Explore assets <IconArrowUpRight size={19} /></Link>
+                {issuanceOpen
+                  ? <Link href="/apply" className={styles.textLink}>Apply to issue <IconArrowUpRight size={17} /></Link>
+                  : <Link href="/verify" className={styles.textLink}>Get verified <IconArrowUpRight size={17} /></Link>}
               </div>
-              <p className={styles.stage}><span /> {network === "mainnet" ? "Built on Solana mainnet" : `Explore on Solana ${networkLabel(network).toLowerCase()} · Test environment`}</p>
+              <p className={styles.caseStudy}>
+                Proven on Solana mainnet: from token issuance to registered company ownership in Serbia.{" "}
+                <a href={MANCI_CASE_STUDY_URL}>See the MANCI case study</a>
+              </p>
+              {network !== "mainnet" && <p className={styles.stage}><span /> Explore on Solana {networkLabel(network).toLowerCase()} · Test environment</p>}
               {kycOnly(network) && <p className={styles.scopeNotice}>{KYC_ONLY_MESSAGE}</p>}
             </div>
             <figure className={styles.visual}>
               <OwnershipVisual />
-              <figcaption>A documented claim. A path to registered ownership.</figcaption>
             </figure>
           </section>
 
@@ -106,27 +108,44 @@ export default function HomePage() {
           {/* The published tokens and the public record; renders nothing until a profile is published. */}
           <LandingCompanies />
 
-          <section id="ownership-path" className={styles.about} aria-labelledby="about-title">
+          <section id="ownership-path" className={styles.about} aria-labelledby="ownership-title">
             <div className={styles.container}>
-              <div className={styles.aboutHeading}>
-                <div><p className={styles.eyebrow}>MEET MANCI</p><h2 id="about-title">Private companies.<br /><span>A path to ownership.</span></h2></div>
-                <div className={styles.aboutCopy}><p>We bring together Solana engineering, legal structuring and company verification. Our focus is private companies and the people who hold their tokens, with a documented route from a token-holder claim to registered share ownership.</p><Link href="/about" className={styles.textLink}>More about us <IconArrowUpRight size={17} /></Link></div>
-              </div>
+              <h2 id="ownership-title">The ownership path</h2>
               <ol className={styles.capabilities} aria-label="From token to registered owner: four steps">
-                {ownershipSteps.map(({ number, icon: Icon, title, description, detail }) => (
+                {ownershipSteps.map(({ number, icon: Icon, title, description }) => (
                   <li key={number} className={styles.capability}>
                     <div className={styles.capabilityTop}><Icon size={25} /><span>{number}</span></div>
-                    <h3>{title}</h3><p>{description}</p><span className={styles.stepDetail}>{detail}</span>
+                    <h3>{title}.</h3><p>{description}</p>
                   </li>
                 ))}
               </ol>
-              <p className={styles.processNote}>Token rights, eligibility and conversion requirements are defined in each issuance’s documents. Holding a token alone does not make you a registered shareholder. <Link href="/docs">Read the documentation <span aria-hidden="true">↗</span></Link></p>
+              <p className={styles.processNote}>
+                What each token gives you is set out in its issuance documents. Holding a token doesn&apos;t make you a registered member. Converting does.
+              </p>
+
+              <section className={styles.editorial} aria-labelledby="why-title">
+                <div className={styles.aboutHeading}>
+                  <div><p className={styles.eyebrow}>Why Manci</p><h2 id="why-title">Not another offshore SPV.</h2></div>
+                  <div className={styles.aboutCopy}><p>Many tokenized assets sit in an offshore vehicle you can&apos;t look into. Manci tokens are backed by equity in companies in Europe (Republic of Serbia). Check both sides yourself: the token on the blockchain and the company in the state register.</p></div>
+                </div>
+                <ul className={styles.reasons}>
+                  <li><strong>Real equity.</strong> Convert, and you own part of the company, not a contract with a middleman.</li>
+                  <li><strong>The MANCI issuance.</strong> The Serbian Pledge Register records a lien on 15% of Mancipatio d.o.o. Beograd&apos;s share capital, backing 1,500 MANCI tokens.</li>
+                  <li><strong>Public registers.</strong> Owners, liens and transfers are on record, open to anyone online.</li>
+                </ul>
+              </section>
+
+              <section className={styles.editorial} aria-labelledby="meet-title">
+                <div className={styles.aboutHeading}>
+                  <div><Link className={styles.eyebrow} href="/about">Meet Manci <IconArrowUpRight size={14} /></Link><h2 id="meet-title">Private companies.<br /><span>A real path to ownership.</span></h2></div>
+                  <div className={styles.aboutCopy}><p>We bring together Solana engineering, legal structuring and company verification, so a token can become registered equity.</p></div>
+                </div>
+              </section>
 
               <div className={styles.otc}>
                 <div className={styles.otcCopy}>
-                  <p className={styles.eyebrow}>PEER TO PEER · SETTLED ON SOLANA</p>
-                  <h3>A second path: trade the token.</h3>
-                  <p>Manci’s OTC model connects sellers and buyers through smart-contract escrow, without converting the token into a registered share.</p>
+                  <h3>Or just trade the token</h3>
+                  <p>Buy or sell peer to peer on <Link className={styles.inlineLink} href="/solutions/otc">DeFi OTC</Link>. Smart-contract escrow holds both sides.</p>
                   {!scopeEnabled("secondaryTrading", network) && <span className={styles.availability}>OTC trading is currently paused.</span>}
                 </div>
                 <div className={styles.otcFlow} aria-label="OTC model: seller, smart-contract escrow, buyer">
@@ -137,10 +156,30 @@ export default function HomePage() {
                   <div><span>Buyer</span><small>Receives tokens</small></div>
                 </div>
               </div>
+              {issuanceOpen && (
+                <section className={styles.editorial} aria-labelledby="raise-title">
+                  <div className={styles.aboutHeading}>
+                    <h2 id="raise-title">Raising capital?</h2>
+                    <div className={styles.aboutCopy}>
+                      <p>Tokenize equity in your company and reach a new pool of investors.</p>
+                      <div className={styles.actions}>
+                        <Link href="/apply" className={styles.textLink}>Apply to issue <IconArrowUpRight size={17} /></Link>
+                        <Link href="/solutions/serbian-spv" className={styles.textLink}>Issuing through a Serbian SPV <IconArrowUpRight size={17} /></Link>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
               <div className={styles.nextStep}>
-                <div><p className={styles.eyebrow}>YOUR NEXT STEP</p><h2>Get to know Manci.</h2><p>Explore the registry, create an account and complete identity verification.</p></div>
-                <div className={styles.actions}><Link href="/app" className={styles.primary}>Open app <IconArrowUpRight size={19} /></Link><Link href="/verify" className={styles.textLink}>Get verified <IconArrowUpRight size={17} /></Link></div>
+                <div><p className={styles.eyebrow}>Your next step</p><h2>Get to know Manci.</h2>
+                  <p>{kycOnly(network) ? KYC_ONLY_MESSAGE : "Browse the marketplace. Buy and hold tokens without KYC unless the issuance requires it. Verify your identity when you're ready to convert."}</p>
+                </div>
+                <div className={styles.actions}>
+                  <Link href="/app" className={styles.primary}>Open app <IconArrowUpRight size={19} /></Link>
+                  <Link href="/docs" className={styles.textLink}>Read the docs <IconArrowUpRight size={17} /></Link>
+                </div>
               </div>
+              <p className={styles.processNote}>Tokens carry risk. <Link href="/risks" className={styles.inlineLink}>Read the risk disclosure</Link> before you buy.</p>
             </div>
           </section>
         </main>

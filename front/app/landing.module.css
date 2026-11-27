@@ -22,7 +22,8 @@
 .hero h1 { margin:26px 0; font-size:clamp(52px, 5.4vw, 76px); line-height:1.04; letter-spacing:-3.4px; font-weight:500; }
 .hero h1 > span { color:var(--landing-green); }
 .lead { max-width:450px; color:#e0eadb; font-size:18px; line-height:1.55; }
-.heroCopy { max-width:440px; margin-top:14px; color:#b9c9bc; font-size:14px; line-height:1.8; }
+.caseStudy { max-width:450px; margin-top:24px; color:#b9c9bc; font-size:14px; line-height:1.7; }
+.page .caseStudy a, .page .inlineLink { text-decoration:underline; text-underline-offset:3px; }
 .actions { display:flex; align-items:center; flex-wrap:wrap; gap:28px; }
 .hero .actions { margin-top:32px; }
 .primary { display:inline-flex; align-items:center; justify-content:center; gap:30px; min-height:50px; padding:13px 21px; border-radius:5px; background:var(--landing-green); color:#173326; font-size:13px; font-weight:600; transition:background .2s, transform .2s; }
@@ -33,7 +34,6 @@
 .stage > span { width:5px; height:5px; border-radius:50%; background:#91b78d; }
 .scopeNotice { max-width:450px; margin-top:12px; color:#a0b7a5; font-size:11px; line-height:1.7; }
 .visual { min-width:0; position:relative; margin:0; }
-.visual figcaption { margin-top:16px; text-align:center; font-size:10px; line-height:1.6; color:#b0c4b1; }
 .assetBand { border-block:1px solid #ffffff16; }
 .assetBand > div { min-height:78px; display:flex; align-items:center; gap:38px; }
 .assetBandLabel { color:#8ea792; font-family:var(--font-geist-mono),monospace; font-size:9px; letter-spacing:1.4px; flex-shrink:0; }
@@ -66,6 +66,10 @@
 .listedRecord li p { margin-top:4px; font-size:12px; line-height:1.7; color:#63705c; }
 .about { padding:76px 0 70px; background:var(--landing-cream); color:#18352a; scroll-margin-top:24px; }
 .aboutHeading { display:grid; grid-template-columns:1fr 1fr; gap:70px; align-items:end; }
+.editorial { margin-top:52px; padding-top:36px; border-top:1px solid #cdd5c7; }
+.reasons { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:28px; margin:28px 0 0; padding:0; list-style:none; }
+.reasons li { font-size:14px; line-height:1.7; color:#586653; }
+.reasons strong { display:block; color:#244d34; }
 .about .eyebrow { color:#65765e; }
 .about h2 { margin-top:16px; font-size:40px; line-height:1.15; letter-spacing:-1.8px; font-weight:500; }
 .aboutHeading h2 > span { color:#75816e; }
@@ -81,10 +85,9 @@
 .capabilityTop > span { font-family:var(--font-geist-mono),monospace; font-size:10px; color:#718168; }
 .capability h3 { margin-top:26px; font-size:24px; letter-spacing:-.6px; font-weight:500; }
 .capability p { margin-top:12px; font-size:13px; line-height:1.8; color:#616e59; }
-.stepDetail { margin-top:auto; padding-top:24px; color:#426747; font-family:var(--font-geist-mono),monospace; font-size:9px; letter-spacing:.3px; }
-.capability:last-child p, .capability:last-child .capabilityTop, .capability:last-child .capabilityTop > span, .capability:last-child .stepDetail { color:#d0dfc6; }
+.capability:last-child p, .capability:last-child .capabilityTop, .capability:last-child .capabilityTop > span { color:#d0dfc6; }
 .processNote { max-width:920px; margin-top:22px; color:#63705c; font-size:12px; line-height:1.8; }
-.processNote a { margin-left:5px; color:#244d34; text-decoration:underline; text-underline-offset:3px; white-space:nowrap; }
+.processNote a { color:#244d34; }
 .otc { display:grid; grid-template-columns:.95fr 1.05fr; gap:40px; align-items:center; margin-top:48px; padding:36px; background:#183b2c; border-radius:8px; color:var(--landing-cream); }
 .otc .eyebrow { font-size:9px; color:#acc9a3; letter-spacing:1px; }
 .otc h3 { margin-top:14px; font-size:25px; font-weight:500; letter-spacing:-.8px; line-height:1.25; }
@@ -118,7 +121,6 @@
   .hero { gap:24px; padding-block:50px; }
   .hero h1 { font-size:57px; letter-spacing:-2.6px; }
   .lead { font-size:16px; }
-  .heroCopy { font-size:13px; }
   .hero .actions { gap:20px; }
   .assetBand > div { gap:24px; }
   .assetBand p { gap:13px; font-size:11px; }
@@ -146,7 +148,6 @@
   .hero { grid-template-columns:1fr; padding-top:45px; padding-bottom:38px; }
   .hero h1 { font-size:72px; letter-spacing:-3.5px; }
   .lead { max-width:490px; font-size:18px; }
-  .heroCopy { max-width:490px; font-size:14px; }
   .visual { width:min(520px,100%); justify-self:center; margin-top:18px; }
   .assetBand > div { flex-wrap:wrap; gap:15px; padding-block:23px; position:relative; }
   .assetBandLabel { width:100%; }
@@ -154,6 +155,7 @@
   .assetBand a { position:absolute; right:0; top:23px; }
   .about { padding:55px 0 40px; }
   .aboutHeading { grid-template-columns:1fr; gap:24px; }
+  .reasons { grid-template-columns:1fr; gap:14px; }
   .about h2 { font-size:38px; }
   .aboutCopy { max-width:550px; }
   .capabilities { margin-top:35px; grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -166,7 +168,7 @@
   .nextStep h2 { font-size:29px; }
   .footerTop { flex-wrap:wrap; gap:20px; }
   .footerTop p { margin-left:auto; font-size:11px; }
-  .footer nav { width:100%; margin:4px 0 0; }
+  .footer nav { width:100%; margin:4px 0 0; flex-wrap:wrap; row-gap:12px; }
 }
 @media (max-width:480px) {
   .container { width:calc(100% - 36px); }
@@ -179,19 +181,16 @@
   .hero .eyebrow { font-size:8px; letter-spacing:1px; }
   .hero h1 { font-size:56px; letter-spacing:-2.6px; margin-block:23px; }
   .lead { font-size:17px; }
-  .heroCopy { font-size:13px; }
   .primary { gap:20px; padding-inline:17px; font-size:12px; }
   .textLink { gap:8px; font-size:12px; }
   .hero .actions { gap:22px; }
   .visual { margin-top:12px; }
-  .visual figcaption { font-size:9px; }
   .about h2 { font-size:34px; }
   .aboutCopy p { font-size:14px; }
   .capability { padding:22px 16px; }
   .capability:last-child { padding:22px 16px; }
   .capability h3 { font-size:22px; }
   .capability p { font-size:12px; }
-  .stepDetail { font-size:8px; }
   .otc { margin-top:32px; padding:26px 20px; }
   .otc h3 { font-size:24px; }
   .otc .eyebrow { font-size:8px; letter-spacing:.7px; }
@@ -215,8 +214,6 @@
   .capability + .capability { border-left:0; border-top:1px solid #d8ded1; }
   .capability:last-child { padding:24px 20px; border-radius:0 0 8px 8px; }
   .capability p { font-size:13px; }
-  .stepDetail { font-size:9px; }
-  .processNote a { display:inline-block; margin-left:0; white-space:normal; }
 }
 @media (prefers-reduced-motion:reduce) {
   .page a { transition:none; }

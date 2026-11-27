@@ -29,10 +29,11 @@ import { scopeEnabled } from "@/lib/features";
 
 import { assetClassOffered } from "@/lib/pilot-scope";
 
+const introduction = "Explore the instruments available on Manci and the rights they carry. The terms of every issuance are published on the platform.";
+
 export const metadata = {
   title: "Asset types · Manci",
-  description:
-    "Compare the rights each asset type on Manci carries, side by side, then open its fact sheet.",
+  description: introduction,
 };
 
 /** lib/instruments.ts settledTermKeys(), over the rows of the offered asset
@@ -71,55 +72,50 @@ export default function InstrumentsIndexPage() {
 
   return (
     <>
-      <PageHeader
-        eyebrow="Asset types"
-        title="Asset types"
-        lede="Review the available asset types and the rights they carry. The terms of a specific issuance are published with that asset."
-      />
+      <PageHeader title="Asset types" lede={introduction} />
 
       <Section>
-        <Small className="mb-2.5">
-          Scroll the table sideways on a narrow screen →
-        </Small>
-        <DataTable
-          columns={columns}
-          rows={rows}
-          minWidth={860}
-          caption="The rights each instrument carries, side by side"
-        />
-        <FootNote className="mt-3">
-          A dash means not applicable to this instrument.
-        </FootNote>
-        {(assetClassOffered("real_estate") || assetClassOffered("other")) && (
-          <FootNote className="mt-2">
-            {assetClassOffered("real_estate") &&
-              "Real estate appears twice because rental income and ownership carry different rights."}
-            {assetClassOffered("real_estate") && assetClassOffered("other") && " "}
-            {assetClassOffered("other") &&
-              "Bespoke structures under Other have no standard terms, so they are not listed here."}
-          </FootNote>
-        )}
-      </Section>
-
-      <Section>
-        <SectionHead
-          eyebrow="The instruments"
-          title="Available asset types"
-          intro="Every page carries what the instrument is, who it is for, its terms at a glance, and what happens if the issuer doesn't perform."
-        />
-        <Grid cols={4} className="mt-7">
+        <SectionHead title="Available asset types" />
+        <Grid cols={instruments.length === 1 ? 2 : 4} className="mt-7">
           {instruments.map((instrument) => (
             <Card
               key={instrument.slug}
-              title={instrument.label}
+              title={instrument.slug === "equity" ? "Company ownership." : instrument.label}
               body={instrument.blurb}
               href={instrumentHref(instrument.slug)}
             />
           ))}
         </Grid>
+        <Body className="mt-4">
+          Each instrument page explains what the token is, who it&apos;s for, its terms at a glance and what happens if the issuer doesn&apos;t perform.
+        </Body>
       </Section>
 
-
+      {instruments.length > 1 && (
+        <Section>
+          <Small className="mb-2.5">
+            Scroll the table sideways on a narrow screen →
+          </Small>
+          <DataTable
+            columns={columns}
+            rows={rows}
+            minWidth={860}
+            caption="The rights each instrument carries, side by side"
+          />
+          <FootNote className="mt-3">
+            A dash means not applicable to this instrument.
+          </FootNote>
+          {(assetClassOffered("real_estate") || assetClassOffered("other")) && (
+            <FootNote className="mt-2">
+              {assetClassOffered("real_estate") &&
+                "Real estate appears twice because rental income and ownership carry different rights."}
+              {assetClassOffered("real_estate") && assetClassOffered("other") && " "}
+              {assetClassOffered("other") &&
+                "Bespoke structures under Other have no standard terms, so they are not listed here."}
+            </FootNote>
+          )}
+        </Section>
+      )}
 
       <Section>
         <H2>Discuss your issuance</H2>
@@ -127,7 +123,7 @@ export default function InstrumentsIndexPage() {
           {/* KYC-only mode (lib/features.ts): applications are paused; the
               contact form stays. */}
           {scopeEnabled("issuance")
-            ? "Tell us what you have. A person reads every application and comes back either way — including to say that none of these instruments is right for it."
+            ? "Tell us what you have. A real person reviews every application. If our model isn't right for your project, we'll tell you."
             : "Tell us what you have. A person reads every message and comes back either way — including to say that none of these instruments is right for it."}
         </Body>
         <ButtonRow>

@@ -185,7 +185,7 @@ describe("modules and core areas under the mode", () => {
   it("the About page names everything but sign-up and verification as paused", () => {
     mode("");
     expect(modulesFact("mainnet")).toBe(
-      "Sign-up and identity verification open; launchpad, issuer applications, OTC settlement, governance and vesting paused for now",
+      "Sign-up and identity verification open; launchpad, issuer applications, DeFi OTC, governance and vesting paused for now",
     );
   });
 });

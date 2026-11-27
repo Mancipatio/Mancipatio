@@ -1,167 +1,106 @@
-import Link from "next/link";
-import {
-  Body,
-  Button,
-  ButtonRow,
-  Card,
-  Grid,
-  H2,
-  PageHeader,
-  Section,
-  Steps,
-} from "@/components/mx";
+import { Body, Bullets, Button, ButtonRow, Card, Grid, H2, PageHeader, Section, Steps, TextLink } from "@/components/mx";
+import { features, moduleEnabled } from "@/lib/features";
+import { detectNetwork } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Issuing an asset · Manci",
-  description:
-    "The issuer process: KYC or KYB, verification review, token issuance request, documentation and primary sale.",
+  description: "From application to issued tokens. The documents and requirements are set for each issuance.",
 };
 
 const STEPS = [
   {
-    title: "Complete KYC or KYB",
-    body: "Verify your identity (KYC) as an individual founder or your company (KYB). Submit the requested documents from the issuer workspace.",
+    title: "Verify your account.",
+    body: <>Sign in with your wallet, then verify yourself (KYC) or your company (KYB) from the <TextLink href="/issuer">issuer workspace</TextLink>. The application page asks for this first.</>,
   },
   {
-    title: "Follow the verification review",
-    body: "Check your status while the team reviews the submission. If changes or additional documents are requested, update the same request and resubmit. Continue once verification is approved.",
+    title: "The review.",
+    body: "Track the status while the team reviews your submission. If changes or documents are requested, update the same request and resubmit. KYB approval alone doesn't grant operational permissions on the platform.",
   },
   {
-    title: "Request token issuance",
-    body: "Submit the equity issuance application with the proposed asset, rights, amount and schedule. Follow its review and respond to any requested changes.",
+    title: "Apply for issuance.",
+    body: "Submit the equity issuance application: the asset, the rights, the amount, the schedule, and whether you issue directly or through a Serbian SPV. Follow the application review and respond to any requested changes.",
   },
   {
-    title: "Finalize the terms and documents",
-    body: "Agree the legal and commercial terms for this issuance. Prepare the required entity structure, rights documentation and disclosures before proceeding.",
+    title: "Finalize terms and documents.",
+    body: "Agree the legal and commercial terms, including fees and costs. Set up the structure, obtain any required corporate approvals and prepare the issuance documents and disclosures.",
   },
   {
-    title: "Issue the tokens",
-    body: "Register the approved asset and configure its token classes and supply to match the agreed terms.",
+    title: "Register the asset.",
+    body: "Register the approved asset and configure its share classes and supply to match the agreed terms.",
   },
   {
-    title: "Open the primary sale",
-    body: "Publish the approved sale terms so investors can review the documents and purchase the available tokens. Review holdings and transaction history in Portfolio.",
-  },
-];
-
-// The guides of modules switched off on this network are left out (lib/pilot-scope.ts).
-const AFTER_ISSUANCE = [
-  {
-    href: "/solutions/otc",
-    title: "Secondary trading",
-    body: "How offers, escrow funding, settlement and cancellation work.",
-  },
-  {
-    href: "/solutions/rights-vesting",
-    title: "Vesting & claims",
-    body: "Scheduled releases, beneficiary positions and Rights-token claims.",
-  },
-  {
-    href: "/portfolio/conversion",
-    title: "Convert tokens into company shares",
-    body: "A verified holder can request conversion of eligible tokens they own, subject to the issuance terms and review.",
-  },
-  {
-    href: "/portfolio/delivery",
-    title: "Physical delivery",
-    body: "Follow an eligible physical asset through delivery or return.",
-  },
-  {
-    href: "/solutions/governance",
-    title: "Governance",
-    body: "Review proposals, snapshots and voting procedures.",
-  },
-].filter((card) => navHrefVisible(card.href));
-
-// What each side has once a company's token is issued. Each line restates the
-// Terms of Service (the issuer is responsible for its instrument; the Operator
-// is not the issuer and takes no legal title; issuers pay what their
-// engagement agreement provides) or the landing page's four steps. The token
-// page says the same to a holder (components/asset-roles.tsx).
-const WHO_GETS_WHAT = [
-  {
-    title: "Your company",
-    body: "Issues a token for the stake it chooses, up to a cap recorded on Solana, and stays responsible for the token, its documents and its disclosures. When a holder converts, the company completes the legal transfer and the entry in the official register.",
-  },
-  {
-    title: "Your token holders",
-    body: "Hold a documented right to acquire a share, in their own wallets, and can transfer it. Holding a token alone does not make them registered shareholders: where you offer conversion and it is available, they verify their identity, and the registered share replaces the burned tokens.",
-  },
-  {
-    title: "Manci",
-    body: "Verifies the company, runs issuance and conversion on Solana and publishes the record of each register entry next to the token. Manci is not the issuer and takes no legal title to what backs the token. The company pays what its engagement agreement provides.",
+    title: "Distribute the tokens.",
+    body: "Choose one of two routes:",
   },
 ];
 
 export default function HowItWorksPage() {
+  const network = detectNetwork();
+  const afterIssuance = [
+    { href: "/issuer/cap-table", title: "Holder registry.", body: "See who holds your tokens." },
+    { href: "/issuer/updates", title: "Announcements.", body: "Publish updates that token holders can read in Portfolio." },
+    { href: "/portfolio/conversion", title: "Conversion.", body: "Holders request conversion on the platform. The legal transfer is signed, the BRA registers it and the tokens are burned." },
+    { href: "/solutions/otc", title: "DeFi OTC.", body: "Holders can trade your tokens peer to peer, under the issuance's transfer rules." },
+    { href: "/solutions/governance", title: "Governance.", body: "Advisory votes based on a snapshot. A proposal passes only if votes for outweigh votes against. A tie fails, and abstentions don't affect the result." },
+    {
+      href: "/solutions/rights-vesting",
+      title: "Vesting & claims.",
+      body: [
+        moduleEnabled("rights", network) && "Rights Token claims are available.",
+        network === "mainnet" && !moduleEnabled("vesting", network) && "New vesting series aren't available on mainnet yet.",
+      ].filter(Boolean).join(" "),
+    },
+  ].filter(({ href }) => navHrefVisible(href));
+
   return (
     <>
-      <PageHeader
-        eyebrow="Issuer guide"
-        title="Issuing an asset"
-        lede="The common path from an application to an issued asset. The documents and requirements are specific to each issuance."
-      >
+      <PageHeader eyebrow="Issuer guide" title="Issuing an asset" lede={metadata.description}>
         <ButtonRow>
-          <Button href="/issuer">Start with KYC / KYB</Button>
-          <Button href="/contact" variant="ghost">
-            Contact the team
-          </Button>
+          {navHrefVisible("/apply") && <Button href="/apply">Apply to issue</Button>}
+          <Button href="/contact" variant="ghost">Contact the team</Button>
         </ButtonRow>
       </PageHeader>
       <Section>
+        <H2>Before you apply</H2>
+        <Bullets className="mt-4">
+          <li><strong>Serbian company?</strong> You issue directly, there’s no need to incorporate an SPV.</li>
+          <li><strong>Foreign company?</strong> Request a <TextLink href="/solutions/serbian-spv">Serbian SPV</TextLink> in your application.</li>
+          <li><strong>Individual founder?</strong> Request a <TextLink href="/solutions/serbian-spv">Serbian SPV</TextLink> in your application.</li>
+        </Bullets>
+      </Section>
+      <Section>
         <H2>The issuance process</H2>
         <Steps className="mt-5" items={STEPS} />
-        <p className="mt-5">
-          <Link className="mx-link" href="/legal-structure">
-            Read about the legal structure →
-          </Link>
-        </p>
+        <Bullets className="mt-4">
+          <li><strong>Primary sale.</strong> Manci&apos;s admin approves the sale parameters for the class once. Investors pay in USDC, accept the issuance documents and separately acknowledge the risks. Each purchase mints tokens straight into the buyer&apos;s wallet.{!features(network).startupRaises && " New Startup sales can't be opened at the moment."}</li>
+          <li><strong>Direct distribution from treasury.</strong> Tokens are minted into your treasury and distributed directly, as the <TextLink href="/legal/terms">Terms of Service</TextLink> allow. This needs your signature and Manci&apos;s admin role. The app doesn&apos;t process any payment for these tokens.</li>
+        </Bullets>
       </Section>
-      <Section id="who-gets-what">
-        <H2>Who gets what</H2>
-        <Grid cols={3} className="mt-5">
-          {WHO_GETS_WHAT.map((card) => (
-            <Card key={card.title} title={card.title} body={card.body} />
-          ))}
+      <Section>
+        <H2 className="mb-6">Who does what</H2>
+        <Grid cols={3}>
+          <Card title="The token issuer." body={<>Issues tokens up to a cap recorded on Solana. The issuer is responsible for the rights attached to the tokens, the issuance documents and disclosures. When a holder converts, the issuer ensures that the legal transfer and APR registration are completed. <TextLink href="/legal-structure">How the legal structure works</TextLink></>} />
+          <Card title="Token holders." body="Hold a right to convert into equity, in their own wallets, and can transfer it under the issuance's rules. They become registered members once APR records the transfer, and the tokens are then burned." />
+          <Card title="Manci." body={<>Verifies issuers, runs issuance, escrow and conversion on Solana, and publishes the record of each registration next to the token. Manci is not the issuer and takes no legal title to what backs the token. Fees follow your engagement agreement. <TextLink href="/pricing">Fees &amp; costs</TextLink></>} />
         </Grid>
-        <p className="mt-5">
-          <Link className="mx-link" href="/pricing">
-            Fees and costs →
-          </Link>
-        </p>
       </Section>
-      {/* Income distributions and claims: hidden with the module switched off (lib/pilot-scope.ts). */}
-      {navHrefVisible("/portfolio/rights") && <Section id="distributions">
-        <H2>Income distributions</H2>
-        <Body className="mt-4">
-          Where an instrument pays income, review its terms and the approved
-          recipient snapshot. For push distributions, the operator saves the
-          recipients and exact amounts before funding. The app then resumes the
-          same committed groups using on-chain receipts; it never rebuilds them
-          from changed balances.
-        </Body>
-        <Body className="mt-4">
-          The payout plan allocates the full funding amount using a stated
-          rounding rule. A contract can distribute deposited funds; it cannot
-          create revenue or make an unfunded payment. Startup vault investor
-          entitlements use their separate original-investor snapshot. Review the
-          applicable records in your portfolio.
-        </Body>
-        <p className="mt-5">
-          <Link className="mx-link" href="/portfolio/rights">
-            Open income & claims →
-          </Link>
-        </p>
-      </Section>}
-      {AFTER_ISSUANCE.length > 0 && <Section>
-        <H2>After issuance</H2>
-        <Grid cols={2} className="mt-5">
-          {AFTER_ISSUANCE.map((card) => (
-            <Card key={card.href} href={card.href} title={card.title} body={card.body} />
-          ))}
-        </Grid>
-      </Section>}
+      {navHrefVisible("/portfolio/rights") && (
+        <Section id="distributions">
+          <H2>Payouts</H2>
+          <Body className="mt-4">
+            Where an issuance provides for payouts, the applicable terms determine how they are made. For push distributions, the operator saves the recipients and exact amounts from an approved snapshot before funding. Payouts then run in those committed groups using on-chain receipts, never rebuilt from changed balances. The full amount is allocated under a stated rounding rule. A contract can only distribute funds that were deposited: it can&apos;t create revenue or make an unfunded payment. <TextLink href="/portfolio/rights">Open income &amp; claims</TextLink>
+          </Body>
+        </Section>
+      )}
+      {afterIssuance.length > 0 && (
+        <Section>
+          <H2>After issuance</H2>
+          <Grid cols={2} className="mt-5">
+            {afterIssuance.map((card) => <Card key={card.href} {...card} />)}
+          </Grid>
+        </Section>
+      )}
     </>
   );
 }

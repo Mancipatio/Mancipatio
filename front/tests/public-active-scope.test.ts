@@ -101,7 +101,9 @@ describe("public rendering follows the active scope", () => {
     expect(docs).toContain("Token conversion");
     expect(docs).not.toContain("Custody &amp; delivery");
     expect(issuerGuide).toContain("/portfolio/conversion");
-    expect(issuerGuide.indexOf("Complete KYC or KYB")).toBeLessThan(issuerGuide.indexOf("Request token issuance"));
+    expect(issuerGuide).toContain("Verify your account.");
+    expect(issuerGuide.indexOf("Verify your account.")).toBeLessThan(issuerGuide.indexOf("Apply for issuance."));
+    expect(links(issuerGuide)).toEqual(expect.arrayContaining(["/issuer/cap-table", "/issuer/updates"]));
     expect(investorGuide).toContain("/portfolio/conversion");
     expect(investorGuide).toContain("/marketplace/otc");
     expect(conversionGuide).toContain("Open conversion requests");

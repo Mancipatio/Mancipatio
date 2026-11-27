@@ -1,41 +1,9 @@
 import type { Metadata } from "next";
-import {
-  Body,
-  Bullets,
-  Button,
-  ButtonRow,
-  Card,
-  Grid,
-  H2,
-  MX_ROUTES,
-  PageHeader,
-  Section,
-  Steps,
-  TextLink,
-} from "@/components/mx";
+import { Body, Bullets, Button, ButtonRow, H2, MX_ROUTES, PageHeader, Section, TextLink } from "@/components/mx";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { scopeEnabled } from "@/lib/features";
 import { indexingAllowed } from "@/lib/indexing";
 import { navHrefVisible, type ModuleRouteState } from "@/lib/pilot-scope";
-import { SPV_CHOICE_LABEL, SPV_COSTS, SPV_REQUIREMENTS } from "@/lib/apply-spv";
-
-/**
- * Public guide: how a company incorporated outside Serbia (or a founder
- * without a company) issues on Manci, through a Serbian SPV that Manci
- * incorporates and administers for the issuance. The /apply panel for the
- * same applicants (lib/apply-spv.ts) links here and shares its lists.
- *
- * Issuance is a core area that KYC-only mode pauses (lib/features.ts
- * scopeEnabled("issuance")): while it is paused the page carries the same
- * "Paused." notice as every paused page, the button into /apply is hidden
- * (navHrefVisible), and menus leave the guide out (KYC_ONLY_NAV_PREFIXES).
- *
- * Careful, factual copy only: what the platform does (the SPV registry and
- * its rolling cap, migrations 0018 / 0066), what is off-chain (notary
- * certification and the APR registration), and costs as the pricing page
- * states them. What holders can claim is the issuance's documents' business,
- * as /legal-structure says. Listed in the PR under "Copy for counsel review".
- */
 
 const PAUSED_STATE: ModuleRouteState = {
   route: { prefix: "/solutions/serbian-spv", modules: ["issuance"], mode: "notice" },
@@ -44,109 +12,137 @@ const PAUSED_STATE: ModuleRouteState = {
 };
 
 export function generateMetadata(): Metadata {
-  // As the guides of what KYC-only mode pauses: said in the description,
-  // out of search results (and lib/sitemap.ts) while paused.
   const shown = navHrefVisible("/solutions/serbian-spv");
   return {
     title: "Issuing through a Serbian SPV — Manci",
     description: shown
-      ? "For companies incorporated outside Serbia: company ownership, debt and revenue share are issued through a Serbian SPV that Manci incorporates and administers for the issuance. Third-party costs are quoted before any work starts."
+      ? "A Serbian special purpose vehicle (SPV) becomes the company behind your token. Your project gets the same model which Manci used: a right to convert and government registers anyone can check."
       : "Issuing through a Serbian SPV is not available at the moment.",
     ...(!shown && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
 }
 
 export default function SerbianSpvGuidePage() {
-  const paused = !scopeEnabled("issuance");
-  const registryGuide = "/solutions/issuer-registry";
   return (
     <>
       <PageHeader
         eyebrow="Onboarding / Platform guide"
-        title="Issuing through a Serbian SPV"
-        lede="Company ownership, debt and revenue share on Manci are issued by a Serbian company. If yours is incorporated elsewhere, or you do not have a company yet, Manci incorporates a Serbian special-purpose vehicle (SPV) and administers it for the issuance."
-      >
-        <ButtonRow>
-          {navHrefVisible(MX_ROUTES.apply) && <Button href={MX_ROUTES.apply}>Apply to issue</Button>}
-          <Button href={MX_ROUTES.contact} variant="ghost">
-            Ask a question first
-          </Button>
-        </ButtonRow>
-      </PageHeader>
+        title="No Serbian company? Use a Serbian SPV."
+        lede="A Serbian special purpose vehicle (SPV) becomes the company behind your token. Your project gets the same model which Manci used: a right to convert and government registers anyone can check."
+      />
 
-      {paused && (
+      {!scopeEnabled("issuance") && (
         <Section>
           <PilotModuleNotice state={PAUSED_STATE} gate />
         </Section>
       )}
 
+      <Section>
+        <H2>Who it&apos;s for</H2>
+        <Bullets className="mt-4">
+          <li>A company incorporated outside Serbia.</li>
+          <li>Founders who don&apos;t have a company yet.</li>
+        </Bullets>
+        <Body className="mt-4">
+          Already have a Serbian company? Skip this page. You issue directly.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>Your project, a Serbian vehicle</H2>
+        <Body className="mt-4">
+          You don&apos;t need to move your business to Serbia. The SPV will own what the issuance needs: a stake in
+          your foreign company, specific assets, intellectual property or contractual rights. You decide what goes
+          in.
+        </Body>
+        <Body className="mt-4">
+          When investors convert, they become registered owners of the Serbian SPV.
+        </Body>
+      </Section>
+
       <Section id="workflow">
         <H2>How it works</H2>
-        <Steps
-          className="mt-6"
-          items={[
-            {
-              title: "Apply and choose the SPV",
-              body: `In the application, say where your company is incorporated and tick “${SPV_CHOICE_LABEL}” A founder applying as an individual always issues through an SPV.`,
-            },
-            {
-              title: "Review and quote",
-              body: "A person reviews the application. Before any work starts, you receive a quote for the third-party costs of your engagement.",
-            },
-            {
-              title: "Incorporation, off-chain",
-              body: "Manci prepares the SPV's founding documents. The signatures are certified by a notary and the company is registered with the Serbian Business Registers Agency (APR). These steps happen outside the platform.",
-            },
-            {
-              title: "Issuance",
-              body: "The SPV becomes the issuer on Manci and follows the usual issuer process: company verification (KYB), the asset and its share classes, then the approved placement.",
-            },
-            {
-              title: "Administration",
-              body: "Manci administers the SPV for the issuance. What holders can claim, and how, is set out in the issuance's documents before anything is placed.",
-            },
-          ]}
-        />
+        <ol className="mx-body mt-4 list-decimal space-y-3 pl-6">
+          <li>
+            <strong>Apply.</strong> Tell us about your project and choose who sets up the SPV: our partners or your own lawyer.
+          </li>
+          <li>
+            <strong>Get a quote.</strong> A person reviews your application. Third-party costs are quoted before any work starts.
+          </li>
+          <li>
+            <strong>Incorporate.</strong> The SPV&apos;s founding documents are signed and filed with the Serbian Business Registers Agency
+            (BRA), which decides on the incorporation application within five working days of filing.
+          </li>
+          <li>
+            <strong>Structure.</strong> Define what the SPV owns, what the tokens give investors and how much equity you want to tokenize.
+          </li>
+          <li>
+            <strong>Issuance.</strong> Complete the usual verification and issuance steps on Manci.
+          </li>
+          <li>
+            <strong>Run it.</strong> Like every other  company, the SPV needs to do accounting and files annual financial statements with
+            BRA. We can recommend lawyers and accountants in Serbia, or you can use your own. Conversions are
+            registered with BRA as they come in.
+          </li>
+        </ol>
       </Section>
 
       <Section id="requirements">
-        <H2>What you will need to provide</H2>
-        <Body className="mt-3">The exact list is confirmed for your engagement. It usually includes:</Body>
-        <Bullets className="mt-4 max-w-[760px]" items={[...SPV_REQUIREMENTS]} />
+        <H2>What you&apos;ll need</H2>
+        <Body className="mt-4">
+          The exact list is confirmed for your case. It usually includes:
+        </Body>
+        <Bullets className="mt-4">
+          <li>Identity verification on Manci: KYC for individuals, KYB for companies.</li>
+          <li>Your company&apos;s registry extract and articles of association, if applicable.</li>
+          <li>Information on who owns and controls the company: shareholders, beneficial owners and directors.</li>
+          <li>The decision of your company&apos;s competent body approving the issuance, where applicable.</li>
+          <li>The issuance terms: what rights the token gives, the amount and the price.</li>
+          <li>Set of documents for the BRA.</li>
+        </Bullets>
       </Section>
 
       <Section id="details">
-        <H2 className="mb-6">Details to check</H2>
-        <Grid cols={2}>
-          <Card title="Costs" body={SPV_COSTS} />
-          <Card
-            title="A cap per SPV"
-            body="Issuance through each SPV is capped at EUR 3 million in any rolling 12 months. The platform checks the cap before a sale is approved and before new tokens are created for a direct distribution."
-          />
-          <Card
-            title="Already a Serbian company?"
-            body="A company incorporated in Serbia issues directly as the issuer, without an SPV. It goes through the same verification and issuance steps."
-          />
-          <Card
-            title="Built per issuance"
-            body="The structure is put together for each issuance rather than assumed once for everyone. Whether an instrument needs an SPV, and what the SPV's role is, is confirmed for your case during the engagement."
-          />
-        </Grid>
-      </Section>
-
-      <Section id="references">
-        <H2>Related reference</H2>
-        <Body className="mt-3">
-          Read the <TextLink href="/legal-structure">legal structure</TextLink>{" "}
-          behind a token and how <TextLink href="/pricing">fees and costs</TextLink>{" "}
-          are charged.
-          {navHrefVisible(registryGuide) ? (
-            <>
-              {" "}The <TextLink href={registryGuide}>issuer registration guide</TextLink> covers
-              verification and the issuer record.
-            </>
-          ) : null}
+        <H2>Good to know</H2>
+        <Bullets className="mt-4">
+          <li>
+            <strong>Costs.</strong> Incorporation, notary, registry fees, translations and legal drafting are third-party costs, quoted
+            up front.
+          </li>
+          <li>
+            <strong>Platform limit.</strong> Quick &amp; easy to do: up to EUR 3,000,000 per issuer or its SPV in any 12 months. Higher value
+            tokenisation are possible, but require additional checks.
+          </li>
+          <li>
+            <strong>Minimum share capital.</strong> A Serbian limited liability company (d.o.o.) can be set up with a minimum share capital of RSD 100
+            (about USD 1).
+          </li>
+          <li>
+            <strong>No Serbian partner needed.</strong> Foreign individuals and companies can own 100% of a Serbian d.o.o.
+          </li>
+          <li>
+            <strong>A real bank account.</strong> It’s easy for Serbian companies to open bank accounts, so your SPV will operate inside the regular
+            banking system. Many offshore companies struggle to get a bank account.
+          </li>
+          <li>
+            <strong>Fiat on- and off-ramps.</strong> The SPV can convert crypto into fiat and back to crypto through licensed local providers, such as
+            ECD and Crypto12, both authorised by the National Bank of Serbia.
+          </li>
+          <li>
+            <strong>Your stake, your call.</strong> You decide how much of the SPV&apos;s equity to tokenize. The rest stays in your hands.
+          </li>
+          <li>
+            <strong>Built per issuance.</strong> What the SPV holds and what holders can claim is set out in the issuance documents and can be
+            structured differently for different projects.
+          </li>
+        </Bullets>
+        <Body className="mt-4">
+          Why Serbia, and how conversion works: <TextLink href="/legal-structure">Legal structure</TextLink>
         </Body>
+        <ButtonRow>
+          <Button href={MX_ROUTES.apply}>Apply to issue</Button>
+          <Button href={MX_ROUTES.contact} variant="ghost">Ask a question first</Button>
+        </ButtonRow>
       </Section>
     </>
   );

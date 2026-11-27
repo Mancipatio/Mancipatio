@@ -167,6 +167,8 @@ describe("the asset guides (/markets/types)", () => {
     const equity = html(await InstrumentPage({ params: Promise.resolve({ slug: "equity" }) }));
     expect(equity).toContain("What it is");
     expect(equity).not.toContain(ASSET_CLASS_NOT_OFFERED);
+    expect(equity).not.toContain("Registered pledge");
+    expect(equity).toContain("Higher value issuances are possible, but require additional checks.");
     expect((await generateMetadata({ params: Promise.resolve({ slug: "equity" }) }) as { robots?: unknown }).robots).toBeUndefined();
   });
 
@@ -185,10 +187,10 @@ describe("the asset guides (/markets/types)", () => {
     expect(hrefs(markup).filter((href) => href.startsWith("/markets/types/"))).toEqual(["/markets/types/equity"]);
     expect(markup).not.toContain(MORE_ASSET_CLASSES_LATER);
     // KYC-only mode (mainnet default): applications are paused, the contact form is not.
-    expect(markup).not.toContain("reads every application");
+    expect(markup).not.toContain("reviews every application");
     expect(markup).toContain("reads every message");
-    const equity = INSTRUMENT_LIST.find((i) => i.slug === "equity")!;
-    for (const set of equity.terms) expect(markup).toContain(set.right);
+    expect(markup).toContain("Own the company. Your token converts into real equity.");
+    expect(markup).not.toContain("<table");
     for (const other of INSTRUMENT_LIST.filter((i) => i.slug !== "equity")) {
       for (const set of other.terms) expect(markup, other.slug).not.toContain(set.right);
     }
@@ -201,7 +203,7 @@ describe("the asset guides (/markets/types)", () => {
     expect(hrefs(markup).filter((href) => href.startsWith("/markets/types/"))).toHaveLength(8);
     expect(markup).not.toContain(MORE_ASSET_CLASSES_LATER);
     expect(markup).toContain("Real estate appears twice");
-    expect(markup).toContain("reads every application");
+    expect(markup).toContain("reviews every application");
   });
 });
 

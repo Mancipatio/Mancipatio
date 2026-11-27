@@ -5,7 +5,6 @@ import {
   Button,
   ButtonRow,
   Card,
-  Eyebrow,
   Facts,
   Grid,
   H2,
@@ -18,6 +17,7 @@ import {
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { KYC_ONLY_MESSAGE, scopeEnabled } from "@/lib/features";
 import { modulesFact } from "@/lib/module-facts";
+import { MANCI_CASE_STUDY_URL } from "@/lib/manci-token";
 import { securityReviewFact } from "@/lib/legal/audit";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import {
@@ -26,25 +26,11 @@ import {
   type Operator,
 } from "@/lib/legal/operator";
 
-/**
- * "About" — prototype `#page-about`.
- *
- * The prototype's headline ("Three people, one thesis.") and its team section
- * were a brief, not content: they needed real names and roles, and the
- * prototype's own rule is that an unsupported claim renders as nothing. The
- * team below is the company's own statement (2026-11-24): who holds which
- * role, and each person's lines as the company gave them, word for word.
- * Manci is operated by the entity lib/legal/operator.ts names. Everything else
- * is copy this site already carried, or a statement the prototype itself makes.
- *
- * The two pieces of the brief that *can* be honoured are here: one paragraph
- * on why the structure comes before the code, and one honest line on where the
- * platform actually is.
- */
+const INTRO = "Manci is tokenization infrastructure on Solana, built in-house end to end. It turns equity in real companies into tokens, and tokens back into registered ownership.";
+
 export const metadata: Metadata = {
   title: "About — Manci",
-  description:
-    "Why Manci starts with the legal structure rather than the token, and where the platform actually is today.",
+  description: INTRO,
 };
 
 /** Who holds which role at Manci and what each brings, as the company states it. */
@@ -52,26 +38,17 @@ const TEAM = [
   {
     name: "Mladen Rakić",
     role: "CEO and CTO",
-    lines: [
-      "Founded and exited two companies: betting and data/video distribution",
-      "Designed and built both Solana programs and the full platform",
-    ],
+    bio: "Founded and exited two companies, in betting and in data and video distribution. Designed and built both Solana programs and the full platform.",
   },
   {
     name: "Vladimir Rajković",
     role: "Chief Legal Officer",
-    lines: [
-      "Lawyer; legal advisor to Superteam Balkan",
-      "Legal structuring, white papers and the regulatory path",
-    ],
+    bio: "Attorney-at-law and legal advisor to Superteam Balkan. Focused on digital assets and cross-border structuring. Co-designed Manci's legal model, from token issuance to registered ownership.",
   },
   {
     name: "Miloš Pavlović",
     role: "COO",
-    lines: [
-      "Angel investor in crypto",
-      "Based in New York: operations, partnerships and the issuer pipeline",
-    ],
+    bio: "Angel investor in crypto. Based in New York: operations, partnerships and the issuer pipeline.",
   },
 ];
 
@@ -87,7 +64,9 @@ function operatorFacts(operator: Operator): string[] {
   if (!hasOperatorEntity(operator)) {
     return ["Pilot stage: no operating company designated yet"];
   }
-  const facts = [`Operated by ${operator.legalName?.trim()}`];
+  const name = operator.legalName?.trim().replace(/Ltd\.$/, "Ltd");
+  const country = operator.registeredOffice?.endsWith("British Virgin Islands") ? " (BVI)" : "";
+  const facts = [`Operated by ${name}${country}`];
   if (operator.licence) {
     facts.push(
       `Licence: ${operator.licence.authority}, decision ${operator.licence.decisionNumber}`,
@@ -105,7 +84,8 @@ const WHERE_THINGS_STAND = [
     ? `${MX_NETWORK_STAGE_LABEL} — nothing is issued live yet`
     : MX_NETWORK_STAGE_LABEL,
   ...operatorFacts(OPERATOR),
-  `Two on-chain programs, deployed on Solana ${NETWORK}`,
+  "First conversion completed: a MANCI token holder became a registered member of Mancipatio d.o.o. Beograd, recorded by Serbian Business Registers Agency on 9 October 2026",
+  `Two smart contracts deployed on Solana ${NETWORK}`,
   securityReviewFact(),
   "Asset registry, Token-2022 mints and program-owned custody",
   modulesFact(NETWORK),
@@ -118,83 +98,85 @@ export default function AboutPage() {
       <PageHeader
         eyebrow="About"
         title="Ownership, transferred properly."
-        lede="Manci is tokenization infrastructure on Solana — built so that issuing, regulating and trading a real asset on-chain is as rigorous as doing it on paper, and far faster."
+        lede={INTRO}
       />
 
       <Section>
         <H2>The name</H2>
         <Body className="mt-4">
-          Manci is short for <em>mancipatio</em>, the formal ceremony in Roman
-          law that transferred ownership of the most valuable kinds of property —
-          land, buildings, the things that mattered. It was deliberate,
-          witnessed and final. We took the name because that is what tokenized
-          ownership should be: a transfer that is precise, transparent and
-          binding.
+          Manci is short for <em>mancipatio</em>, the formal ceremony in ancient Rome that
+          was used to transfer ownership of the most valuable property: land, buildings, cows,
+          the things that actually mattered at the time. It was deliberate and final.
+          That is what tokenized ownership should be.
         </Body>
 
         <H2 className="mt-10">The mission</H2>
         <Body className="mt-4">
-          Bring asset issuance, verification, document review and ownership
-          records into one workspace. Each available service follows the
-          approved terms of the issuance.
+          Give anyone with a wallet a real path to owning part of a company, and give
+          companies a new way to raise from the people who believe in them.
         </Body>
 
         <H2 className="mt-10">Why the structure comes first</H2>
         <Body className="mt-4">
-          Minting a token takes minutes. Making it mean something takes a legal
-          structure a court will recognise: an issuer that is bound by the right
-          the token carries, and a documented route to enforcement if it
-          doesn&apos;t perform. We design that structure first and let the
-          programs enforce what it already says.
+          Minting a token takes minutes. Making it mean something takes a legal structure
+          that real courts recognise: a token issuer bound by the right the token carries
+          and a public register at the end. We build the legal structure
+          first, then the technology around it.
         </Body>
         <Body className="mt-3.5">
-          That is also why compliance isn&apos;t bolted on afterwards. It is
-          wired into the mint itself, custody is owned by the program rather
-          than by a wallet, and every authority is role-gated.
+          Compliance is wired into the mint itself, custody is held by the program rather
+          than a wallet, and every authority is role-gated.{" "}
+          <TextLink href={MX_ROUTES.security}>How compliance is enforced</TextLink>
         </Body>
-        <p className="mt-5">
-          <TextLink href={MX_ROUTES.security}>
-            How compliance is enforced →
-          </TextLink>
-        </p>
+      </Section>
+
+      <Section>
+        <H2>Built as infrastructure</H2>
+        <Body className="mt-4">
+          Manci isn&apos;t a front end on someone else&apos;s protocol. We made our own
+          Solana infrastructure, and the whole platform runs on them:
+        </Body>
+        <Bullets className="mt-4" items={[
+          "On-chain smart contracts",
+          "Token-2022 issuance with compliance built in",
+          "Program-owned custody and smart-contract escrow",
+          "Primary sales and peer-to-peer settlement",
+          "Token holder governance and asset lifecycle tools",
+          "A legal framework that connects on-chain tokens to registered ownership",
+        ]} />
+        <Body className="mt-4">
+          The architecture is built to support more asset classes. Company ownership is the first one live.
+        </Body>
       </Section>
 
       <Section id="team">
         <H2>The team</H2>
-        <Grid cols={2} className="mt-5">
+        <Grid cols={3} className="mt-5">
           {TEAM.map((person) => (
-            <Card key={person.name} title={person.name} body={person.role}>
-              <Bullets className="mt-3" items={person.lines} />
-            </Card>
+            <Card
+              key={person.name}
+              title={<>{person.name}<span className="font-normal">, {person.role}.</span></>}
+              body={person.bio}
+            />
           ))}
         </Grid>
       </Section>
 
       <Section variant="dark">
-        <Eyebrow>The honest line</Eyebrow>
         <H2 className="mb-7">Where things stand</H2>
         <Facts items={WHERE_THINGS_STAND} />
         <SecurityAuditReportLink className="mt-7" />
-        <p className="mt-7">
-          <TextLink href={MX_ROUTES.company}>Company and licence →</TextLink>
+        <p className="mt-7 flex flex-wrap gap-x-5 gap-y-2">
+          <TextLink href={MANCI_CASE_STUDY_URL}>See the MANCI case study</TextLink>
+          <TextLink href={MX_ROUTES.company}>Company details</TextLink>
         </p>
+        {ISSUANCE_OPEN && (
+          <ButtonRow>
+            <Button href={MX_ROUTES.apply}>Apply to issue</Button>
+            <Button href={MX_ROUTES.instruments} variant="ghost">See the asset types</Button>
+          </ButtonRow>
+        )}
       </Section>
-
-      {ISSUANCE_OPEN && (
-      <Section>
-        <H2>Two ways in.</H2>
-        <Body className="mt-4">
-          Issuers apply and a person reads every application. Investors can join
-          the list and we&apos;ll notify them when the first offering opens.
-        </Body>
-        <ButtonRow>
-          <Button href={MX_ROUTES.apply}>Apply to issue</Button>
-          <Button href={MX_ROUTES.instruments} variant="ghost">
-            See the asset types
-          </Button>
-        </ButtonRow>
-      </Section>
-      )}
       {/* KYC-only mode: sign-up and identity verification are the way in. */}
       {!ISSUANCE_OPEN && (
         <Section>

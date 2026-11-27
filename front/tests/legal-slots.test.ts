@@ -857,10 +857,10 @@ describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
     expect(modulesFact("mainnet")).toBe(
       "Primary sales available",
     );
-    expect(modulesFact("devnet")).toBe("Primary sales, OTC settlement, governance and vesting available");
+    expect(modulesFact("devnet")).toBe("Primary sales, DeFi OTC, governance and vesting available");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_SECONDARY_TRADING", "true");
     expect(modulesFact("mainnet")).toBe(
-      "Primary sales and OTC settlement available",
+      "Primary sales and DeFi OTC available",
     );
     modulesOff();
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
@@ -868,8 +868,8 @@ describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
     const { default: AboutPage } = await import("@/app/(marketing)/about/page");
     const text = visibleText(renderToStaticMarkup(createElement(AboutPage)));
     expect(text).toContain("Primary sales available");
-    expect(text).not.toContain("governance");
-    expect(text).not.toContain("vesting");
+    expect(text).toContain("Token holder governance and asset lifecycle tools");
+    expect(text).not.toMatch(/(?:governance|vesting) available/);
   });
 
   it("instrument and verification copy claims no trading, conversion, distribution or delivery that is switched off", () => {

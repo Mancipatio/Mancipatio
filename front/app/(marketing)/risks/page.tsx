@@ -1,35 +1,12 @@
 import type { Metadata } from "next";
-import {
-  Body,
-  Disclaimer,
-  MX_ROUTES,
-  PageHeader,
-  Section,
-  SectionHead,
-  TextLink,
-} from "@/components/mx";
-import { detectNetwork, isTestNetwork } from "@/lib/network";
-import { securityReviewStatement } from "@/lib/legal/audit";
+import { Body, Bullets, H2, PageHeader, Section, TextLink } from "@/components/mx";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
-import { NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
+import { SECURITY_AUDIT, securityReviewStatement } from "@/lib/legal/audit";
+import { detectNetwork, isTestNetwork } from "@/lib/network";
 
-/**
- * "What can go wrong" — prototype `#page-risks`.
- *
- * The prototype ships the header only; the brief for the body is: name each
- * risk plainly, say what it means for a holder, and don't soften it. Every
- * statement below is one the site already makes elsewhere (the investor page's
- * "Before you join", the issuance flow, the fungible-asset redemption rule,
- * the devnet stage) — nothing here is a new product claim, and no risk is
- * hedged with a reassurance. The program-security sentence follows
- * lib/legal/audit.ts (no external audit is claimed before one exists), and
- * the investor-protection sentence is the purchase risk warning's
- * (lib/legal/risk-warning.ts).
- */
 export const metadata: Metadata = {
   title: "Risk disclosure — Manci",
-  description:
-    "Illiquidity, issuer default, conversion friction, regulatory change and the current development stage — including the possibility of total loss.",
+  description: "Equity tokens on Manci come with a real right to equity. They are still an investment in a private company, and you can lose some or all of your investment.",
 };
 
 export default function RisksPage() {
@@ -38,137 +15,134 @@ export default function RisksPage() {
     <>
       <PageHeader
         eyebrow="Risk disclosure"
-        title="What can go wrong"
-        lede="Illiquidity, issuer default, conversion friction and the off-chain dependency, regulatory change, and the current development stage — including the possibility of total loss."
+        title="Know the risks."
+        lede="Equity tokens on Manci come with a real right to equity. They are still an investment in a private company, and you can lose some or all of your investment."
       />
 
       <Section>
-        <SectionHead title="These instruments are illiquid" />
+        <H2>The short version</H2>
+        <Bullets className="mt-4">
+          <li>Only invest what you can afford to lose.</li>
+          <li>There may be no buyers when you want to sell.</li>
+          <li>Read the issuance documents. They decide what rights the token gives you..</li>
+        </Bullets>
+      </Section>
+
+      <Section>
+        <H2>The business behind the token can fail</H2>
         <Body className="mt-4">
-          There is no exchange listing and no guaranteed buyer. You may not be
-          able to sell when you want to, or at all, and there is no reference
-          price to sell against.
-        </Body>
-        <Body className="mt-3.5">
-          Holders can post what they hold on the resell board, but a posting is
-          not a bid. A sale happens only if a buyer turns up and agrees terms.
+          Most early-stage companies don&apos;t make it. If the company behind your token fails, its equity can
+          become worthless, and so can your token. Payouts, where an issuer offers them, depend on the issuer and are
+          not guaranteed. The information an issuer provides may also be incomplete or wrong.
         </Body>
       </Section>
 
       <Section>
-        <SectionHead title="Distributions depend on the issuer paying" />
+        <H2>Enforcing a registered lien</H2>
         <Body className="mt-4">
-          Where an instrument pays income, nothing moves until the issuer
-          deposits the funds. The contract distributes what arrives; it cannot
-          create money that was never sent.
-        </Body>
-        <Body className="mt-3.5">
-          If the issuer doesn&apos;t pay, holders have legal recourse against
-          the issuer. Recourse is a claim, not a payment: pursuing it takes
-          time, costs money, and can end without recovery.
+          If the token issuer refuses to transfer the equity, a registered lien can be enforced under the issuance documents.
+          Enforcement takes time and money, may involve the Serbian courts, and the proceeds may not cover your
+          investment.
         </Body>
       </Section>
 
       <Section>
-        <SectionHead title="Conversion runs through an off-chain legal process" />
+        <H2>You may not be able to sell</H2>
         <Body className="mt-4">
-          Conversion into shares is not automatic and does not happen on-chain.
-          It goes through the standard legal share-transfer procedure, which
-          depends on the issuer and its founders doing their part.
-        </Body>
-        <Body className="mt-3.5">
-          If they won&apos;t facilitate the transfer, the holder&apos;s route is
-          legal recourse against them. Where a share pledge is registered in
-          holders&apos; favour, that is what gives the recourse teeth. Where one
-          isn&apos;t registered, there is no collateral standing behind the
-          claim.
-        </Body>
-        <p className="mt-5">
-          <TextLink href={MX_ROUTES.legalStructure}>
-            How the rights bind the issuer →
-          </TextLink>
-        </p>
-      </Section>
-
-      <Section>
-        <SectionHead title="Conversion and delivery require verification" />
-        <Body className="mt-4">
-          Tokens are bearer instruments and, unless the class is KYC-gated,
-          can be bought and traded without identity verification, but
-          converting them into company shares or redeeming a physical asset
-          requires it. A token can therefore reach
-          a wallet that cannot convert or redeem it until its holder passes
-          verification, and a buyer who expects to convert or redeem should
-          check that they can before buying.
-        </Body>
-        <Body className="mt-3.5">
-          Manci does not move the goods. Delivery is arranged with the
-          issuer, and a cancelled delivery returns the tokens rather than the
-          asset.
+          Trading on DeFi OTC depends on someone wanting to buy. There is no guaranteed buyer or price. After
+          conversion, your stake isn&apos;t listed anywhere: selling it needs to follow the official procedure.
         </Body>
       </Section>
 
       <Section>
-        <SectionHead title="The platform can freeze an issuer's proceeds" />
+        <H2>Conversion takes time and paperwork</H2>
         <Body className="mt-4">
-          A Manci admin can freeze the proceeds of one issuer, for example on
-          suspicion of fraud. Its sales stop and nothing is paid out to it
-          until the Super Admin lifts the freeze. Money you already paid into
-          that issuer&apos;s sale stays locked in the sale&apos;s escrow for as
-          long as the freeze lasts: it is not refunded to you, and there is no
-          instruction that returns it. You keep the units you bought.
-        </Body>
-        <Body className="mt-3.5">
-          An OTC deal cannot expire while one of its parties is on the
-          blocklist: a Manci admin cancels it, which returns the deposits.
-          Until an admin does, your deposit stays in the deal&apos;s escrow.
+          Converting needs KYC, signatures and APR registration, and it can involve delays, costs or disputes. Your
+          tokens sit in a smart contract escrow until it&apos;s done. If you can&apos;t pass KYC, you can&apos;t
+          convert, and your tokens can be returned to you from the escrow.
         </Body>
       </Section>
 
       <Section>
-        <SectionHead title="The regulatory position can change" />
+        <H2>Technology risk</H2>
         <Body className="mt-4">
-          Company ownership, debt and revenue share are issued through a
-          Serbian SPV, capped at EUR 3 million per SPV per year. Some issues
-          require whitepaper approval from the Serbian Securities Commission,
-          and approval is not guaranteed.
-        </Body>
-        <Body className="mt-3.5">
-          The rules that apply to tokenized instruments are still developing. A
-          change in law or in regulator practice can affect what may be issued,
-          who may hold it, and what an issuer has to do.
-        </Body>
-      </Section>
-
-      <Section>
-        <SectionHead title="The platform is at an early stage" />
-        <Body className="mt-4">
-          {isTestNetwork(network)
-            ? `The platform runs on Solana ${network} at v0.1. Nothing is issued live, tokens minted today carry no economic value, and the product can change.`
-            : `The platform runs on Solana ${network} at v0.1, and the product can change.`}
-        </Body>
-        <Body className="mt-3.5">
-          Software can contain defects. {securityReviewStatement()}
+          Tokens are issued on the Solana blockchain. Smart contract bugs, network outages or a lost wallet can cost
+          you access to your tokens. Lose your keys and Manci may not be able recover them for you (check the
+          recovery rules for each issued token). Stablecoins used for payments, such as USDC, carry their own risks,
+          including losing their peg.{" "}
+          {SECURITY_AUDIT ? securityReviewStatement() : "Manci's smart contracts have not yet undergone an independent security audit."}
         </Body>
         <SecurityAuditReportLink className="mt-3.5" />
+        {isTestNetwork(network) && (
+          <Body className="mt-4">
+            This is Solana {network}. Tokens on this test network have no economic value.
+          </Body>
+        )}
       </Section>
 
       <Section>
-        <SectionHead title="You can lose everything" />
+        <H2>Compliance controls can affect your tokens</H2>
         <Body className="mt-4">
-          Tokenized instruments carry risk, including total loss of the amount
-          committed. Do not commit money you cannot afford to lose entirely.
+          Manci runs on-chain compliance controls. These controls protect the platform but can also affect your
+          rights and access to your tokens:
         </Body>
-        <Body className="mt-3.5">{NO_INVESTOR_PROTECTION}</Body>
-        <p className="mt-5">
-          <TextLink href={MX_ROUTES.instruments}>
-            What each instrument actually carries →
-          </TextLink>
-        </p>
-        <Disclaimer className="mt-7">
-          Nothing on this page is investment, legal or tax advice, and nothing
-          here is an offer to sell securities.
-        </Disclaimer>
+        <Bullets className="mt-4">
+          <li>
+            <strong>Sanctions blacklist.</strong> A blacklisted wallet can&apos;t send tokens. Manci can move the tokens into a quarantine vault and
+            they may be burned.
+          </li>
+          <li>
+            <strong>Emergency pause.</strong> Manci can pause activity on the platform, such as primary sales and trading through Manci. Exits and
+            wallet-to-wallet transfers keep working.
+          </li>
+          <li>
+            <strong>Issuer proceeds freeze.</strong> Manci can freeze an issuer&apos;s proceeds. Money already paid into that issuer&apos;s sale then
+            stays locked in escrow: it isn&apos;t paid to the issuer and isn&apos;t refunded while the freeze
+            lasts.
+          </li>
+          <li><strong>Upgrades.</strong> Manci&apos;s on-chain programs can be upgraded.</li>
+        </Bullets>
+        <Body className="mt-4">
+          The sanctions blacklist and the emergency pause apply across the platform. Other controls can vary between issuances: which controls apply, when they can be used and what they mean for your rights are set out in the token&apos;s issuance documents. The technical details are on <TextLink href="/security">Security &amp; controls</TextLink>.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>The platform may stop operating</H2>
+        <Body className="mt-4">
+          Manci may have outages or stop operating. Before conversion, that can affect trading, escrow and
+          conversion. After conversion, your ownership is recorded in the state register and doesn&apos;t depend on
+          Manci.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>Rules can change</H2>
+        <Body className="mt-4">
+          Digital asset laws in Serbia and elsewhere keep changing. Tokens may be restricted in your country.
+          Checking that, and paying any tax, is your responsibility.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>No safety net</H2>
+        <Body className="mt-4">
+          Tokens are not bank deposits. Serbian rules on deposit insurance, investor protection and financial
+          services consumer protection don&apos;t apply to digital asset transactions, and no Serbian public
+          authority guarantees the value of your tokens.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>What Manci does and doesn&apos;t do</H2>
+        <Body className="mt-4">
+          Manci verifies issuers and manages the issuance, the escrow and the burn. Verification is not an
+          endorsement of the business or its prospects, and Manci doesn&apos;t give investment advice. Before
+          conversion, your rights are set out in the issuance documents.
+        </Body>
+        <Body className="mt-4">
+          Not sure? Talk to an independent adviser before you invest.
+        </Body>
       </Section>
     </>
   );
