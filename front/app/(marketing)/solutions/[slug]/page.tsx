@@ -48,29 +48,47 @@ type ToolGuide = {
   /** `onlyIf`: the card shows only while that page's module is on (lib/pilot-scope.ts). */
   details: { title: string; body: ReactNode; onlyIf?: string }[];
   steps?: StepItem[];
+  beforeRegistration?: StepItem[];
+  related?: { href: string; label: string }[];
 };
 
 // Each guide owns its operational details once. Shared security and legal
 // explanations stay in their canonical references instead of repeated FAQs.
 const GUIDES: Record<string, ToolGuide> = {
   "issuer-registry": {
-    intro:
-      "Register the legal entity behind an asset and follow its business-verification status before issuance.",
+    intro: "Register the issuer behind an asset and follow its verification before issuance.",
     appHref: "/apply",
     appLabel: "Apply to issue",
+    beforeRegistration: [
+      { title: "Sign in.", body: "Connect your Solana wallet and sign in by signing a message." },
+      {
+        title: "Verify your account.",
+        body: <>Complete the required KYC or KYB verification in the <TextLink href="/issuer">issuer workspace</TextLink>.</>,
+      },
+      {
+        title: "Apply.",
+        body: <>Once your account is verified, <TextLink href="/apply">submit your application</TextLink> and follow its review status.</>,
+      },
+    ],
     details: [
       {
-        title: "Issuer identity",
-        body: "The registry records a legal entity ID and jurisdiction. Assets and their share classes link back to that issuer account.",
+        title: "Issuer identity.",
+        body: "Each issuer has a registry account that links its assets and their share classes to its verified identity.",
       },
       {
-        title: "Issuer permissions",
-        body: "The current issuer wallet must sign its actions. The Super Admin can grant or revoke separate Mint, Metadata and Conversion permissions. A separate global Admin role must be removed separately; KYB approval alone does not grant every operating permission.",
+        title: "Permissions.",
+        body: "The issuer's current wallet signs its actions. The Super Admin can grant or revoke separate Mint, Metadata and Conversion permissions. The global Admin role must be revoked independently. KYB approval alone doesn't grant every operating permission.",
       },
       {
-        title: "Status and suspension",
-        body: "An issuer can be Pending, Verified, Rejected or Suspended. Current Verified status is required for new issuance and primary purchases. Suspension blocks those actions without removing existing token balances.",
+        title: "Status and suspension.",
+        body: "An issuer can be Pending, Verified, Rejected or Suspended. Current Verified status is required for new issuance and primary purchases. Suspension blocks those actions but doesn't remove existing token balances.",
       },
+    ],
+    related: [
+      { href: "/how-it-works", label: "Issuing an asset" },
+      { href: "/solutions/tokenization", label: "Asset registration" },
+      { href: "/security", label: "Security & controls" },
+      { href: "/legal-structure", label: "Legal structure" },
     ],
   },
   tokenization: {
@@ -424,6 +442,12 @@ export default async function SolutionPage({
         </ButtonRow>
       </PageHeader>
 
+      {guide.beforeRegistration && (
+        <Section>
+          <H2>Before you register</H2>
+          <Steps className="mt-6" items={guide.beforeRegistration} />
+        </Section>
+      )}
       <Section id="workflow">
         <H2>{isVesting ? "Vesting series workflow" : "Workflow"}</H2>
         <Steps className="mt-6" items={conversionOnly ? conversionSteps : guide.steps ?? sourceSteps} />
@@ -451,13 +475,19 @@ export default async function SolutionPage({
       </Section>
 
       <Section id="references">
-        <H2>Related reference</H2>
-        <Body className="mt-3">
+        <H2>{guide.related ? "Related" : "Related reference"}</H2>
+        {guide.related ? (
+          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2">
+            {guide.related.filter(({ href }) => navHrefVisible(href)).map(({ href, label }) => (
+              <TextLink key={href} href={href}>{label}</TextLink>
+            ))}
+          </div>
+        ) : <Body className="mt-3">
           Read the shared rules for{" "}
           <TextLink href="/security">security and compliance</TextLink> and the{" "}
           <TextLink href="/legal-structure">legal structure</TextLink> that
           connects token terms to the underlying instrument.
-        </Body>
+        </Body>}
       </Section>
     </>
   );

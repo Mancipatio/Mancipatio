@@ -49,6 +49,8 @@ import { SupplyConversionsPanel } from "@/components/supply-conversions-panel";
 import { AssetLogo } from "@/components/asset-logo";
 import { AssetRoles } from "@/components/asset-roles";
 import { AssetCompany } from "@/components/asset-company";
+import { ManciCaseStudy } from "@/components/manci-case-study";
+import { MANCI_MAINNET_ASSET } from "@/lib/manci-token";
 import {
   assetKindLabel,
   countryLabel,
@@ -213,6 +215,8 @@ export default function AssetDetailPage({
   const country = countryLabel(issuerFacts?.jurisdiction);
   const verified = issuerFacts?.kybStatus === 1;
   const companyShares = asset.assetType === AssetType.Equity;
+  const manciCaseStudy = assetPda === MANCI_MAINNET_ASSET && profile?.network === "mainnet";
+  const conversionHref = profile?.convertible !== false && navHrefVisible("/portfolio/conversion") ? "/portfolio/conversion" : null;
   // The document that sets the token's terms, fixed on chain by its SHA-256 (none recorded: all zeros).
   const legalDocBytes = Array.from(asset.legalDocHash);
   const legalDocHash = legalDocBytes.some((byte) => byte !== 0)
@@ -254,15 +258,19 @@ export default function AssetDetailPage({
         </div>
       </div>
 
-      <AssetRoles
-        name={name}
-        companyShares={companyShares}
-        oneTokenPercent={unitPercent(profile?.token_percent_e4)}
-        conversionHref={profile?.convertible !== false && navHrefVisible("/portfolio/conversion") ? "/portfolio/conversion" : null}
-        verified={verified}
-        legalDocRecorded={legalDocHash !== null}
-        companyName={companyName}
-      />
+      {manciCaseStudy ? (
+        <ManciCaseStudy conversionHref={conversionHref} />
+      ) : (
+        <AssetRoles
+          name={name}
+          companyShares={companyShares}
+          oneTokenPercent={unitPercent(profile?.token_percent_e4)}
+          conversionHref={conversionHref}
+          verified={verified}
+          legalDocRecorded={legalDocHash !== null}
+          companyName={companyName}
+        />
+      )}
 
       <AssetCompany
         companyName={companyName}
@@ -272,14 +280,14 @@ export default function AssetDetailPage({
         team={profile?.team}
       />
 
-      <AssetProfileBlock profile={profile} />
+      {!manciCaseStudy && <AssetProfileBlock profile={profile} />}
 
       {/* The record: what is issued, what was converted and where it was registered. */}
       {assetPda && <SupplyConversionsPanel assetPda={assetPda} />}
 
       <ShareClassesBlock asset={asset} data={data} hidden={conversionTargets} />
 
-      <TokenInformationBlock profile={profile} />
+      <TokenInformationBlock profile={profile} information={manciCaseStudy ? profile.description : null} />
 
       {/* Investor relations (lib/issuer-updates.ts): published updates; holders-only ones after an on-chain balance check. */}
       {assetPda && <AssetUpdatesBlock assetPda={assetPda} issuerPda={asset.issuer.toString()} />}
@@ -347,7 +355,7 @@ function whitepaperFileUrl(path: string | null): string | null {
 /** Token information (Flows doc section 10): the token's whitepaper when one
  *  is published — or the note that this page IS the token's official basic
  *  information — plus the Serbian SPV the issuance runs through. */
-function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null }) {
+function TokenInformationBlock({ profile, information }: { profile: PublicAssetProfile | null; information: string | null }) {
   if (!profile) return null;
 
   const isLive =
@@ -372,6 +380,7 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
         Token information
       </h2>
       <div className="mt-4 rounded-[3px] border border-mx-rule bg-white p-6">
+        {information && <p className="mb-3 whitespace-pre-wrap text-sm leading-relaxed text-mx-ink-soft">{information}</p>}
         {hasWhitepaper ? (
           <>
             <div className="flex flex-wrap items-center gap-3">

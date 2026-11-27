@@ -1,27 +1,12 @@
 import type { Metadata } from "next";
-import {
-  Body,
-  Button,
-  ButtonRow,
-  Card,
-  H2,
-  MX_ROUTES,
-  PageHeader,
-  Section,
-  Small,
-  TextLink,
-} from "@/components/mx";
-import { features } from "@/lib/features";
+import { Body, Button, ButtonRow, H2, PageHeader, Section, Small, Steps, TextLink } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { navHrefVisible } from "@/lib/pilot-scope";
 
-// Only the screens this network shows (lib/pilot-scope.ts): KYC-only mode
-// pauses primary sales, and secondary trading has its own switch.
-const screens = [
-  ...(navHrefVisible("/marketplace/launchpad") ? ["sale"] : []),
-  ...(navHrefVisible("/marketplace/otc") ? ["OTC"] : []),
-  "portfolio",
-];
+const sales = navHrefVisible("/marketplace/launchpad");
+const otc = navHrefVisible("/marketplace/otc");
+const conversion = navHrefVisible("/portfolio/conversion");
+const screens = [...(sales ? ["sale"] : []), ...(otc ? ["OTC"] : []), "portfolio"];
 
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
@@ -29,112 +14,58 @@ export const metadata: Metadata = {
     `Find an asset, review its documents, connect your wallet and use the ${screens.length > 1 ? `${screens.slice(0, -1).join(", ")} and ` : ""}${screens[screens.length - 1]} screens.`,
 };
 
-const STEPS = [
-  {
-    title: "01 · Explore the market",
-    body: `Browse assets${navHrefVisible("/marketplace/otc") ? ", open sales and funded OTC offers" : " and open sales"}. Open an asset to review its issuer and available share classes.`,
-    links: [{ label: "Explore markets", href: MX_ROUTES.app }],
-  },
-  {
-    title: "02 · Read the documents",
-    body: "Review the selected issuance's rights, terms and disclosures. Use the asset guide when you need context for its rights.",
-    links: [
-      { label: "Token documents", href: MX_ROUTES.whitepapers },
-      { label: "Asset guides", href: MX_ROUTES.instruments },
-    ],
-  },
-  {
-    title: "03 · Connect your wallet",
-    body: `Connect a Solana wallet using the app's wallet control. Buying tokens does not require identity verification unless the class is KYC-gated. A KYC-gated class requires an approved investor passport, shown in Portfolio.${navHrefVisible("/portfolio/conversion") ? " Complete KYC before requesting conversion of tokens you own into company shares." : ""}${navHrefVisible("/portfolio/delivery") ? " Physical delivery also requires KYC." : ""}`,
-    links: [
-      { label: "Open Portfolio", href: "/portfolio" },
-      { label: "Verification rules", href: MX_ROUTES.security },
-    ],
-  },
-  {
-    title: "04 · Review a purchase",
-    body: "Review the units, payment token, price and whether the class is KYC-gated. For a primary sale, read and accept the displayed document version before signing; the purchase records its version and file hash.",
-    links: [
-      { label: "Primary sales", href: "/marketplace/launchpad" },
-      { label: "OTC offers", href: "/marketplace/otc" },
-    ],
-  },
-];
-
 export default function InvestorsPage() {
   const network = detectNetwork();
+  const steps = [
+    {
+      title: "Find an asset.",
+      body: <>Browse the <TextLink href="/marketplace">marketplace</TextLink>{sales && <>{otc ? ", " : " and "}<TextLink href="/marketplace/launchpad">open sales</TextLink></>}{otc && <> and <TextLink href="/marketplace/otc">funded DeFi OTC offers</TextLink></>}. Each asset shows the company behind it and its share classes.</>,
+    },
+    {
+      title: "Check all sides.",
+      body: <>Read the <TextLink href="/markets/whitepapers">issuance documents</TextLink>: what the token gives you, any payouts and the transfer rules. Then look the company up in the BRA register and the token on Solana. <TextLink href="/legal-structure">Legal structure</TextLink></>,
+    },
+    {
+      title: "Connect your wallet.",
+      body: <>Connect a Solana wallet and sign in by signing a message. Accept the <TextLink href="/legal/terms">Terms and Conditions</TextLink>. Every user goes through sanctions screening. KYC is needed only if the issuance requires it{conversion && ", or when you convert"}.</>,
+    },
+    ...(sales ? [{
+      title: "Buy.",
+      body: "Check the tokens, the price and the eligibility rules. Purchases currently use USDC on Solana, so keep some SOL for network fees. In a primary sale, you accept the issuance documents and separately acknowledge the risks before you sign. The purchase records the document version and its file hash.",
+    }] : []),
+    {
+      title: conversion ? "Hold, sell or convert." : "Hold or sell.",
+      body: <><TextLink href="/portfolio">Portfolio</TextLink> shows your holdings, transactions and issuer announcements, and you can <TextLink href="/portfolio/history">export your history as a CSV file</TextLink>. {conversion
+        ? "Hold, sell under the issuance's transfer rules, or convert: pass KYC, your tokens go into escrow, the transfer is signed and registered with BRA, and the tokens are burned."
+        : "Hold or sell under the issuance's transfer rules."} {navHrefVisible("/markets/types/equity") && <TextLink href="/markets/types/equity">Company ownership</TextLink>}</>,
+    },
+  ];
+
   return (
     <>
       <PageHeader
         eyebrow="Getting started"
         title="Investor guide"
-        lede="Follow an asset from discovery and document review to purchase and your portfolio."
+        lede={sales && conversion ? "From finding a token to owning part of the company, in five steps." : "From finding a token to reviewing your holdings."}
       >
         <ButtonRow>
-          <Button href={MX_ROUTES.app}>Explore markets</Button>
-          <Button href={MX_ROUTES.whitepapers} variant="ghost">
-            Token documents
-          </Button>
+          <Button href="/marketplace">Explore assets</Button>
+          <Button href="/risks" variant="ghost">Read the risk disclosure</Button>
         </ButtonRow>
-        <Small className="mt-5">
-          The app currently runs on Solana {network}.
-          {isTestNetwork(network) && " Test tokens have no economic value."}
-        </Small>
+        {isTestNetwork(network) && <Small className="mt-5">The app currently runs on Solana {network}. Test tokens have no economic value.</Small>}
       </PageHeader>
-
       <Section>
-        <H2>Before your first purchase</H2>
-        <ol className="mt-6 grid gap-4 md:grid-cols-2">
-          {STEPS.map((step) => (
-            <li key={step.title}>
-              <Card title={step.title} body={step.body} className="h-full">
-                <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2">
-                  {/* No link into a module switched off on this network (lib/pilot-scope.ts). */}
-                  {step.links.filter((link) => navHrefVisible(link.href)).map((link) => (
-                    <TextLink key={link.href} href={link.href}>
-                      {link.label} →
-                    </TextLink>
-                  ))}
-                </div>
-              </Card>
-            </li>
-          ))}
-        </ol>
-        <Body className="mt-6">
-          Read the <TextLink href={MX_ROUTES.risks}>risk disclosure</TextLink>{" "}
-          and the selected issuance&apos;s documents before deciding to
-          participate. The{" "}
-          <TextLink href={MX_ROUTES.legalStructure}>legal structure</TextLink>{" "}
-          guide explains where the documented rights are defined.
-        </Body>
+        <H2>{sales ? "Five steps" : "Four steps"}</H2>
+        <Steps className="mt-6" items={steps} />
       </Section>
-
       <Section>
-        <H2>After a purchase</H2>
+        <H2>Before you buy</H2>
         <Body className="mt-4">
-          Use Portfolio to review your holdings and transaction history.
-          If recording is pending, use
-          the saved transaction receipt to retry the record instead of repeating
-          the payment.
+          Read the risk disclosure and the issuance documents. You can lose some or all of your investment. <TextLink href="/risks">Risk disclosure</TextLink>
         </Body>
-        {features().startupRaises && <Body className="mt-4">
-          Startup payout-vault entitlements follow their saved original-investor
-          snapshot, even if token balances later change. Read the{" "}
-          <TextLink href="/solutions/governance">
-            snapshot and payout-rights guide
-          </TextLink>{" "}
-          for that distinction.
-        </Body>}
         <ButtonRow>
           <Button href="/portfolio">Open Portfolio</Button>
-          {navHrefVisible("/portfolio/conversion") && (
-            <Button href="/portfolio/conversion" variant="ghost">Convert tokens into shares</Button>
-          )}
-          {navHrefVisible("/portfolio/vesting") && (
-            <Button href="/portfolio/vesting" variant="ghost">
-              Check vesting
-            </Button>
-          )}
+          {conversion && <Button href="/portfolio/conversion" variant="ghost">Convert tokens into equity</Button>}
         </ButtonRow>
       </Section>
     </>

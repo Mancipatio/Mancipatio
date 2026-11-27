@@ -9,25 +9,25 @@ export type Solution = {
 export const SOLUTIONS: Solution[] = [
   {
     slug: "issuer-registry",
-    name: "Issuer Registry & KYB",
+    name: "Issuer registration & KYB",
     eyebrow: "Onboarding",
     appHref: "/apply",
     howItWorks: [
       {
-        step: "Register",
-        note: "The issuer submits its legal entity ID and jurisdiction.",
+        step: "Register.",
+        note: "The issuer submits its identification details and jurisdiction.",
       },
       {
-        step: "Review",
+        step: "Review.",
         note: "A Manci admin runs KYB due diligence off-chain.",
       },
       {
-        step: "Verify",
+        step: "Verify.",
         note: "The Super Admin records the issuer as Verified on-chain.",
       },
       {
-        step: "Issue",
-        note: "The current verified issuer uses the permissions required for each issuance action.",
+        step: "Issue.",
+        note: "The verified issuer can perform issuance actions once the required permissions have been granted.",
       },
     ],
   },

@@ -15,6 +15,7 @@
 
 import { detectNetwork, type Network } from "@/lib/network";
 import { isLogoPathOf } from "@/lib/company-profile";
+import { MANCI_MAINNET_ASSET } from "@/lib/manci-token";
 
 export type ApprovedLogo = {
   /** Path under public/, served by this site. */
@@ -25,7 +26,7 @@ const APPROVED_LOGOS: Partial<Record<Network, Readonly<Record<string, ApprovedLo
   mainnet: {
     // MANCI, the company token of Mancipatio d.o.o.: the image the mint's
     // metadata already carries (public/tokens/manci0.json).
-    HzjgBogwPPMzj5m2CgGLyPUv5Qz27TmvbFy9MWbevuv6: { src: "/tokens/manci0.png" },
+    [MANCI_MAINNET_ASSET]: { src: "/tokens/manci0.png" },
   },
 };
 
