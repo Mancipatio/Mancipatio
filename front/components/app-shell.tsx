@@ -18,7 +18,6 @@ import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
 import { useSignedInAccount } from "@/lib/account-login";
-import { useWalletSession } from "@/lib/use-wallet-session";
 
 const primary = [
   { href: "/app", label: "Overview", icon: IconHome },
@@ -60,8 +59,7 @@ export function AppShell({ children, section = "overview" }: {
   const path = usePathname();
   const { isReady, connected, wallet } = useWalletConnection();
   const signedIn = useSignedInAccount();
-  const walletSignedIn = useWalletSession(isReady && connected && wallet ? wallet.account.address.toString() : null);
-  const showWorkspace = walletSignedIn || (signedIn.status === "signed_in" && !!signedIn.account);
+  const showWorkspace = (isReady && connected && !!wallet) || (signedIn.status === "signed_in" && !!signedIn.account);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);

@@ -50,9 +50,6 @@ vi.mock("@/lib/account-login", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/account-login")>()),
   useSignedInAccount: () => ({ status: "signed_out", account: null }),
 }));
-vi.mock("@/lib/use-wallet-session", () => ({
-  useWalletSession: (wallet: string | null) => wallet === "TestWallet",
-}));
 
 import { KYC_ONLY_ENV, KYC_ONLY_MESSAGE, PILOT_MODULE_ENV } from "@/lib/features";
 import { AppShell } from "@/components/app-shell";

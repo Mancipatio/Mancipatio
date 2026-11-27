@@ -15,7 +15,6 @@ const visitor = vi.hoisted(() => ({
   accountStatus: "signed_in" as "loading" | "signed_out" | "signed_in",
   walletReady: true,
   walletConnected: false,
-  sessionWallet: null as string | null,
 }));
 vi.mock("@/lib/account-login", () => ({
   useSignedInAccount: () => ({
@@ -29,9 +28,6 @@ vi.mock("@solana/react-hooks", async (importOriginal) => ({
     isReady: visitor.walletReady, connected: visitor.walletConnected,
     wallet: visitor.walletConnected ? { account: { address: "TestWallet" } } : null,
   }),
-}));
-vi.mock("@/lib/use-wallet-session", () => ({
-  useWalletSession: (wallet: string | null) => wallet !== null && wallet === visitor.sessionWallet,
 }));
 vi.mock("next/navigation", () => ({ usePathname: () => nav.path }));
 vi.mock("next/link", () => ({
@@ -74,7 +70,7 @@ function network(name: "mainnet" | "devnet", on: Partial<Record<keyof typeof PIL
   vi.stubEnv("NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "");
 }
 
-function shell(section: "portfolio" | "marketplace" | "issuer", path: string) {
+function shell(section: "overview" | "portfolio" | "marketplace" | "issuer", path: string) {
   nav.path = path;
   // AppShell types `children` as a required prop (a .ts test has no JSX).
   // eslint-disable-next-line react/no-children-prop
@@ -99,7 +95,6 @@ beforeEach(() => {
   visitor.accountStatus = "signed_in";
   visitor.walletReady = true;
   visitor.walletConnected = false;
-  visitor.sessionWallet = null;
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -152,28 +147,23 @@ describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
     expect(sidebar(shell("marketplace", "/marketplace"))).not.toContain("YOUR WORKSPACE");
   });
 
-  it("requires a session for the connected wallet and hides the workspace when it disconnects", () => {
-    visitor.accountStatus = "signed_out";
+  it.each(["loading", "signed_out"] as const)("shows the workspace on /app as soon as a wallet connects while the account is %s", (status) => {
+    visitor.accountStatus = status;
     visitor.walletConnected = true;
-    const menu = () => sidebar(shell("marketplace", "/marketplace"));
-    expect(menu()).not.toContain("YOUR WORKSPACE");
-    visitor.sessionWallet = "PreviousWallet";
-    expect(menu()).not.toContain("YOUR WORKSPACE");
-    visitor.sessionWallet = "TestWallet";
-    expect(menu()).toContain("YOUR WORKSPACE");
-    expect(hrefs(menu())).toEqual(expect.arrayContaining(["/account", "/portfolio", "/portfolio/conversion"]));
+    const side = sidebar(shell("overview", "/app"));
+    expect(side).toContain("YOUR WORKSPACE");
+    expect(hrefs(side)).toEqual(expect.arrayContaining(["/account", "/portfolio", "/portfolio/conversion"]));
     visitor.walletConnected = false;
-    expect(menu()).not.toContain("YOUR WORKSPACE");
+    expect(sidebar(shell("overview", "/app"))).not.toContain("YOUR WORKSPACE");
   });
 
-  it("keeps the workspace visible while either sign-in remains active", () => {
+  it("keeps the workspace visible while either the wallet or the email/Google account is active", () => {
     visitor.walletConnected = true;
-    visitor.sessionWallet = "TestWallet";
     const menu = () => sidebar(shell("marketplace", "/marketplace"));
     visitor.accountStatus = "signed_out";
     expect(menu()).toContain("YOUR WORKSPACE");
     visitor.accountStatus = "signed_in";
-    visitor.sessionWallet = null;
+    visitor.walletConnected = false;
     expect(menu()).toContain("YOUR WORKSPACE");
     visitor.accountStatus = "signed_out";
     expect(menu()).not.toContain("YOUR WORKSPACE");
