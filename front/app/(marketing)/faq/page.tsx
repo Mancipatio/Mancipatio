@@ -25,7 +25,7 @@ const GROUPS: { title: string; questions: Question[]; availableAt?: string }[] =
       },
       {
         question: "What does a token give me?",
-        answer: "A right to convert into equity in a Serbian company. Some issuances add payouts while you hold. The exact terms are in each issuance's documents.",
+        answer: "A right to convert into equity in a Serbian company. The issuer can secure that right with a registered lien. Some issuances add payouts while you hold. The exact terms are in each issuance's documents.",
         link: { label: "Asset types", href: "/markets/types" },
       },
       {
@@ -113,6 +113,11 @@ const GROUPS: { title: string; questions: Question[]; availableAt?: string }[] =
         question: "Can a company outside Serbia issue?",
         answer: "Yes, through a Serbian SPV.",
         link: { label: "Issuing through a Serbian SPV", href: "/solutions/serbian-spv" },
+      },
+      {
+        question: "Do I have to put a lien on the equity?",
+        guide: "/legal-structure",
+        answer: "No. Liens are optional, but they increase the trust in the value of the token.",
       },
       {
         question: "Do I have to use your lawyers?",

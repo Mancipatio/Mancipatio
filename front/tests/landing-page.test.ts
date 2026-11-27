@@ -61,9 +61,10 @@ describe("the public landing page", () => {
     expect(visibleText(render())).toContain("OTC trading is currently paused.");
   });
 
-  it("ties the registered lien to the documented MANCI issuance", () => {
+  it("distinguishes an optional lien from the registered lien in the MANCI issuance", () => {
     const text = visibleText(render());
-    expect(metadata.description).toBe("Tokens that convert into real equity in European companies.");
+    expect(metadata.description).toContain("An issuance can also include a registered lien on the underlying equity.");
+    expect(text).toContain(metadata.description);
     expect(text).toContain("a lien on 15% of Mancipatio d.o.o. Beograd's share capital, backing 1,500 MANCI tokens.");
     expect(text).not.toMatch(/a lien on every issuance|with a lien behind it|backed by a registered lien/i);
   });

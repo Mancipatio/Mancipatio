@@ -16,7 +16,7 @@ export function generateMetadata(): Metadata {
   return {
     title: "Issuing through a Serbian SPV — Manci",
     description: shown
-      ? "A Serbian special purpose vehicle (SPV) becomes the company behind your token. Your project gets the same model which Manci used: a right to convert and government registers anyone can check."
+      ? "A Serbian special purpose vehicle (SPV) becomes the company behind your token. Investors receive a right to convert, which the issuer can secure with a registered lien on the equity. Anyone can check the government registers."
       : "Issuing through a Serbian SPV is not available at the moment.",
     ...(!shown && indexingAllowed() ? { robots: { index: false, follow: true } } : {}),
   };
@@ -28,7 +28,7 @@ export default function SerbianSpvGuidePage() {
       <PageHeader
         eyebrow="Onboarding / Platform guide"
         title="No Serbian company? Use a Serbian SPV."
-        lede="A Serbian special purpose vehicle (SPV) becomes the company behind your token. Your project gets the same model which Manci used: a right to convert and government registers anyone can check."
+        lede="A Serbian special purpose vehicle (SPV) becomes the company behind your token. Investors receive a right to convert, which the issuer can secure with a registered lien on the equity. Anyone can check the government registers."
       />
 
       {!scopeEnabled("issuance") && (
@@ -77,7 +77,8 @@ export default function SerbianSpvGuidePage() {
             <strong>Structure.</strong> Define what the SPV owns, what the tokens give investors and how much equity you want to tokenize.
           </li>
           <li>
-            <strong>Issuance.</strong> Complete the usual verification and issuance steps on Manci.
+            <strong>Issuance.</strong> If you choose to secure conversion with a lien on the equity, register it in the
+            Serbian Pledge Register. Complete the usual verification and issuance steps on Manci.
           </li>
           <li>
             <strong>Run it.</strong> Like every other  company, the SPV needs to do accounting and files annual financial statements with
@@ -137,7 +138,7 @@ export default function SerbianSpvGuidePage() {
           </li>
         </Bullets>
         <Body className="mt-4">
-          Why Serbia, and how conversion works: <TextLink href="/legal-structure">Legal structure</TextLink>
+          Why Serbia, and how conversion and an optional lien work: <TextLink href="/legal-structure">Legal structure</TextLink>
         </Body>
         <ButtonRow>
           <Button href={MX_ROUTES.apply}>Apply to issue</Button>

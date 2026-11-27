@@ -119,9 +119,9 @@ export default function AboutPage() {
         <H2 className="mt-10">Why the structure comes first</H2>
         <Body className="mt-4">
           Minting a token takes minutes. Making it mean something takes a legal structure
-          that real courts recognise: a token issuer bound by the right the token carries
-          and a public register at the end. We build the legal structure
-          first, then the technology around it.
+          that real courts recognise: a token issuer bound by the right the token carries,
+          an optional registered lien on the underlying equity, and a public register at the
+          end. We build the legal structure first, then the technology around it.
         </Body>
         <Body className="mt-3.5">
           Compliance is wired into the mint itself, custody is held by the program rather

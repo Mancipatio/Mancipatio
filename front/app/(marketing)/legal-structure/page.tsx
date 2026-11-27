@@ -48,11 +48,16 @@ export default function LegalStructurePage() {
       </Section>
 
       <Section>
-        <H2>The right and the register</H2>
+        <H2>The right, the optional lien and the register</H2>
         <ol className="mx-body mt-4 list-decimal space-y-3 pl-6">
           <li>
             <strong>The right.</strong> Every token carries the right to convert into equity, set out in the issuance documents and binding
             on the token issuer.
+          </li>
+          <li>
+            <strong>The lien.</strong> An issuer can choose to secure conversion with a lien on the equity. If it
+            does, the lien is registered in the Serbian Pledge Register and the issuance documents set out the
+            holder&apos;s enforcement rights.
           </li>
           <li>
             <strong>The register.</strong> When you convert, a government agency records you as a shareholder and the tokens are burned.

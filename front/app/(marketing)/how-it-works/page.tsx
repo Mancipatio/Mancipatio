@@ -23,7 +23,7 @@ const STEPS = [
   },
   {
     title: "Finalize terms and documents.",
-    body: "Agree the legal and commercial terms, including fees and costs. Set up the structure, obtain any required corporate approvals and prepare the issuance documents and disclosures.",
+    body: "Agree the legal and commercial terms, including fees and costs. Set up the structure, obtain any required corporate approvals and prepare the issuance documents and disclosures. If you agree to a lien on the equity, register it under the issuance terms.",
   },
   {
     title: "Register the asset.",
@@ -80,7 +80,7 @@ export default function HowItWorksPage() {
       <Section>
         <H2 className="mb-6">Who does what</H2>
         <Grid cols={3}>
-          <Card title="The token issuer." body={<>Issues tokens up to a cap recorded on Solana. The issuer is responsible for the rights attached to the tokens, the issuance documents and disclosures. When a holder converts, the issuer ensures that the legal transfer and APR registration are completed. <TextLink href="/legal-structure">How the legal structure works</TextLink></>} />
+          <Card title="The token issuer." body={<>Issues tokens up to a cap recorded on Solana. A registered lien backs the tokens it covers under the issuance documents. The issuer is responsible for the rights attached to the tokens, the issuance documents and disclosures. When a holder converts, the issuer ensures that the legal transfer and APR registration are completed. <TextLink href="/legal-structure">How the legal structure works</TextLink></>} />
           <Card title="Token holders." body="Hold a right to convert into equity, in their own wallets, and can transfer it under the issuance's rules. They become registered members once APR records the transfer, and the tokens are then burned." />
           <Card title="Manci." body={<>Verifies issuers, runs issuance, escrow and conversion on Solana, and publishes the record of each registration next to the token. Manci is not the issuer and takes no legal title to what backs the token. Fees follow your engagement agreement. <TextLink href="/pricing">Fees &amp; costs</TextLink></>} />
         </Grid>

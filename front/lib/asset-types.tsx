@@ -159,7 +159,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
       FLOW_SPV,
       FLOW_MINT,
       FLOW_TRADE,
-      "Register a share pledge in your favour, and, where the issuer offers conversion and it is available, convert into real shares at a time of your choosing — conversion requires identity verification (KYC) and is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
+      "A registered share pledge is optional. Where the issuer offers conversion and it is available, convert into real shares at a time of your choosing — conversion requires identity verification (KYC) and is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
     ],
   },
   {

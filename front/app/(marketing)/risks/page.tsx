@@ -6,7 +6,7 @@ import { detectNetwork, isTestNetwork } from "@/lib/network";
 
 export const metadata: Metadata = {
   title: "Risk disclosure — Manci",
-  description: "Equity tokens on Manci come with a real right to equity. They are still an investment in a private company, and you can lose some or all of your investment.",
+  description: "Equity tokens on Manci come with a real right to equity, which the issuer can secure with a registered lien. They are still an investment in a private company, and you can lose some or all of your investment.",
 };
 
 export default function RisksPage() {
@@ -16,15 +16,19 @@ export default function RisksPage() {
       <PageHeader
         eyebrow="Risk disclosure"
         title="Know the risks."
-        lede="Equity tokens on Manci come with a real right to equity. They are still an investment in a private company, and you can lose some or all of your investment."
+        lede="Equity tokens on Manci come with a real right to equity, which the issuer can secure with a registered lien. They are still an investment in a private company, and you can lose some or all of your investment."
       />
 
       <Section>
         <H2>The short version</H2>
         <Bullets className="mt-4">
           <li>Only invest what you can afford to lose.</li>
+          <li>
+            If a registered lien secures conversion, it protects you if the token issuer refuses to convert.
+            It does not protect you if the business fails.
+          </li>
           <li>There may be no buyers when you want to sell.</li>
-          <li>Read the issuance documents. They decide what rights the token gives you..</li>
+          <li>Read the issuance documents. They decide what rights the token gives you.</li>
         </Bullets>
       </Section>
 
@@ -40,7 +44,7 @@ export default function RisksPage() {
       <Section>
         <H2>Enforcing a registered lien</H2>
         <Body className="mt-4">
-          If the token issuer refuses to transfer the equity, a registered lien can be enforced under the issuance documents.
+          If the token issuer refuses to transfer the equity, a registered lien securing conversion can be enforced under the issuance documents.
           Enforcement takes time and money, may involve the Serbian courts, and the proceeds may not cover your
           investment.
         </Body>

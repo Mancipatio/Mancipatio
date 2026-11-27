@@ -125,14 +125,15 @@ const LEGAL_STRUCTURE: InstrumentCta = {
 const TELL_US: InstrumentCta = { label: "Tell us your idea", href: "/contact" };
 
 const EUR_CAP = "EUR 3,000,000 per SPV";
+export const EQUITY_REGISTERED_PLEDGE = "Optional";
 
 const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
   equity: {
     slug: "equity",
     label: "Company ownership",
     headline: "Own the company.",
-    lede: "Your token converts into real equity.",
-    blurb: "Own the company. Your token converts into real equity.",
+    lede: "Your token converts into real equity. The issuer can secure that right with a registered lien.",
+    blurb: "Own the company. Your token converts into real equity. The issuer can secure that right with a registered lien.",
     ctas: [APPLY, COMPARE],
     factSheet: [],
     terms: [
@@ -144,6 +145,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           cap: "EUR 3,000,000 per issuer, any 12 months",
           distributions: "Optional payouts set per issuance",
           conversion: "Whenever you choose",
+          pledge: EQUITY_REGISTERED_PLEDGE,
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },
@@ -380,6 +382,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           cap: EUR_CAP,
           distributions: "Yes · issuer-push",
           conversion: "Optional",
+          pledge: "Optional",
           delivery: NOT_APPLICABLE,
           recourse: "Yes",
         },

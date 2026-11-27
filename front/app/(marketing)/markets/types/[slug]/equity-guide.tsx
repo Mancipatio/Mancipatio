@@ -1,4 +1,5 @@
 import { Body, Bullets, DataTable, H2, Section } from "@/components/mx";
+import { EQUITY_REGISTERED_PLEDGE } from "@/lib/instruments";
 
 export function EquityGuide() {
   return (
@@ -68,6 +69,7 @@ export function EquityGuide() {
             registry.
           </li>
           <li>Then the tokens are burned. The equity stays with you.</li>
+          <li>If a registered lien secures conversion and the founders refuse to cooperate, you can enforce it under the issuance documents.</li>
           <li>Prefer to sell? Transfer the token. The rights go with it.</li>
         </Bullets>
       </Section>
@@ -85,8 +87,12 @@ export function EquityGuide() {
             possible, but require additional checks.
           </li>
           <li>
+            <strong>Optional lien on equity.</strong> The issuer can register a lien on the equity behind the tokens in the
+            Serbian Pledge Register. The issuance documents state what the lien secures.
+          </li>
+          <li>
             <strong>Public state registers.</strong> Both the company register and the Pledge Register are run by a government agency. Anyone can check
-            online who owns the company.
+            online who owns the company and the status of any registered lien.
           </li>
           <li>
             <strong>Transfers.</strong> Tokens are freely transferable. Issuers can add conditions, such as limiting transfers to verified
@@ -111,11 +117,20 @@ export function EquityGuide() {
             { header: "Voting rights", cells: ["Yes, once your token becomes an ownership stake"] },
             { header: "Platform limit", cells: ["EUR 3,000,000 per issuer, any 12 months"] },
             { header: "Conversion", cells: ["Whenever you choose"] },
+            { header: "Registered pledge", cells: [EQUITY_REGISTERED_PLEDGE] },
             { header: "Transfers", cells: ["Free by default; the issuer can add limits"] },
           ]}
         />
         <Body className="mt-4">
           Typical use: founders offering part of their company to investors.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>What if the founders back out?</H2>
+        <Body className="mt-4">
+          The issuance documents set out your rights if the founders refuse to transfer the equity. If a
+          registered lien secures your right to convert, you can enforce it under those documents.
         </Body>
       </Section>
     </>

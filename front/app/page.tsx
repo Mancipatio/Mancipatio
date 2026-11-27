@@ -17,7 +17,7 @@ import styles from "./landing.module.css";
 import { LandingCompanies } from "./landing-companies";
 
 const brandFont = Montserrat({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-brand", display: "swap" });
-const INTRO = "Tokens that convert into real equity in European companies.";
+const INTRO = "Tokens that convert into real equity in European companies. An issuance can also include a registered lien on the underlying equity.";
 
 export const metadata: Metadata = {
   title: "Manci — From token to registered owner",

@@ -167,7 +167,8 @@ describe("the asset guides (/markets/types)", () => {
     const equity = html(await InstrumentPage({ params: Promise.resolve({ slug: "equity" }) }));
     expect(equity).toContain("What it is");
     expect(equity).not.toContain(ASSET_CLASS_NOT_OFFERED);
-    expect(equity).not.toContain("Registered pledge");
+    expect(visibleText(equity)).toMatch(/Registered pledge\s*Optional/);
+    expect(INSTRUMENT_LIST.find((instrument) => instrument.slug === "equity")?.terms[0].terms.pledge).toBe("Optional");
     expect(equity).toContain("Higher value issuances are possible, but require additional checks.");
     expect((await generateMetadata({ params: Promise.resolve({ slug: "equity" }) }) as { robots?: unknown }).robots).toBeUndefined();
   });
@@ -189,7 +190,7 @@ describe("the asset guides (/markets/types)", () => {
     // KYC-only mode (mainnet default): applications are paused, the contact form is not.
     expect(markup).not.toContain("reviews every application");
     expect(markup).toContain("reads every message");
-    expect(markup).toContain("Own the company. Your token converts into real equity.");
+    expect(markup).toContain("Own the company. Your token converts into real equity. The issuer can secure that right with a registered lien.");
     expect(markup).not.toContain("<table");
     for (const other of INSTRUMENT_LIST.filter((i) => i.slug !== "equity")) {
       for (const set of other.terms) expect(markup, other.slug).not.toContain(set.right);
