@@ -6,7 +6,11 @@
 // What is here: the mainnet Terms of Service, Privacy Policy and the
 // acceptance-dialog summary.
 //
-// Version 2026-10-03 (THIS TEXT): written by engineering from the owner's
+// Terms version 2026-11-27 updates clause 7 with counsel's wording on
+// higher-value issuances. The standard application and approval limits still
+// apply. The Privacy Policy and purchase risk warning keep their own dates.
+//
+// Version 2026-10-03 was written by engineering from the owner's
 // decisions D1-D7 of 2026-10-03, whose model counsel approved: units of an
 // open class are bearer instruments that need no identity verification to
 // buy, hold or transfer; buying needs only a wallet linked to the Service
@@ -20,15 +24,15 @@
 // Counsel confirmed the exact wording on 2026-10-03 (the owner's statement,
 // recorded in PR #57): PURCHASE_RISK_WARNING.status is "counsel"
 // (lib/legal/risk-warning.ts), a mainnet build takes this version, and it is
-// the text live on mainnet. The hold for a LATER version stays in code, not
+// the version published then. The hold for a LATER version stays in code, not
 // only here, because MAINNET_LEGAL_COPY_APPROVED=true is set in production
 // and is not bound to a version: wording counsel has not confirmed yet goes
 // in with the risk warning's status set to "draft", which a mainnet build
 // refuses (lib/legal/readiness.ts). The commit that records counsel's
 // confirmation sets it back to "counsel", together with the expectations
 // that follow it (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh);
-// if that is on a later day, `version` and `lastUpdated` of both documents
-// move to that day.
+// if that is on a later day, update `version` and `lastUpdated` of
+// each document that changed.
 //
 // Review of 2026-10-03 (PR #57): conversion into company shares is worded as
 // not available yet (its module and on-chain custody entry are off on
@@ -70,10 +74,10 @@
 
 import type { LegalDocument } from "./document";
 
-/** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
+/** The versioned mainnet Terms accepted by wallets using the Service. */
 export const MAINNET_TERMS: LegalDocument | null = {
-  version: "2026-10-03",
-  lastUpdated: "2026-10-03",
+  version: "2026-11-27",
+  lastUpdated: "2026-11-27",
   lede:
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
   clauses: [
@@ -204,7 +208,11 @@ export const MAINNET_TERMS: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "The Operator limits the amount each issuer may raise through the Service to at most EUR 3,000,000 over any period of twelve months; where an issuer issues through a special purpose vehicle, the limit applies to that vehicle. The Operator counts the issuer's sales, including sales approved but not yet closed, and the units it mints to its treasury, and does not approve a sale beyond the limit.",
+          text: "The standard issuance limit is EUR 3,000,000 per issuer in any 12 months. Where an issuer issues through a special purpose vehicle, the limit applies to that vehicle. The Operator counts the issuer's sales, including sales approved but not yet closed, and the units it mints to its treasury.",
+        },
+        {
+          kind: "paragraph",
+          text: "Higher value issuances are possible, but require additional checks. Contact the Operator before applying for a higher amount. The standard online application and approval process currently supports issuances up to EUR 3,000,000.",
         },
         {
           kind: "paragraph",

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DataTable } from "@/components/mx/data-table";
 
 const milestones = [
   "Each token carries the right to request conversion into 0.01% of the company's share capital.",
@@ -37,14 +38,13 @@ export function ManciCaseStudy({ conversionHref }: { conversionHref: string | nu
       </section>
       <section className="mt-8" aria-labelledby="manci-ownership-facts">
         <h2 id="manci-ownership-facts" className="text-lg font-semibold text-mx-ink">Company ownership facts</h2>
-        <dl className="mt-3 divide-y divide-mx-rule rounded-[3px] border border-mx-rule bg-white px-5 text-sm">
-          {ownershipFacts.map(([label, value]) => (
-            <div key={label} className="grid gap-1 py-3 sm:grid-cols-2 sm:gap-4">
-              <dt className="font-medium text-mx-ink">{label}</dt>
-              <dd className="text-mx-ink-soft">{value}</dd>
-            </div>
-          ))}
-        </dl>
+        <DataTable
+          className="mt-3 [&_tbody_th]:whitespace-normal"
+          caption="Company ownership facts"
+          columns={["Field", "Value"]}
+          minWidth={0}
+          rows={ownershipFacts.map(([header, value]) => ({ header, cells: [value] }))}
+        />
         <div className="mt-4 flex flex-wrap gap-4 text-sm text-mx-ink-soft underline underline-offset-2">
           {conversionHref && <Link href={conversionHref}>Request conversion</Link>}
           <Link href="/risks">Risk disclosure</Link>

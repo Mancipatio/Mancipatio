@@ -4,19 +4,18 @@
 // (0066 sale_capacity: the most permissive override wins) and the /apply
 // check (0056).
 //
-// On Solana mainnet the ceiling is the Terms' limit: at most EUR 3,000,000
-// per issuer over any twelve months, or per SPV where the issuer issues
-// through one (lib/legal/mainnet-copy.ts clause 7, the owner's decision D4).
-// A higher limit would make the Terms untrue, so the routes refuse it. SPV
-// caps (spvs.annual_cap_eur) keep the EUR 3,000,000 default of 0018, and no
-// route changes them. Other networks keep the old bound, so devnet can
-// rehearse any value.
+// On mainnet the existing application and approval workflows enforce the
+// standard EUR 3,000,000 ceiling. The sale ledger uses a rolling twelve-month
+// window per issuer or its SPV. Higher value issuances require additional
+// checks under clause 7; these settings do not increase the standard ceiling.
+// SPV caps (spvs.annual_cap_eur) default to EUR 3,000,000 in 0018 and have no
+// update route. Other networks retain a higher ceiling for testing.
 //
 // Import-free apart from a type: client pages and server routes share it.
 
 import type { Network } from "@/lib/network";
 
-/** The Terms' limit (clause 7) and the ceiling of every raise limit on mainnet. */
+/** Maximum configurable raise limit for the standard mainnet workflows (clause 7). */
 export const MAINNET_RAISE_CAP_EUR = 3_000_000;
 
 /** The ceiling on devnet, testnet and localnet. */

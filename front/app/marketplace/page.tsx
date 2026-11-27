@@ -14,6 +14,7 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { withoutArchived } from "@/lib/archive-client";
 import { fromBytes32 } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
+import { MANCI_MAINNET_ASSET } from "@/lib/manci-token";
 import { SkeletonTable } from "@/components/skeleton";
 import { assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
 import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
@@ -218,6 +219,7 @@ export default function MarketplacePage() {
               const profile = profiles.get(pda);
               const name = publicAssetName(a.name, profile);
               const summary = publicAssetSummary(profile);
+              const isManciCaseStudy = pda === MANCI_MAINNET_ASSET && profile?.network === "mainnet";
               const company = publicCompanyName(profile);
               const issuerLegal = issuerPdaMap.get(a.issuer.toString());
               const issuer = data.issuers.find(
@@ -249,7 +251,7 @@ export default function MarketplacePage() {
                     </div>
                   </div>
                   {summary && (
-                    <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-mx-ink-soft">
+                    <p className={`mt-3 text-sm leading-relaxed text-mx-ink-soft${isManciCaseStudy ? "" : " line-clamp-3"}`}>
                       {summary}
                     </p>
                   )}

@@ -8,12 +8,10 @@
 // Devnet, testnet and localnet show the devnet pilot's Terms
 // (app/(marketing)/legal/terms/devnet-terms.tsx): bump DEVNET_TOS_VERSION when
 // that text changes materially. Mainnet shows counsel's Terms
-// (lib/legal/mainnet-copy.ts), whose own `version` is the one accepted there:
-// 2026-10-03, the Terms of the owner's decisions D1-D7 (the acceptance dialog
-// shows "v2026-10-03", /legal/terms "Last updated: 2026-10-03"). It replaced
-// 2026-10-02, so every mainnet wallet accepts again: the client cache key, the
-// /api/tos/accept check and the server gate all take this version, and the
-// 2026-10-02 rows stay as history.
+// (lib/legal/mainnet-copy.ts). Its version identifies the text shown to the
+// wallet, the client cache entry and the acceptance required by the server.
+// The 2026-11-27 primary-sale Terms supersede 2026-10-03 on mainnet.
+// Earlier acceptance rows remain as history.
 
 import { detectNetwork, type Network } from "@/lib/network";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";

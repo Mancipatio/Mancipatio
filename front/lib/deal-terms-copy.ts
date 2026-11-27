@@ -4,8 +4,8 @@
 // (lib/legal/mainnet-copy.ts): a Mature sale mints share-class tokens, which
 // are bearer instruments (clause 5); conversion into company shares exists
 // only where the issuer offers it, after identity verification, and only once
-// its module is switched on (clauses 2, 6 and 12); the issuer limit is
-// EUR 3,000,000 over any twelve months (clause 7, lib/raise-cap.ts).
+// its module is switched on (clauses 2, 6 and 12). Clause 7 distinguishes
+// the standard raise limit from higher-value issuances requiring additional checks.
 //
 // A Startup raise is a soft commitment settled off-chain under a SAFE-style
 // agreement (switched off on mainnet: features().startupRaises), so its text
@@ -17,7 +17,9 @@ import { MAINNET_RAISE_CAP_EUR } from "@/lib/raise-cap";
 const CAP = `EUR ${MAINNET_RAISE_CAP_EUR.toLocaleString("en-US")}`;
 
 /** The note under the "Raise amount" row. */
-export const RAISE_LIMIT_NOTE = `Issuer limit: ${CAP} over any 12 months`;
+export const RAISE_LIMIT_NOTE = `Standard issuer limit: ${CAP} over any 12 months`;
+
+const STANDARD_RAISE_LIMIT = `The standard limit is ${CAP} per issuer or its SPV in any 12 months.`;
 
 /** The note under the "Equity offered" row. */
 export function equityOfferedNote(isStartup: boolean): string {
@@ -38,7 +40,7 @@ export function whatYouAreBuying(input: {
       lead: "Real equity in a real company, not a token.",
       body:
         `You will receive a ${input.structure || "SAFE"} agreement granting you pro-rata ownership. ` +
-        `Founders can sell up to ${CAP} of company equity through this platform over any 12 months.`,
+        STANDARD_RAISE_LIMIT,
     };
   }
   const conversion = input.conversionAvailable
@@ -50,6 +52,6 @@ export function whatYouAreBuying(input: {
       "They are minted to your wallet when your purchase is confirmed. They are bearer instruments: whoever controls the wallet can transfer them. " +
       "Your rights against the issuer are those set out in the sale's offering document. " +
       `${conversion} ` +
-      `Each issuer can raise at most ${CAP} through Manci over any 12 months.`,
+      `${STANDARD_RAISE_LIMIT} Higher value issuances are possible, but require additional checks.`,
   };
 }

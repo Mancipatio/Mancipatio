@@ -40,7 +40,7 @@ import {
 } from "@/lib/server/onchain-link-check";
 import { clearSanctionsCache } from "@/lib/server/sanctions";
 import { SOURCE_LABELS } from "@/lib/server/system-alerts";
-import { DEVNET_TOS_VERSION, tosVersionFor } from "@/lib/tos-version";
+import { tosVersionFor } from "@/lib/tos-version";
 import { buildTx, type Ix } from "./helpers/chain-tx";
 
 const R = ASSET_REGISTRY_PROGRAM_ADDRESS;
@@ -61,9 +61,9 @@ const FRESH = [
   "4fBwaTZ2dewX6xbwjJKqdHLftveU9xwFJyFBsYt5Z2p8",
 ];
 const CURRENT = tosVersionFor("mainnet");
-const OLD = DEVNET_TOS_VERSION;
-/** The buy's block time: after the current mainnet version's date. */
-const T = Date.parse("2026-10-05T12:00:00Z");
+const OLD = "2026-10-03";
+/** Two days after the current Terms date, so the first acceptance can precede the buy. */
+const T = Date.parse(`${CURRENT}T12:00:00Z`) + 2 * 86_400_000;
 const at = (offsetMs: number) => new Date(T + offsetMs).toISOString();
 
 const buyIx = (buyer: string, units: bigint = BigInt(250), mint: string = MINT, program: string = R): Ix => ({

@@ -89,14 +89,9 @@ const COMPANY: Operator = {
  *  written confirmation of that day. */
 const BVI: Operator = { ...OPERATORS.mainnet };
 
-/** The version and date of the mainnet Terms and Privacy Policy: 2026-10-03,
- *  the owner's decisions D1-D7 (open classes, public sales, platform-linked
- *  wallets, KYC at conversion). It replaced counsel's texts of 2026-10-02;
- *  counsel confirmed its exact wording on 2026-10-03 (PR #57). */
-const MAINNET_VERSION = "2026-10-03";
-
-/** The previous mainnet Terms version, which every wallet must accept again. */
-const PREVIOUS_MAINNET_VERSION = "2026-10-02";
+const MAINNET_TERMS_VERSION = "2026-11-27";
+const PREVIOUS_MAINNET_TERMS_VERSION = "2026-10-03";
+const MAINNET_PRIVACY_VERSION = "2026-10-03";
 
 const TAX_ID_UNSET = "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set";
 
@@ -461,9 +456,7 @@ describe("mainnetLegalProblems", () => {
     // The company (Manci International Ltd., BVI, recorded 2026-09-30, its
     // tax number stated as not assigned on the owner's written confirmation
     // of 2026-10-02) and the Terms, Privacy Policy and dialog summary are
-    // complete. Counsel confirmed the exact wording of version 2026-10-03
-    // (the owner's decisions D1-D7; owner, 2026-10-03, PR #57): the risk
-    // warning's status is "counsel", so nothing is refused.
+    // complete. The published purchase risk warning carries counsel's approval.
     expect(problems).toEqual([]);
     // Without counsel's waiver the licence is refused.
     expect(mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS)).toEqual([
@@ -480,7 +473,7 @@ describe("mainnetLegalProblems", () => {
 });
 
 describe("assertBuildMainnetLegal (next.config.ts)", () => {
-  it("builds the slots committed today (counsel confirmed the 2026-10-03 wording) and still refuses a draft risk warning", () => {
+  it("builds the current legal slots and still refuses a draft risk warning", () => {
     const env = { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" };
     const refusal = (vars: Record<string, string>, slots = MAINNET_LEGAL_SLOTS) => {
       try {
@@ -490,7 +483,7 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
       }
       return "";
     };
-    // Counsel confirmed the 2026-10-03 wording: with the licence waiver the committed slots build.
+    // With the licence waiver the committed slots build.
     expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" })).toBe("");
     // A draft risk warning would still be refused.
     const draft = { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "draft" as const } };
@@ -549,17 +542,17 @@ describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
 });
 
 describe("Terms version per network", () => {
-  it("keeps the devnet version and takes the published mainnet Terms' version on mainnet (2026-10-03)", () => {
+  it("keeps the devnet version and takes the published mainnet Terms' version on mainnet", () => {
     expect(DEVNET_TOS_VERSION).toBe("2026-07-18");
     for (const network of ["devnet", "testnet", "localnet"] as const) {
       expect(tosVersionFor(network)).toBe(DEVNET_TOS_VERSION);
     }
-    expect(MAINNET_TERMS?.version).toBe(MAINNET_VERSION);
-    expect(MAINNET_TERMS?.lastUpdated).toBe(MAINNET_VERSION);
-    expect(tosVersionFor("mainnet")).toBe(MAINNET_VERSION);
-    // A new version: an acceptance of 2026-10-02 no longer counts, so every
+    expect(MAINNET_TERMS?.version).toBe(MAINNET_TERMS_VERSION);
+    expect(MAINNET_TERMS?.lastUpdated).toBe(MAINNET_TERMS_VERSION);
+    expect(tosVersionFor("mainnet")).toBe(MAINNET_TERMS_VERSION);
+    // A new version: an acceptance of the previous mainnet Terms no longer counts, so every
     // mainnet wallet accepts again (Terms clause 20).
-    expect(tosVersionFor("mainnet")).not.toBe(PREVIOUS_MAINNET_VERSION);
+    expect(tosVersionFor("mainnet")).not.toBe(PREVIOUS_MAINNET_TERMS_VERSION);
   });
 
   describe("the version a build asks wallets to accept (TOS_VERSION, the acceptance dialog's v<version>)", () => {
@@ -568,10 +561,10 @@ describe("Terms version per network", () => {
       vi.resetModules();
     });
 
-    it("is 2026-10-03 on a mainnet build and the pilot's on devnet", async () => {
+    it("uses the published Terms on a mainnet build and the pilot's on devnet", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
-      expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(MAINNET_VERSION);
+      expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(MAINNET_TERMS_VERSION);
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
       vi.resetModules();
       expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(DEVNET_TOS_VERSION);
@@ -595,13 +588,13 @@ function visibleText(html: string): string {
     .replace(/\s+/g, " ");
 }
 
-describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed per the owner's decisions D1-D7)", () => {
+describe("the published mainnet Terms and Privacy Policy", () => {
   const NEW_CLAUSE_11 =
     "wallet signatures for administrative actions; our company's hardware wallet, which holds the super administrator, " +
     "KYC authority and Blocklist Authority roles and the treasury; and a multisig, with a separate hardware wallet as its " +
     "member, that holds the authority to upgrade the on-chain programs. A second administrator uses a software wallet.";
 
-  it("are in the slots, dated 2026-10-03, complete and free of test-network wording", () => {
+  it("are complete and free of test-network wording, with independently versioned dates", () => {
     expect(MAINNET_TERMS).not.toBeNull();
     expect(MAINNET_PRIVACY).not.toBeNull();
     expect(legalDocumentProblems("Terms of Service", MAINNET_TERMS)).toEqual([]);
@@ -610,7 +603,7 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     expect(MAINNET_TERMS!.clauses[0].title).toBe("1. Acceptance and scope");
     expect(MAINNET_TERMS!.clauses[20].title).toBe("21. General");
     expect(MAINNET_PRIVACY!.clauses).toHaveLength(14);
-    expect([MAINNET_PRIVACY!.version, MAINNET_PRIVACY!.lastUpdated]).toEqual([MAINNET_VERSION, MAINNET_VERSION]);
+    expect([MAINNET_PRIVACY!.version, MAINNET_PRIVACY!.lastUpdated]).toEqual([MAINNET_PRIVACY_VERSION, MAINNET_PRIVACY_VERSION]);
     expect(MAINNET_TOS_GATE_POINTS).toHaveLength(5);
     expect(forbiddenMainnetPhrases(MAINNET_TOS_GATE_POINTS!.join("\n"))).toEqual([]);
     // The Terms' risk clause spells out the constant the risk warning uses.
@@ -640,7 +633,7 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     const clause = (title: string) => {
       const found = MAINNET_TERMS!.clauses.find((c) => c.title === title);
       expect(found, title).toBeDefined();
-      return legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [found!] });
+      return legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [found!] });
     };
     const terms = legalDocumentText(MAINNET_TERMS!);
     const privacy = legalDocumentText(MAINNET_PRIVACY!);
@@ -668,7 +661,10 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     // D4: public sales of up to 365 days, the EUR 3M cap, final purchases.
     expect(sales).toContain("Primary sales are open to the public; no invitation is needed.");
     expect(sales).toContain("up to 365 days");
-    expect(sales).toContain("EUR 3,000,000 over any period of twelve months; where an issuer issues through a special purpose vehicle, the limit applies to that vehicle.");
+    expect(sales).toContain("The standard issuance limit is EUR 3,000,000 per issuer in any 12 months.");
+    expect(sales).toContain("Where an issuer issues through a special purpose vehicle, the limit applies to that vehicle.");
+    expect(sales).toContain("including sales approved but not yet closed, and the units it mints to its treasury");
+    expect(sales).toContain("Higher value issuances are possible, but require additional checks.");
     expect(sales).toContain("A confirmed purchase is final");
     // D5: issuer direct transfers from the treasury.
     expect(sales).toContain("An issuer may also transfer units from its treasury directly to wallets it chooses.");
@@ -695,7 +691,7 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       const offered = scope.blocks[offeredAt + 1];
       expect(offered.kind === "list" ? offered.items : []).toHaveLength(2);
       expect(offered.kind === "list" ? offered.items.join("\n") : "").not.toMatch(/conver/i);
-      const risks = legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!] });
+      const risks = legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!] });
       expect(risks).toContain("Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it");
       expect(PURCHASE_RISK_WARNING.points[9]).toMatch(/^Converting tokens into company shares, where conversion is available and the issuer offers it, /);
       // Its page says so (the notice "clause 2" points to).
@@ -725,13 +721,13 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
         }
       }
       expect(found).toBeGreaterThanOrEqual(10);
-      const sales = legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "7. Primary sales")!] });
+      const sales = legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "7. Primary sales")!] });
       expect(sales).toContain(
         "Units you receive through an issuer's direct transfer (described below) or by a transfer from another wallet (clause 8) are not a purchase in a primary sale.",
       );
     });
 
-    it("the EUR 3,000,000 limit is the ceiling the admin routes keep on mainnet, per issuer or per SPV as 0066 counts it", () => {
+    it("the standard admin routes keep their EUR 3,000,000 ceiling on mainnet, per issuer or per SPV as 0066 counts it", () => {
       expect(MAINNET_RAISE_CAP_EUR).toBe(3_000_000);
       expect(maxRaiseCapEur("mainnet")).toBe(MAINNET_RAISE_CAP_EUR);
       expect(maxRaiseCapEur("devnet")).toBeGreaterThan(MAINNET_RAISE_CAP_EUR);
@@ -752,12 +748,12 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       vi.resetModules();
     });
 
-    it("/legal/terms: the operator block, the 21 clauses dated 2026-10-03, governing law and the legal contact", async () => {
+    it("/legal/terms: the operator block, the 21 clauses with the Terms version date, governing law and the legal contact", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
       const text = visibleText(renderToStaticMarkup(createElement(TermsPage)));
-      expect(text).toContain(`Last updated: ${MAINNET_VERSION}`);
+      expect(text).toContain(`Last updated: ${MAINNET_TERMS_VERSION}`);
       expect(text).toContain(MAINNET_TERMS!.lede!);
       expect(text).toContain("Manci is operated by Manci International Ltd., registered office Trinity Chambers");
       for (const clause of MAINNET_TERMS!.clauses) expect(text, clause.title).toContain(clause.title);
@@ -774,7 +770,7 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       vi.resetModules();
       const { default: PrivacyPage } = await import("@/app/(marketing)/legal/privacy/page");
       const text = visibleText(renderToStaticMarkup(createElement(PrivacyPage)));
-      expect(text).toContain(`Last updated: ${MAINNET_VERSION}`);
+      expect(text).toContain(`Last updated: ${MAINNET_PRIVACY_VERSION}`);
       expect(text).toContain("Controller of your personal data: Manci International Ltd.");
       for (const clause of MAINNET_PRIVACY!.clauses) expect(text, clause.title).toContain(clause.title);
       expect(text).toContain(NEW_CLAUSE_11);
@@ -796,12 +792,12 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
 });
 
 describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
-  // The Terms of 2026-10-03 (lib/legal/mainnet-copy.ts): units are bearer
+  // The published Terms (lib/legal/mainnet-copy.ts): units are bearer
   // share-class tokens (clause 5); conversion into company shares is not
   // available yet and, once it is, only where the issuer offers it, after KYC
   // (clauses 2, 6 and 12); trading through Manci, distributions, delivery,
-  // governance and vesting are switched off (clause 2); EUR 3,000,000 per
-  // issuer over any twelve months (clause 7). Pages shared with devnet must
+  // governance and vesting are switched off (clause 2); the standard limit is
+  // EUR 3,000,000 per issuer over any twelve months (clause 7). Pages shared with devnet must
   // hold on mainnet too.
   const MODULE_VARS = ["SECONDARY_TRADING", "GOVERNANCE", "VESTING", "DISTRIBUTIONS", "CUSTODY_CONVERSION", "CUSTODY_DELIVERY"];
   const modulesOff = () => {
@@ -834,7 +830,8 @@ describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
     expect(text).toContain(
       "Conversion into company shares is not available on Solana mainnet yet; once it is, it will be possible only where the issuer offers it, and will require identity verification (KYC).",
     );
-    expect(text).toContain("Each issuer can raise at most EUR 3,000,000 through Manci over any 12 months.");
+    expect(text).toContain("The standard limit is EUR 3,000,000 per issuer or its SPV in any 12 months.");
+    expect(text).toContain("Higher value issuances are possible, but require additional checks.");
     expect(text).not.toMatch(/real equity|not a token|SAFE|\$/);
     const offered = whatYouAreBuying({ isStartup: false, structure: null, conversionAvailable: true, network: "mainnet" });
     expect(offered.body).toContain(
@@ -845,7 +842,7 @@ describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
     expect(`${startup.lead} ${startup.body}`).toContain("SAFE agreement");
     expect(startup.body).toContain("EUR 3,000,000");
     expect(startup.body).not.toContain("$");
-    expect(RAISE_LIMIT_NOTE).toBe("Issuer limit: EUR 3,000,000 over any 12 months");
+    expect(RAISE_LIMIT_NOTE).toBe("Standard issuer limit: EUR 3,000,000 over any 12 months");
     expect(equityOfferedNote(false)).not.toMatch(/ownership/i);
     const page = readFileSync(join(process.cwd(), "app/marketplace/launchpad/[sale]/page.tsx"), "utf8");
     expect(page).toContain("whatYouAreBuying({");
