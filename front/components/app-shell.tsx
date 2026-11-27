@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useWalletConnection } from "@solana/react-hooks";
 import { AccountMenu } from "@/components/account-menu";
 import { BrandLogo } from "@/components/brand-logo";
 import { FollowOnX } from "@/components/follow-on-x";
@@ -16,6 +17,8 @@ import { moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
 import { PilotModuleNotice } from "@/components/pilot-module-notice";
 import { ISSUER_WORKFLOW_TABS } from "@/lib/issuer-workflow";
 import { RuntimePauseNotice } from "@/components/runtime-pause-notice";
+import { useSignedInAccount } from "@/lib/account-login";
+import { useWalletSession } from "@/lib/use-wallet-session";
 
 const primary = [
   { href: "/app", label: "Overview", icon: IconHome },
@@ -55,6 +58,10 @@ export function AppShell({ children, section = "overview" }: {
   section?: "overview" | "marketplace" | "portfolio" | "issuer" | "documentation" | "admin" | "application" | "onboarding" | "account";
 }) {
   const path = usePathname();
+  const { isReady, connected, wallet } = useWalletConnection();
+  const signedIn = useSignedInAccount();
+  const walletSignedIn = useWalletSession(isReady && connected && wallet ? wallet.account.address.toString() : null);
+  const showWorkspace = walletSignedIn || (signedIn.status === "signed_in" && !!signedIn.account);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);
@@ -145,7 +152,9 @@ export function AppShell({ children, section = "overview" }: {
         <Link href="/" className="app-wordmark"><BrandLogo /></Link>
         <nav ref={sidebarNav} aria-label="Main app">
           <p className="app-nav-label">MARKETPLACE</p>{navItems(primary)}
-          <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
+          {showWorkspace && <>
+            <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
+          </>}
           <p className="app-nav-label">BUILD ON MANCI</p>
           {issuerOn && <Link href="/issuer" className={`app-nav-link ${section === "issuer" ? "is-active" : ""}`}><IconBuilding className="h-[18px] w-[18px]" />Issuer workspace</Link>}
           <Link href="/docs" className={`app-nav-link ${section === "documentation" ? "is-active" : ""}`} aria-current={section === "documentation" ? "location" : undefined}><IconFile className="h-[18px] w-[18px]" />Documentation</Link>

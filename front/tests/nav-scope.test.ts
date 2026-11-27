@@ -11,6 +11,28 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const nav = vi.hoisted(() => ({ path: "/portfolio" }));
+const visitor = vi.hoisted(() => ({
+  accountStatus: "signed_in" as "loading" | "signed_out" | "signed_in",
+  walletReady: true,
+  walletConnected: false,
+  sessionWallet: null as string | null,
+}));
+vi.mock("@/lib/account-login", () => ({
+  useSignedInAccount: () => ({
+    status: visitor.accountStatus,
+    account: visitor.accountStatus === "signed_in" ? { id: "account-id", primary_wallet: null } : null,
+  }),
+}));
+vi.mock("@solana/react-hooks", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@solana/react-hooks")>()),
+  useWalletConnection: () => ({
+    isReady: visitor.walletReady, connected: visitor.walletConnected,
+    wallet: visitor.walletConnected ? { account: { address: "TestWallet" } } : null,
+  }),
+}));
+vi.mock("@/lib/use-wallet-session", () => ({
+  useWalletSession: (wallet: string | null) => wallet !== null && wallet === visitor.sessionWallet,
+}));
 vi.mock("next/navigation", () => ({ usePathname: () => nav.path }));
 vi.mock("next/link", () => ({
   default: ({ href, children, className }: { href: string; children: ReactNode; className?: string }) =>
@@ -72,7 +94,13 @@ const OFF_ON_MAINNET_USER = [
 ];
 const OFF_ON_MAINNET_ADMIN = ["/admin/otc", "/admin/resell", "/admin/governance", "/admin/rights", "/admin/vesting", "/admin/payouts"];
 
-beforeEach(() => network("devnet"));
+beforeEach(() => {
+  network("devnet");
+  visitor.accountStatus = "signed_in";
+  visitor.walletReady = true;
+  visitor.walletConnected = false;
+  visitor.sessionWallet = null;
+});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("navHrefVisible: menu-only routes (NAV_ROUTES)", () => {
@@ -107,6 +135,50 @@ describe("navHrefVisible: menu-only routes (NAV_ROUTES)", () => {
 });
 
 describe("AppShell: sidebar (also the mobile menu) and section tabs", () => {
+  it.each(["loading", "signed_out"] as const)("hides the entire workspace while the visitor is %s", (status) => {
+    visitor.accountStatus = status;
+    visitor.walletReady = status !== "loading";
+    const side = sidebar(shell("marketplace", "/marketplace"));
+    expect(side).not.toContain("YOUR WORKSPACE");
+    expect(hrefs(side).filter((href) => href === "/account" || href.startsWith("/portfolio"))).toEqual([]);
+    expect(hrefs(side)).toEqual(expect.arrayContaining(["/marketplace", "/issuer", "/docs"]));
+  });
+
+  it("shows the workspace for an email or Google account without a wallet and hides it after sign-out", () => {
+    const side = sidebar(shell("marketplace", "/marketplace"));
+    expect(side).toContain("YOUR WORKSPACE");
+    expect(hrefs(side)).toEqual(expect.arrayContaining(["/account", "/portfolio", "/portfolio/conversion"]));
+    visitor.accountStatus = "signed_out";
+    expect(sidebar(shell("marketplace", "/marketplace"))).not.toContain("YOUR WORKSPACE");
+  });
+
+  it("requires a session for the connected wallet and hides the workspace when it disconnects", () => {
+    visitor.accountStatus = "signed_out";
+    visitor.walletConnected = true;
+    const menu = () => sidebar(shell("marketplace", "/marketplace"));
+    expect(menu()).not.toContain("YOUR WORKSPACE");
+    visitor.sessionWallet = "PreviousWallet";
+    expect(menu()).not.toContain("YOUR WORKSPACE");
+    visitor.sessionWallet = "TestWallet";
+    expect(menu()).toContain("YOUR WORKSPACE");
+    expect(hrefs(menu())).toEqual(expect.arrayContaining(["/account", "/portfolio", "/portfolio/conversion"]));
+    visitor.walletConnected = false;
+    expect(menu()).not.toContain("YOUR WORKSPACE");
+  });
+
+  it("keeps the workspace visible while either sign-in remains active", () => {
+    visitor.walletConnected = true;
+    visitor.sessionWallet = "TestWallet";
+    const menu = () => sidebar(shell("marketplace", "/marketplace"));
+    visitor.accountStatus = "signed_out";
+    expect(menu()).toContain("YOUR WORKSPACE");
+    visitor.accountStatus = "signed_in";
+    visitor.sessionWallet = null;
+    expect(menu()).toContain("YOUR WORKSPACE");
+    visitor.accountStatus = "signed_out";
+    expect(menu()).not.toContain("YOUR WORKSPACE");
+  });
+
   it("mainnet with only conversion on: no entry or tab of an off module", () => {
     network("mainnet", { custodyConversion: "true" });
     const portfolio = shell("portfolio", "/portfolio");

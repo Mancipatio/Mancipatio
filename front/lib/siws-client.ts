@@ -152,11 +152,14 @@ export async function createSignedRequest(
 // cookie belongs to and until when — the server re-verifies every request.
 
 const SESSION_HINT_KEY = "manci:wallet-session:v1";
+const SESSION_RENEWAL_MARGIN_MS = 60_000;
 let sessionHint: { wallet: string; network: string; origin: string; exp: number } | null = null;
+let memoryOnlyHint = false;
+const sessionListeners = new Set<() => void>();
 let sessionInFlight: { wallet: string; promise: Promise<boolean> } | null = null;
 
 function loadHint() {
-  if (sessionHint) return sessionHint;
+  if (sessionHint || memoryOnlyHint) return sessionHint;
   try {
     const raw = window.localStorage.getItem(SESSION_HINT_KEY);
     if (raw) sessionHint = JSON.parse(raw);
@@ -169,19 +172,51 @@ function saveHint(hint: typeof sessionHint) {
   try {
     if (hint) window.localStorage.setItem(SESSION_HINT_KEY, JSON.stringify(hint));
     else window.localStorage.removeItem(SESSION_HINT_KEY);
-  } catch { /* storage may be blocked; the in-memory hint still works */ }
+    memoryOnlyHint = false;
+  } catch { memoryOnlyHint = true; }
+  sessionListeners.forEach((notify) => notify());
 }
 
 function hasSession(wallet: string): boolean {
   const hint = loadHint();
   return !!hint && hint.wallet === wallet && hint.network === detectNetwork() &&
-    hint.origin === window.location.origin && hint.exp > Date.now() + 60_000;
+    hint.origin === window.location.origin && hint.exp > Date.now() + SESSION_RENEWAL_MARGIN_MS;
 }
 
 /** True when this browser holds a live read session for `wallet` (no prompt needed). */
 export function hasWalletSession(wallet: string): boolean {
   if (typeof window === "undefined") return false;
   return hasSession(wallet);
+}
+
+/** Observe signed wallet sessions without asking for a signature or making a request. */
+export function subscribeWalletSession(listener: () => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleExpiry() {
+    clearTimeout(timer);
+    const remaining = (loadHint()?.exp ?? 0) - Date.now() - SESSION_RENEWAL_MARGIN_MS;
+    if (remaining > 0) timer = setTimeout(changed, Math.min(remaining, SESSION_TTL_MS));
+  }
+  function changed() {
+    scheduleExpiry();
+    listener();
+  }
+  function onStorage(event: StorageEvent) {
+    if (event.key !== null && event.key !== SESSION_HINT_KEY) return;
+    sessionHint = null;
+    memoryOnlyHint = false;
+    changed();
+  }
+  // Storage may have changed in another tab while no component was subscribed.
+  if (!sessionListeners.size && !memoryOnlyHint) sessionHint = null;
+  scheduleExpiry();
+  sessionListeners.add(changed);
+  window.addEventListener("storage", onStorage);
+  return () => {
+    clearTimeout(timer);
+    sessionListeners.delete(changed);
+    window.removeEventListener("storage", onStorage);
+  };
 }
 
 /** Forget the session (wallet disconnect or switch). Best-effort cookie clear. */

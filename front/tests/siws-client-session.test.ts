@@ -21,10 +21,10 @@ beforeEach(() => {
   store.clear();
   signMessage.mockClear();
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
-  vi.stubGlobal("window", {
+  vi.stubGlobal("window", Object.assign(new EventTarget(), {
     location: { origin: "https://manci.test" },
     localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v), removeItem: (k: string) => store.delete(k) },
-  });
+  }));
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset().mockImplementation(async (path) => path === "/api/auth/session"
     ? Response.json({ ok: true, data: { expires_at: new Date(Date.now() + 3_600_000).toISOString() } })
@@ -37,6 +37,61 @@ function bodies() {
 }
 
 describe("wallet session in signedFetch", () => {
+  it("updates subscribers when a wallet signs in and disconnects", async () => {
+    const { subscribeWalletSession, hasWalletSession, clearWalletSession } = await import("@/lib/siws-client");
+    const { signInWithWallet } = await import("@/lib/wallet-login");
+    const observe = vi.fn(() => hasWalletSession(wallet));
+    const unsubscribe = subscribeWalletSession(observe);
+    try {
+      expect(hasWalletSession(wallet)).toBe(false);
+      expect(signMessage).not.toHaveBeenCalled();
+      await signInWithWallet(session, () => true);
+      expect(observe).toHaveLastReturnedWith(true);
+      clearWalletSession();
+      expect(observe).toHaveLastReturnedWith(false);
+    } finally {
+      unsubscribe();
+    }
+    observe.mockClear();
+    await signInWithWallet(session, () => true);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it("recognizes a wallet session cleared in a second tab", async () => {
+    const { signedFetch, subscribeWalletSession, hasWalletSession } = await import("@/lib/siws-client");
+    await signedFetch(session, "/api/account/me", "account.me");
+    const observe = vi.fn(() => hasWalletSession(wallet));
+    const unsubscribe = subscribeWalletSession(observe);
+    try {
+      expect(hasWalletSession(wallet)).toBe(true);
+      const key = "manci:wallet-session:v1";
+      const oldValue = window.localStorage.getItem(key);
+      window.localStorage.removeItem(key);
+      window.dispatchEvent(Object.assign(new Event("storage"), { key, oldValue, newValue: null, storageArea: window.localStorage }));
+      expect(observe).toHaveLastReturnedWith(false);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("notifies a mounted subscriber when an idle wallet session expires", async () => {
+    vi.useFakeTimers();
+    const { signedFetch, subscribeWalletSession, hasWalletSession } = await import("@/lib/siws-client");
+    const observe = vi.fn(() => hasWalletSession(wallet));
+    const unsubscribe = subscribeWalletSession(observe);
+    try {
+      await signedFetch(session, "/api/account/me", "account.me");
+      expect(observe).toHaveLastReturnedWith(true);
+      vi.advanceTimersByTime(3_600_000 - 60_000 - 1);
+      expect(observe).toHaveLastReturnedWith(true);
+      vi.advanceTimersByTime(1);
+      expect(observe).toHaveLastReturnedWith(false);
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
   it("signs once for the session, then reads without further prompts", async () => {
     const { signedFetch } = await import("@/lib/siws-client");
     await signedFetch(session, "/api/clients/me", "clients.me");
