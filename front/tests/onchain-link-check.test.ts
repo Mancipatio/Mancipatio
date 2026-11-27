@@ -62,8 +62,9 @@ const FRESH = [
 ];
 const CURRENT = tosVersionFor("mainnet");
 const OLD = "2026-10-03";
+const CURRENT_TERMS_DAY = versionEffectiveMs(CURRENT)!;
 /** Two days after the current Terms date, so the first acceptance can precede the buy. */
-const T = Date.parse(`${CURRENT}T12:00:00Z`) + 2 * 86_400_000;
+const T = CURRENT_TERMS_DAY + 2 * 86_400_000;
 const at = (offsetMs: number) => new Date(T + offsetMs).toISOString();
 
 const buyIx = (buyer: string, units: bigint = BigInt(250), mint: string = MINT, program: string = R): Ix => ({
@@ -164,12 +165,26 @@ describe("the link rule (pure)", () => {
     expect(linkVerdict(old, BUYER, T, CURRENT)).toMatchObject({ linked: "ask-live" });
     expect(linkVerdict(old, BUYER, T, CURRENT, true)).toMatchObject({ linked: false });
     expect(linkVerdict(old, BUYER, T, CURRENT, false)).toMatchObject({ linked: true });
-    const beforeDate = Date.parse(`${CURRENT}T00:00:00Z`) - 1_000;
+    const beforeDate = CURRENT_TERMS_DAY - 1_000;
     expect(linkVerdict(rows([BUYER, OLD, beforeDate - T - 60_000]), BUYER, beforeDate, CURRENT)).toMatchObject({ linked: true });
     expect(versionEffectiveMs("2026-10-02")).toBe(Date.parse("2026-10-02T00:00:00Z"));
     expect(versionEffectiveMs("draft")).toBeNull();
     expect(anyVersionCounts(T, "draft", null)).toBe(false);
     expect(anyVersionCounts(T, "draft", false)).toBe(true);
+  });
+
+  it("distinguishes two Terms revisions for buys on their shared publication day", () => {
+    const first = "2026-11-27";
+    const revised = "2026-11-27.2";
+    const buyTime = Date.parse("2026-11-27T12:00:00Z");
+    const accepted = { wallet: BUYER, version: first, created_at: "2026-11-27T09:00:00Z" };
+    expect(versionEffectiveMs(revised)).toBe(Date.parse("2026-11-27T00:00:00Z"));
+    expect(linkVerdict([accepted], BUYER, buyTime, revised)).toMatchObject({ linked: "ask-live" });
+    expect(linkVerdict([accepted], BUYER, buyTime, revised, false)).toMatchObject({ linked: true });
+    expect(linkVerdict([accepted], BUYER, buyTime, revised, true)).toMatchObject({ linked: false });
+    const reaccepted = { ...accepted, version: revised, created_at: "2026-11-27T11:00:00Z" };
+    expect(linkVerdict([accepted, reaccepted], BUYER, buyTime, revised, true))
+      .toEqual({ linked: true, acceptance: reaccepted });
   });
 
   it("the summary names the wallet, the units, the sale and the version, within 500 characters", () => {
@@ -266,7 +281,7 @@ describe("processEventJob: the platform link of every buy (D2)", () => {
     // A buy before the current version's date (a gap scan after the update) counts any version.
     db.ref!.tables.compliance_alerts = [];
     db.ref!.rows("onchain_event_jobs")[0] = { ...job() };
-    setTx([{ ix: buyIx(BUYER) }], Date.parse(`${CURRENT}T00:00:00Z`) / 1000 - 3_600);
+    setTx([{ ix: buyIx(BUYER) }], CURRENT_TERMS_DAY / 1000 - 3_600);
     expect(await run()).toBe("complete");
     expect(alerts()).toHaveLength(0);
   });

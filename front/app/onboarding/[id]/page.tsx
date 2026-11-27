@@ -17,6 +17,7 @@ import {
   linkClientWallet,
   listRequirementsForOnboarding,
   onboardingGates,
+  onboardingTermsState,
   uploadClientDocumentWithToken,
   KYC_UPLOAD_ACCEPT,
   TOS_VERSION,
@@ -147,7 +148,7 @@ function Consumer({ id }: { id: string }) {
     !!client && client.onboarding_status !== "invited" && !!client.wallet;
   const sameWallet =
     !!wallet && !!client?.wallet && wallet.toString() === client.wallet;
-  const tosAccepted = !!client?.tos_accepted_at;
+  const { tosAccepted, termsStepDone } = onboardingTermsState(client);
   const gates = onboardingGates({
     accountOwned,
     walletConnected: !!wallet,
@@ -155,6 +156,7 @@ function Consumer({ id }: { id: string }) {
     linked,
     sameWallet,
     tosAccepted,
+    termsStepDone,
   });
 
   async function linkWallet() {
@@ -168,11 +170,15 @@ function Consumer({ id }: { id: string }) {
       setLinked(true);
 
       // Record ToS acceptance alongside the link (checkbox gated the button).
-      if (!client.tos_accepted_at) {
-        const accepted = await acceptTos(client.id, token, wallet.toString());
-        if (!accepted) {
+      if (!tosAccepted) {
+        try {
+          await acceptTos(client.id, token, wallet.toString(), TOS_VERSION);
+        } catch (err) {
           await refresh();
-          throw new Error("Your wallet is linked. Terms acceptance could not be saved — retry the Terms step.");
+          const reason = err instanceof Error ? err.message : "Please retry the Terms step.";
+          setLinkError(reason);
+          toast.showError("Wallet linked. Terms acceptance is pending.", reason);
+          return;
         }
       }
 
@@ -198,12 +204,12 @@ function Consumer({ id }: { id: string }) {
     if (!client || (!client.account_owned && !wallet)) return;
     setTosAccepting(true);
     try {
-      const ok = await acceptTos(
+      await acceptTos(
         client.id,
         token,
         client.account_owned ? "" : (wallet?.toString() ?? ""),
+        TOS_VERSION,
       );
-      if (!ok) throw new Error("Could not record the acceptance");
       toast.show({
         kind: "success",
         title: "Terms accepted",
@@ -324,16 +330,16 @@ function Consumer({ id }: { id: string }) {
       {/* Stepper */}
       {accountOwned ? (
         <ol className="flex flex-wrap items-center gap-2 text-xs">
-          <Step n={1} active={!tosAccepted} done={tosAccepted} label="Accept ToS" />
+          <Step n={1} active={!termsStepDone} done={termsStepDone} label="Accept ToS" />
           <Sep />
           <Step
             n={2}
-            active={tosAccepted && openDocuments > 0}
-            done={tosAccepted && requirements.length > 0 && openDocuments === 0}
+            active={termsStepDone && openDocuments > 0}
+            done={termsStepDone && requirements.length > 0 && openDocuments === 0}
             label="Upload documents"
           />
           <Sep />
-          <Step n={3} active={tosAccepted && openDocuments === 0} done={false} label="Next steps" />
+          <Step n={3} active={termsStepDone && openDocuments === 0} done={false} label="Next steps" />
         </ol>
       ) : (
         <ol className="flex flex-wrap items-center gap-2 text-xs">
@@ -341,21 +347,21 @@ function Consumer({ id }: { id: string }) {
           <Sep />
           <Step
             n={2}
-            active={!!wallet && !tosAccepted}
-            done={tosAccepted}
+            active={!!wallet && !termsStepDone}
+            done={termsStepDone}
             label="Accept ToS"
           />
           <Sep />
           <Step
             n={3}
-            active={!!wallet && tosAccepted && !alreadyConnected && !linked}
+            active={!!wallet && termsStepDone && !alreadyConnected && !linked}
             done={alreadyConnected || linked}
             label="Link to account"
           />
           <Sep />
           <Step
             n={4}
-            active={(alreadyConnected || linked) && tosAccepted}
+            active={(alreadyConnected || linked) && termsStepDone}
             done={false}
             label="Next steps"
           />
@@ -378,7 +384,7 @@ function Consumer({ id }: { id: string }) {
               <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-xs">
                 ✓
               </span>
-              Terms of Service v{client.tos_version ?? TOS_VERSION} and Privacy Policy accepted on{" "}
+              Terms of Service v{TOS_VERSION} and Privacy Policy accepted on{" "}
               {client.tos_accepted_at
                 ? new Date(client.tos_accepted_at).toISOString().slice(0, 10)
                 : "—"}
@@ -386,8 +392,9 @@ function Consumer({ id }: { id: string }) {
           ) : (
             <>
               <p className="mt-2 text-sm text-slate-600">
-                Onboarding requires accepting the Manci Terms of Service and
-                Privacy Policy. Please read them before continuing:{" "}
+                {client.tos_accepted_at
+                  ? "Please review the updated Manci Terms of Service and the Privacy Policy."
+                  : "Onboarding requires accepting the Manci Terms of Service and Privacy Policy. Please read them before continuing."}{" "}
                 <a
                   href="/legal/terms"
                   target="_blank"

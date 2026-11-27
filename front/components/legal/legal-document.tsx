@@ -23,7 +23,10 @@ export function LegalDocumentView({
   return (
     <>
       <PageHeader eyebrow="Legal" title={title} lede={document.lede}>
-        <Small className="mt-5">Last updated: {document.lastUpdated}</Small>
+        <Small className="mt-5">
+          Last updated: {document.lastUpdated}
+          {document.version !== document.lastUpdated && <> · Version {document.version}</>}
+        </Small>
       </PageHeader>
       {before}
       <Section>

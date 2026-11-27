@@ -49,7 +49,7 @@ import {
   securityReviewStatement,
 } from "@/lib/legal/audit";
 import { DEVNET_TOS_VERSION, tosVersionFor } from "@/lib/tos-version";
-import { moduleDisabledMessage, moduleEnabled } from "@/lib/features";
+import { moduleEnabled } from "@/lib/features";
 import { MAINNET_RAISE_CAP_EUR, maxRaiseCapEur } from "@/lib/raise-cap";
 import { RAISE_LIMIT_NOTE, equityOfferedNote, whatYouAreBuying } from "@/lib/deal-terms-copy";
 import { modulesFact } from "@/lib/module-facts";
@@ -89,8 +89,9 @@ const COMPANY: Operator = {
  *  written confirmation of that day. */
 const BVI: Operator = { ...OPERATORS.mainnet };
 
-const MAINNET_TERMS_VERSION = "2026-11-27";
-const PREVIOUS_MAINNET_TERMS_VERSION = "2026-10-03";
+const MAINNET_TERMS_VERSION = "2026-11-27.2";
+const MAINNET_TERMS_DATE = "2026-11-27";
+const PREVIOUS_MAINNET_TERMS_VERSION = "2026-11-27";
 const MAINNET_PRIVACY_VERSION = "2026-10-03";
 
 const TAX_ID_UNSET = "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set";
@@ -390,7 +391,17 @@ describe("legal documents", () => {
     expect(legalDocumentProblems("Terms", null)).toEqual([
       "Terms: counsel's mainnet text has not been added (lib/legal/mainnet-copy.ts)",
     ]);
-    expect(legalDocumentProblems("Terms", { ...DOC, version: "v1" })).toEqual(["Terms: version must be a yyyy-mm-dd date"]);
+    for (const version of ["2026-11-27", "2026-11-27.2", "2026-11-27.10"]) {
+      expect(legalDocumentProblems("Terms", { ...DOC, version })).toEqual([]);
+    }
+    for (const version of ["v1", "2026-11-27.0", "2026-11-27.1", "2026-11-27.02", "2026-02-30.2"]) {
+      expect(legalDocumentProblems("Terms", { ...DOC, version })).toEqual([
+        "Terms: version must be a yyyy-mm-dd date with an optional revision starting at .2",
+      ]);
+    }
+    expect(legalDocumentProblems("Terms", { ...DOC, lastUpdated: MAINNET_TERMS_VERSION })).toEqual([
+      "Terms: lastUpdated must be a yyyy-mm-dd date",
+    ]);
     expect(
       legalDocumentProblems("Terms", { ...DOC, clauses: [{ title: "1. Scope", blocks: [{ kind: "list", items: [] }] }] }),
     ).toEqual(["Terms: has an empty clause, paragraph or list item"]);
@@ -548,7 +559,7 @@ describe("Terms version per network", () => {
       expect(tosVersionFor(network)).toBe(DEVNET_TOS_VERSION);
     }
     expect(MAINNET_TERMS?.version).toBe(MAINNET_TERMS_VERSION);
-    expect(MAINNET_TERMS?.lastUpdated).toBe(MAINNET_TERMS_VERSION);
+    expect(MAINNET_TERMS?.lastUpdated).toBe(MAINNET_TERMS_DATE);
     expect(tosVersionFor("mainnet")).toBe(MAINNET_TERMS_VERSION);
     // A new version: an acceptance of the previous mainnet Terms no longer counts, so every
     // mainnet wallet accepts again (Terms clause 20).
@@ -633,7 +644,7 @@ describe("the published mainnet Terms and Privacy Policy", () => {
     const clause = (title: string) => {
       const found = MAINNET_TERMS!.clauses.find((c) => c.title === title);
       expect(found, title).toBeDefined();
-      return legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [found!] });
+      return legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_DATE, clauses: [found!] });
     };
     const terms = legalDocumentText(MAINNET_TERMS!);
     const privacy = legalDocumentText(MAINNET_PRIVACY!);
@@ -668,39 +679,31 @@ describe("the published mainnet Terms and Privacy Policy", () => {
     expect(sales).toContain("A confirmed purchase is final");
     // D5: issuer direct transfers from the treasury.
     expect(sales).toContain("An issuer may also transfer units from its treasury directly to wallets it chooses.");
-    // D6: trading through Manci and the other modules stay off; conversion only where the issuer offers it.
-    const scope = clause("2. Scope of the Service");
-    expect(scope).toContain("Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises");
-    expect(scope).not.toMatch(/conversion into company shares, physical delivery/);
-    expect(scope).toContain("The following are not available at present, and the pages that carry them say so:");
-    expect(scope).toContain("Conversion of tokens into company shares. Once the Operator switches it on, it will be available where the issuer offers it");
   });
 
   describe("hold to what the code does on mainnet (review of PR #57)", () => {
-    const PREFIX = "NEXT_PUBLIC_FEATURE_";
-    afterEach(() => {
-      vi.unstubAllEnvs();
-    });
-
-    it("conversion is not presented as offered while its module is off", () => {
-      vi.stubEnv(`${PREFIX}CUSTODY_CONVERSION`, "");
-      expect(moduleEnabled("custodyConversion", "mainnet")).toBe(false);
+    it("describes the live mainnet services and their limits in clauses 2 and 12", () => {
       const scope = MAINNET_TERMS!.clauses.find((c) => c.title === "2. Scope of the Service")!;
-      // The list after "currently offers the following" names primary sales and issuer transfers only.
-      const offeredAt = scope.blocks.findIndex((b) => b.kind === "paragraph" && b.text === "The Service currently offers the following:");
-      const offered = scope.blocks[offeredAt + 1];
-      expect(offered.kind === "list" ? offered.items : []).toHaveLength(2);
-      expect(offered.kind === "list" ? offered.items.join("\n") : "").not.toMatch(/conver/i);
-      const risks = legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!] });
-      expect(risks).toContain("Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it");
+      const list = scope.blocks.find((block) => block.kind === "list");
+      const offered = list?.kind === "list" ? list.items.join("\n") : "";
+      expect(offered).toContain("Where the issuer offers conversion, you can request it for eligible tokens after identity verification");
+      expect(offered).toContain("The escrowed tokens are then burned");
+      expect(offered).toContain("Holders can trade existing tokens peer to peer under the issuance's transfer rules");
+      expect(offered).toContain("Your voting weight is set by the proposal's holder snapshot");
+      expect(offered).toContain("A tie fails, and abstentions do not affect the result");
+      expect(offered).toContain("Where the issuance offers delivery");
+      expect(offered).toContain("Where the issuance provides for distributions");
+      expect(offered).toContain("claim the amount allocated to them for that milestone from funded escrow");
+      expect(scope.blocks).toContainEqual({
+        kind: "paragraph",
+        text: "New vested (Startup) raises and their payout vaults, and new vesting series, are not currently available.",
+      });
+      const risks = MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!;
+      const text = legalDocumentText({ ...MAINNET_TERMS!, clauses: [risks] });
+      expect(text).toContain("DeFi OTC trading does not guarantee a buyer or a price");
+      expect(text).toContain("You acquire the shares only when the legal transfer is registered");
+      expect(text).toContain("It does not automatically execute an issuer action");
       expect(PURCHASE_RISK_WARNING.points[9]).toMatch(/^Converting tokens into company shares, where conversion is available and the issuer offers it, /);
-      // Its page says so (the notice "clause 2" points to).
-      expect(moduleDisabledMessage("custodyConversion", "mainnet")).toBe("Conversion into company shares: not available on Solana mainnet.");
-      // No mainnet text says conversion is available today.
-      for (const text of [legalDocumentText(MAINNET_TERMS!), legalDocumentText(MAINNET_PRIVACY!), MAINNET_TOS_GATE_POINTS!.join("\n"), PURCHASE_RISK_WARNING.points.join("\n")]) {
-        expect(text).not.toMatch(/Conversion into company shares is available only/);
-        expect(text).not.toMatch(/Conversion of tokens into company shares, where the issuer offers it\./);
-      }
     });
 
     it("buying outside the Service means a purchase in a primary sale, never an issuer's direct transfer or a wallet-to-wallet one", () => {
@@ -721,7 +724,7 @@ describe("the published mainnet Terms and Privacy Policy", () => {
         }
       }
       expect(found).toBeGreaterThanOrEqual(10);
-      const sales = legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "7. Primary sales")!] });
+      const sales = legalDocumentText({ version: MAINNET_TERMS_VERSION, lastUpdated: MAINNET_TERMS_DATE, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "7. Primary sales")!] });
       expect(sales).toContain(
         "Units you receive through an issuer's direct transfer (described below) or by a transfer from another wallet (clause 8) are not a purchase in a primary sale.",
       );
@@ -753,7 +756,8 @@ describe("the published mainnet Terms and Privacy Policy", () => {
       vi.resetModules();
       const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
       const text = visibleText(renderToStaticMarkup(createElement(TermsPage)));
-      expect(text).toContain(`Last updated: ${MAINNET_TERMS_VERSION}`);
+      expect(text).toContain(`Last updated: ${MAINNET_TERMS_DATE}`);
+      expect(text).toContain(`Version ${MAINNET_TERMS_VERSION}`);
       expect(text).toContain(MAINNET_TERMS!.lede!);
       expect(text).toContain("Manci is operated by Manci International Ltd., registered office Trinity Chambers");
       for (const clause of MAINNET_TERMS!.clauses) expect(text, clause.title).toContain(clause.title);
@@ -792,13 +796,8 @@ describe("the published mainnet Terms and Privacy Policy", () => {
 });
 
 describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
-  // The published Terms (lib/legal/mainnet-copy.ts): units are bearer
-  // share-class tokens (clause 5); conversion into company shares is not
-  // available yet and, once it is, only where the issuer offers it, after KYC
-  // (clauses 2, 6 and 12); trading through Manci, distributions, delivery,
-  // governance and vesting are switched off (clause 2); the standard limit is
-  // EUR 3,000,000 per issuer over any twelve months (clause 7). Pages shared with devnet must
-  // hold on mainnet too.
+  // Shared pages also run with modules disabled. Exercise the page notices
+  // for those settings separately from the published mainnet service scope.
   const MODULE_VARS = ["SECONDARY_TRADING", "GOVERNANCE", "VESTING", "DISTRIBUTIONS", "CUSTODY_CONVERSION", "CUSTODY_DELIVERY"];
   const modulesOff = () => {
     for (const name of MODULE_VARS) vi.stubEnv(`NEXT_PUBLIC_FEATURE_${name}`, "");

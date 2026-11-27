@@ -6,7 +6,9 @@
 // What is here: the mainnet Terms of Service, Privacy Policy and the
 // acceptance-dialog summary.
 //
-// Terms version 2026-11-27 updates clause 7 with counsel's wording on
+// Terms revision 2026-11-27.2 updates clauses 2 and 12 to describe the
+// mainnet services and their risks as set out in the published guides.
+// Terms version 2026-11-27 updated clause 7 with counsel's wording on
 // higher-value issuances. The standard application and approval limits still
 // apply. The Privacy Policy and purchase risk warning keep their own dates.
 //
@@ -76,7 +78,7 @@ import type { LegalDocument } from "./document";
 
 /** The versioned mainnet Terms accepted by wallets using the Service. */
 export const MAINNET_TERMS: LegalDocument | null = {
-  version: "2026-11-27",
+  version: "2026-11-27.2",
   lastUpdated: "2026-11-27",
   lede:
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
@@ -107,16 +109,14 @@ export const MAINNET_TERMS: LegalDocument | null = {
           items: [
             "Primary sales of share-class tokens, open to the public: no invitation is needed. The Operator approves each sale (clause 7). To buy, you need a wallet linked to the Service as clause 7 describes. Buying, holding and transferring units of an open class need no identity verification (clause 6).",
             "Direct transfers by an issuer of units from its treasury to wallets it chooses (clause 7).",
+            "Conversion into company shares. Where the issuer offers conversion, you can request it for eligible tokens after identity verification (clause 6). Your tokens go into escrow. The parties sign the transfer documents. You become a shareholder when the Serbian Business Registers Agency registers the transfer. The escrowed tokens are then burned.",
+            "DeFi OTC trading. Holders can trade existing tokens peer to peer under the issuance's transfer rules (clause 8). When a buyer takes a funded sell offer, the payment and the escrowed units change hands in one transaction. Two parties can also agree a trade and settle it through escrow once both have deposited. A listing on the resell board only indicates interest in trading.",
+            "Governance. Eligible holders can vote on advisory proposals. Your voting weight is set by the proposal's holder snapshot. A proposal passes only if votes for outweigh votes against. A tie fails, and abstentions do not affect the result.",
+            "Physical delivery and distributions. Where the issuance offers delivery, eligible holders may request it after identity verification (clause 6). Where the issuance provides for distributions, payouts depend on its terms and on the funds deposited.",
+            "Rights Tokens. An authorised administrator can open a Rights Token issuance and publish a milestone. Eligible holders can claim the amount allocated to them for that milestone from funded escrow.",
           ],
         },
-        { kind: "paragraph", text: "The following are not available at present, and the pages that carry them say so:" },
-        {
-          kind: "list",
-          items: [
-            "Conversion of tokens into company shares. Once the Operator switches it on, it will be available where the issuer offers it, and it will require identity verification (clause 6).",
-            "Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances, which are switched off.",
-          ],
-        },
+        { kind: "paragraph", text: "New vested (Startup) raises and their payout vaults, and new vesting series, are not currently available." },
         {
           kind: "paragraph",
           text: "The on-chain programs have been through internal security reviews and automated testing only. No independent external audit has been completed.",
@@ -302,7 +302,15 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it, and only after identity verification. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
+          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid. There is no exchange listing, and DeFi OTC trading does not guarantee a buyer or a price. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment.",
+        },
+        {
+          kind: "paragraph",
+          text: "Where the issuer offers conversion, identity verification and a deposit into escrow are steps towards becoming a shareholder. You acquire the shares only when the legal transfer is registered. A governance vote records an advisory result. It does not automatically execute an issuer action.",
+        },
+        {
+          kind: "paragraph",
+          text: "Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
         },
         {
           kind: "paragraph",

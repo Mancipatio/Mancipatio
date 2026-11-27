@@ -19,9 +19,9 @@ export type LegalClause = { title: string; blocks: LegalBlock[] };
 
 export type LegalDocument = {
   /**
-   * yyyy-mm-dd. For the Terms this is the version every wallet accepts
-   * (TOS_VERSION, lib/tos-version.ts): change it for any edit that needs
-   * re-acceptance.
+   * The first publication on a date uses yyyy-mm-dd. Later revisions that
+   * day append .2, .3, etc. For the Terms, this full identifier is the
+   * version every wallet accepts (TOS_VERSION, lib/tos-version.ts).
    */
   version: string;
   /** yyyy-mm-dd, shown as "Last updated". */
@@ -36,6 +36,12 @@ export function isIsoDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+/** A publication date with an optional same-day revision, sized for /api/tos/status. */
+function isDocumentVersion(value: string): boolean {
+  const match = /^(\d{4}-\d{2}-\d{2})(?:\.(?:[2-9]|[1-9]\d+))?$/.exec(value);
+  return match !== null && value.length <= 40 && isIsoDate(match[1]);
 }
 
 /**
@@ -83,7 +89,9 @@ export function legalDocumentText(doc: LegalDocument): string {
 export function legalDocumentProblems(label: string, doc: LegalDocument | null): string[] {
   if (!doc) return [`${label}: counsel's mainnet text has not been added (lib/legal/mainnet-copy.ts)`];
   const problems: string[] = [];
-  if (!isIsoDate(doc.version)) problems.push(`${label}: version must be a yyyy-mm-dd date`);
+  if (!isDocumentVersion(doc.version)) {
+    problems.push(`${label}: version must be a yyyy-mm-dd date with an optional revision starting at .2`);
+  }
   if (!isIsoDate(doc.lastUpdated)) problems.push(`${label}: lastUpdated must be a yyyy-mm-dd date`);
   if (doc.clauses.length === 0) problems.push(`${label}: has no clauses`);
   const empty = doc.clauses.some(

@@ -135,24 +135,45 @@ describe("magic-link reads (/api/clients/onboarding-view, /onboarding-requiremen
 describe("the wallet-less (email/Google) onboarding path on the server", () => {
   it("accept-tos: an account-owned dossier accepts through its token alone, and no address can be stamped into the record", async () => {
     db.ref!.rows("clients").push(accountOwned());
-    const { status, body } = await post(acceptTos, { client_id: CLIENT_ID, token: TOKEN });
+    const { status, body } = await post(acceptTos, {
+      client_id: CLIENT_ID, token: TOKEN, version: TOS_VERSION, wallet: "22222222222222222222222222222222",
+    });
     expect(status).toBe(200);
     expect(body.data).toEqual({ version: TOS_VERSION });
     expect(db.ref!.rows("clients")[0]).toMatchObject({ tos_version: TOS_VERSION });
     expect(typeof db.ref!.rows("clients")[0].tos_accepted_at).toBe("string");
     expect(db.ref!.rows("tos_acceptances")).toMatchObject([{ client_id: CLIENT_ID, wallet: null, version: TOS_VERSION, source: "onboarding" }]);
     expect(db.ref!.rows("client_notes")).toMatchObject([{ client_id: CLIENT_ID, author: "client", kind: "system" }]);
+  });
 
-    // A wallet in the body is ignored for the acceptance record (a bearer of
-    // the token must not stamp an arbitrary address into the audit trail).
-    db.ref!.rows("tos_acceptances").length = 0;
-    expect((await post(acceptTos, { client_id: CLIENT_ID, token: TOKEN, wallet: "22222222222222222222222222222222" })).status).toBe(200);
-    expect(db.ref!.rows("tos_acceptances")).toMatchObject([{ client_id: CLIENT_ID, wallet: null }]);
+  it("a stale or unversioned form cannot advance a completed dossier; the current version preserves its status", async () => {
+    const previous = { ...accountOwned(), onboarding_status: "completed", tos_accepted_at: "2026-07-17T09:00:00Z", tos_version: "2026-07-17" };
+    db.ref!.rows("clients").push({ ...previous });
+    const request = { client_id: CLIENT_ID, token: TOKEN };
+    for (const version of [previous.tos_version, undefined]) {
+      const { status, body } = await post(acceptTos, { ...request, version });
+      expect(status).toBe(409);
+      expect(body.error).toContain(TOS_VERSION);
+      expect(db.ref!.rows("clients")).toEqual([previous]);
+      expect(db.ref!.rows("tos_acceptances")).toEqual([]);
+      expect(db.ref!.rows("client_notes")).toEqual([]);
+    }
+    expect((await post(acceptTos, { ...request, version: TOS_VERSION })).status).toBe(200);
+    expect(db.ref!.rows("clients")[0]).toMatchObject({ onboarding_status: "completed", tos_version: TOS_VERSION });
+    expect(db.ref!.rows("tos_acceptances")).toMatchObject([{ client_id: CLIENT_ID, wallet: null, version: TOS_VERSION }]);
+    expect(db.ref!.rows("client_notes")).toHaveLength(1);
+  });
+
+  it.each([null, CLIENT_WALLET])("a retry can repair a missing audit record for a dossier with wallet %s", async (wallet) => {
+    db.ref!.rows("clients").push(dossier({ wallet, tos_version: TOS_VERSION, tos_accepted_at: "2026-07-18T09:00:00Z" }));
+    const { status } = await post(acceptTos, { client_id: CLIENT_ID, token: TOKEN, version: TOS_VERSION, wallet });
+    expect(status).toBe(200);
+    expect(db.ref!.rows("tos_acceptances")).toMatchObject([{ client_id: CLIENT_ID, wallet, version: TOS_VERSION }]);
   });
 
   it("accept-tos: an invitation without an account still needs its wallet linked first", async () => {
     db.ref!.rows("clients").push(dossier({ wallet: null, account_id: null, onboarding_status: "invited" }));
-    expect((await post(acceptTos, { client_id: CLIENT_ID, token: TOKEN })).status).toBe(401);
+    expect((await post(acceptTos, { client_id: CLIENT_ID, token: TOKEN, version: TOS_VERSION })).status).toBe(401);
     expect(db.ref!.rows("clients")[0].tos_accepted_at).toBeNull();
     expect(db.ref!.rows("tos_acceptances")).toEqual([]);
   });

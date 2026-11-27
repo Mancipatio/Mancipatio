@@ -635,9 +635,9 @@ export async function linkClientWallet(
 }
 
 /**
- * Record acceptance of the current ToS version for a magic-link client:
+ * Record acceptance of the ToS version shown to a magic-link client:
  * stamps the `clients` row, appends to the `tos_acceptances` log, and drops a
- * system note — all server-side. Never throws.
+ * system note — all server-side.
  *
  * (Wallet-only acceptance without a client row is the SIGNED route
  * /api/tos/accept — see app/api/tos/accept/route.ts.)
@@ -646,30 +646,38 @@ export async function acceptTos(
   clientId: string,
   token: string,
   wallet: string,
-): Promise<boolean> {
-  try {
-    const res = await fetch("/api/clients/accept-tos", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ client_id: clientId, token, wallet: wallet || null }),
-    });
-    const json = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string; code?: string; message?: string }
-      | null;
-    // Maintenance: show the banner, so the failed step explains itself.
-    if (json?.code === MAINTENANCE_CODE) maintenanceRefusal(json.message, detectNetwork());
-    if (!res.ok || !json || json.ok !== true) {
-      console.warn("[clients] acceptTos failed:", json?.error ?? res.status);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.warn("[clients] acceptTos threw:", err);
-    return false;
+  version: string,
+): Promise<void> {
+  const res = await fetch("/api/clients/accept-tos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: clientId, token, wallet: wallet || null, version }),
+  });
+  const json = (await res.json().catch(() => null)) as
+    | { ok?: boolean; error?: string; code?: string; message?: string; data?: { version?: string } }
+    | null;
+  if (json?.code === MAINTENANCE_CODE) throw maintenanceRefusal(json.message, detectNetwork());
+  if (!res.ok || json?.ok !== true) {
+    throw new Error(json?.error ?? "Could not record Terms acceptance. Please try again.");
+  }
+  if (json.data?.version !== version) {
+    throw new Error("Reload this page to review the current Terms of Service.");
   }
 }
 
 // ── Onboarding page gates (pure; unit-tested in tests/onboarding-page.test.ts) ──
+
+/** A completed onboarding step stays complete when a new agreement is published. */
+export function onboardingTermsState(
+  client: Pick<OnboardingView, "tos_version" | "tos_accepted_at" | "onboarding_status"> | null | undefined,
+) {
+  if (!client?.tos_accepted_at) return { tosAccepted: false, termsStepDone: false };
+  const tosAccepted = client.tos_version === TOS_VERSION;
+  const finished = client.onboarding_status === "completed"
+    || client.onboarding_status === "verified"
+    || client.onboarding_status === "rejected";
+  return { tosAccepted, termsStepDone: tosAccepted || finished };
+}
 
 /** What the onboarding page knows when it decides which step to show. */
 export type OnboardingGateInput = {
@@ -685,6 +693,8 @@ export type OnboardingGateInput = {
   sameWallet: boolean;
   /** The dossier has accepted the current Terms. */
   tosAccepted: boolean;
+  /** An earlier Terms step may already be complete on a finished dossier. */
+  termsStepDone?: boolean;
 };
 
 export type OnboardingGates = {
@@ -714,7 +724,7 @@ export type OnboardingGates = {
  * the Terms, link, then upload.
  */
 export function onboardingGates(input: OnboardingGateInput): OnboardingGates {
-  const { accountOwned, walletConnected, alreadyConnected, linked, sameWallet, tosAccepted } = input;
+  const { accountOwned, walletConnected, alreadyConnected, linked, sameWallet, tosAccepted, termsStepDone = tosAccepted } = input;
   if (accountOwned) {
     return {
       showConnect: false,
@@ -723,8 +733,8 @@ export function onboardingGates(input: OnboardingGateInput): OnboardingGates {
       showLink: walletConnected && !linked,
       linkOptional: true,
       showWrongWallet: false,
-      showNext: tosAccepted,
-      uploadsOpen: tosAccepted,
+      showNext: termsStepDone,
+      uploadsOpen: termsStepDone,
     };
   }
   return {

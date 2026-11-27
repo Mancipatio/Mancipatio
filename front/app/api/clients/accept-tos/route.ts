@@ -2,7 +2,7 @@
 // TOKEN-authed (NOT wallet-signed) — part of the onboarding flow.
 // Client half: lib/clients.ts acceptTos().
 //
-// Body: { client_id, token, wallet? }
+// Body: { client_id, token, wallet?, version }
 // Effects (mirrors the pre-P1 client-side acceptTos): stamps the clients row,
 // appends to the tos_acceptances log (source 'onboarding'), system note.
 //
@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     if (typeof body !== "object" || body === null) {
       throw new SiwsError(400, "Invalid request body");
     }
-    const { client_id, token, wallet } = body as Record<string, unknown>;
+    const { client_id, token, wallet, version } = body as Record<string, unknown>;
     const clientId = assertUuid(client_id, "client_id");
     const requestedWallet =
       wallet === undefined || wallet === null || wallet === ""
@@ -44,6 +44,9 @@ export async function POST(request: Request) {
     // Token-authed, not signed: the maintenance refusal (503) happens here.
     // Browsing keeps working; the wallet-level ToS gate is /api/tos/accept.
     await assertWritable(detectNetwork());
+    if (version !== TOS_VERSION) {
+      throw new SiwsError(409, `Reload this page to review and accept the current Terms of Service (v${TOS_VERSION}).`);
+    }
 
     const sb = getSupabaseAdmin();
     const client = await requireClientToken(sb, clientId, token);

@@ -10,8 +10,9 @@
 // that text changes materially. Mainnet shows counsel's Terms
 // (lib/legal/mainnet-copy.ts). Its version identifies the text shown to the
 // wallet, the client cache entry and the acceptance required by the server.
-// The 2026-11-27 primary-sale Terms supersede 2026-10-03 on mainnet.
-// Earlier acceptance rows remain as history.
+// Mainnet's first 2026-11-27 Terms clarified the primary-sale limit. Revision
+// 2026-11-27.2 requires fresh acceptance for the changes to clauses 2 and 12.
+// Both publications share a calendar date and have separate acceptance rows.
 
 import { detectNetwork, type Network } from "@/lib/network";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";

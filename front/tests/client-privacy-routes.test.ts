@@ -1023,7 +1023,7 @@ describe("Terms acceptance (/api/tos/accept)", () => {
     state.tosConflict = true;
     const res = await POST(new Request("https://manci.test/api/clients/accept-tos", {
       method: "POST",
-      body: JSON.stringify({ client_id: CLIENT_ID, token: "secret-token" }),
+      body: JSON.stringify({ client_id: CLIENT_ID, token: "secret-token", version: TOS_VERSION }),
     }));
     expect(res.status).toBe(200);
     expect(state.tables.tos_acceptances.map((r) => [r.id, r.client_id])).toEqual([[1, CLIENT_ID], [2, null]]);

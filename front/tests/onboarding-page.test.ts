@@ -11,12 +11,48 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { onboardingGates, type OnboardingGateInput } from "@/lib/clients";
+import { acceptTos, onboardingGates, onboardingTermsState, TOS_VERSION, type OnboardingGateInput } from "@/lib/clients";
 
 const base: OnboardingGateInput = {
   accountOwned: false, walletConnected: false, alreadyConnected: false, linked: false, sameWallet: false, tosAccepted: false,
 };
 const gates = (overrides: Partial<OnboardingGateInput>) => onboardingGates({ ...base, ...overrides });
+
+describe("the Terms version on the invitation", () => {
+  it("offers revised Terms without reopening a finished dossier, including legacy records without a version", () => {
+    const prior = { tos_accepted_at: "2026-07-01T09:00:00Z", tos_version: "2026-07-01" };
+    expect(onboardingTermsState({ ...prior, onboarding_status: "connected" })).toEqual({ tosAccepted: false, termsStepDone: false });
+    for (const status of ["completed", "verified", "rejected"] as const) {
+      for (const version of [prior.tos_version, null]) {
+        const state = onboardingTermsState({ ...prior, onboarding_status: status, tos_version: version });
+        expect(state).toEqual({ tosAccepted: false, termsStepDone: true });
+        expect(gates({ accountOwned: true, ...state })).toMatchObject({ showTermsAccept: true, uploadsOpen: true, showNext: true });
+      }
+    }
+    expect(onboardingTermsState({ ...prior, onboarding_status: "connected", tos_version: TOS_VERSION }))
+      .toEqual({ tosAccepted: true, termsStepDone: true });
+    expect(onboardingTermsState({ ...prior, onboarding_status: "connected", tos_version: TOS_VERSION, tos_accepted_at: null }))
+      .toEqual({ tosAccepted: false, termsStepDone: false });
+  });
+
+  it("sends the displayed version on both onboarding paths and reports a stale page", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    try {
+      for (const wallet of ["", "wallet"]) {
+        fetch.mockResolvedValueOnce(Response.json({ ok: true, data: { version: TOS_VERSION } }));
+        await acceptTos("dossier", "token", wallet, TOS_VERSION);
+        const [, init] = fetch.mock.lastCall!;
+        expect(JSON.parse(String(init?.body))).toEqual({ client_id: "dossier", token: "token", wallet: wallet || null, version: TOS_VERSION });
+      }
+      fetch.mockResolvedValueOnce(Response.json({ ok: false, error: "Reload this page." }, { status: 409 }));
+      await expect(acceptTos("dossier", "token", "", "older")).rejects.toThrow("Reload this page.");
+      fetch.mockResolvedValueOnce(Response.json({ ok: true, data: { version: "older" } }));
+      await expect(acceptTos("dossier", "token", "", TOS_VERSION)).rejects.toThrow("Reload");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+});
 
 describe("onboardingGates — a dossier owned by a wallet-less account", () => {
   it("no wallet: the Terms first, with their own Accept button, then the documents; no connect step", () => {

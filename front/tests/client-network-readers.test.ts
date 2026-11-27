@@ -33,6 +33,7 @@ import { POST as docUrl } from "@/app/api/clients/doc-url/route";
 import { POST as update } from "@/app/api/clients/update/route";
 import { POST as review } from "@/app/api/clients/review-requirement/route";
 import { POST as acceptTos } from "@/app/api/clients/accept-tos/route";
+import { TOS_VERSION } from "@/lib/tos-version";
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
@@ -58,7 +59,7 @@ describe("existing client routes enforce the active network", () => {
   });
   it("does not let an invitation stamp Terms for an unrelated or unlinked wallet", async () => {
     state.rowNetwork = "devnet";
-    const input = { client_id: "10000000-0000-4000-8000-000000000001", token: "tok", wallet: "22222222222222222222222222222222" };
+    const input = { client_id: "10000000-0000-4000-8000-000000000001", token: "tok", wallet: "22222222222222222222222222222222", version: TOS_VERSION };
     const req = () => new Request("https://manci.test/api/clients/accept-tos", { method: "POST", body: JSON.stringify(input) });
     expect((await acceptTos(req())).status).toBe(401);
     state.linkedWallet = null;
